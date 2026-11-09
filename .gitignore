@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+# private data lives in ComfyUI's user folder, never here
+auth.json
+civitai.json
+characters.json
+storyboards.json
+favorites.json
+loras.json
+cache/
