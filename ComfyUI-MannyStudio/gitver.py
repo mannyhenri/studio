@@ -16,7 +16,7 @@ H = {}
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 PACK = os.path.dirname(os.path.abspath(__file__))
 DEFAULTS = {"repo": os.path.join(os.path.expanduser("~"), "Documents", "code", "studio"),
-            "remote": "https://github.com/mannyhenri/studio.git", "name": "mannyhenri", "email": "manny@gridlight.ai", "branch": "main"}
+            "remote": "https://mannyhenri@github.com/mannyhenri/studio.git", "name": "mannyhenri", "email": "manny@gridlight.ai", "branch": "main"}
 SKIP = {"__pycache__", ".git", ".topaz_tmp"}
 
 
