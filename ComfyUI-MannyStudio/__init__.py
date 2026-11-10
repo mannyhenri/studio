@@ -23,7 +23,7 @@ from . import auth
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-VERSION = "1.6.0"
+VERSION = "1.15.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -302,7 +302,8 @@ def _privatize(api):
     n = 0
     for nid in list(api.keys()):
         node = api[nid]
-        if node.get("class_type") not in ("SaveImage", "SaveVideo", "SaveAnimatedWEBP", "SaveAnimatedPNG", "VHS_VideoCombine"):
+        if node.get("class_type") not in ("SaveImage", "SaveVideo", "SaveAnimatedWEBP", "SaveAnimatedPNG", "VHS_VideoCombine",
+                                          "SaveAudio", "SaveAudioMP3", "SaveAudioOpus", "SaveAudioAdvanced"):
             continue
         key = "filename_prefix"
         orig = node["inputs"].get(key, "Studio")
@@ -332,6 +333,12 @@ async def manny_run(request):
             wf, api = await _build_prompt(app_id, vals)
             if body.get("loras"):
                 _inject_loras(api, body["loras"])
+            if body.get("checkpoint"):
+                _inject_checkpoint(api, body["checkpoint"])
+            if isinstance(body.get("unet"), dict) and body["unet"].get("file"):
+                _inject_unet(api, body["unet"].get("family"), body["unet"]["file"])
+            if body.get("motion_video"):
+                _previs.inject_motion(api, body["motion_video"])
             if private:
                 _privatize(api)
             payload = {
@@ -934,7 +941,7 @@ async def _wait_output(pid, job):
                 h = (await r.json()).get(pid)
             if h:
                 for o in (h.get("outputs") or {}).values():
-                    for f in (o.get("images") or []) + (o.get("gifs") or []) + (o.get("videos") or []):
+                    for f in (o.get("images") or []) + (o.get("gifs") or []) + (o.get("videos") or []) + (o.get("audio") or []):
                         if f.get("type") == "output":
                             return f["filename"], f.get("subfolder", "")
                 st = (h.get("status") or {}).get("status_str")
@@ -985,7 +992,22 @@ async def _finish(job):
     cur = orig
     temps = []
     try:
-        if b.get("upscale"):
+        fps = str(b.get("fps") or "keep")
+        used_topaz = False
+        if (b.get("upscale") or fps in ("48", "60")) and b.get("engine") != "comfy":
+            try:
+                if await asyncio.to_thread(_topaz.video_ready):
+                    tdir = os.path.join(_root(private), ".topaz_work")
+                    cur = await _topaz.run_video(job, cur, (b.get("size") or "1080") if b.get("upscale") else None, fps, tdir, "finish " + job["id"])
+                    temps.append(cur)
+                    used_topaz = True
+            except Exception as e:
+                if job.get("cancel"):
+                    raise
+                job["topaz_error"] = str(e)
+                job["stage"] = "Topaz failed, using the ComfyUI upscaler"
+                cur = orig
+        if b.get("upscale") and not used_topaz:
             job["stage"] = "Upscaling to 1080p"
             app = _app_by_name("upscale video")
             vals = {}
@@ -996,8 +1018,7 @@ async def _finish(job):
             fn, sub = await _wait_output(pid, job)
             cur = await asyncio.to_thread(_find_out, fn, sub, private)
             temps.append(cur)
-        fps = str(b.get("fps") or "keep")
-        if fps in ("48", "60"):
+        if fps in ("48", "60") and not used_topaz:
             job["stage"] = f"Smoothing to {fps} fps"
             app = _app_by_name("smooth motion")
             vals = {}
@@ -1075,7 +1096,7 @@ async def manny_finish_status(request):
         return web.json_response({"status": "lost", "stage": "Lost (ComfyUI restarted)"})
     if job["private"]:
         _need_private(request)
-    return web.json_response({k: job.get(k) for k in ("id", "status", "stage", "error", "result", "pids")})
+    return web.json_response({k: job.get(k) for k in ("id", "status", "stage", "error", "result", "pids", "topaz_error")})
 
 
 @routes.post("/manny/api/finish/{jid}/stop")
@@ -1715,6 +1736,7 @@ def _civ_item(m, mature):
         imgs = [i for i in (v.get("images") or []) if mature or (i.get("nsfwLevel") or 1) <= SAFE_LEVEL]
         files = [f for f in (v.get("files") or []) if str(f.get("name", "")).lower().endswith(".safetensors")]
         vers.append({"id": v.get("id"), "name": v.get("name"), "base": v.get("baseModel"), "trained": v.get("trainedWords") or [],
+                     "date": (v.get("publishedAt") or v.get("createdAt") or "")[:10],
                      "files": [{"name": f.get("name"), "sizeKB": f.get("sizeKB"), "primary": bool(f.get("primary")),
                                 "sha256": ((f.get("hashes") or {}).get("SHA256") or "").lower()} for f in files],
                      "images": [{"url": _civ_img(i.get("url")), "type": i.get("type") or "image", "w": i.get("width"), "h": i.get("height")} for i in imgs[:8]]})
@@ -1728,13 +1750,18 @@ async def _civ_get(path, params):
     key = _civ_key()
     if not key:
         raise web.HTTPBadRequest(text="Add your Civitai key first")
-    async with ClientSession(headers={"Authorization": f"Bearer {key}", "User-Agent": "Studio/1.0"}) as s:
-        async with s.get(CIVITAI + path, params=params, timeout=30) as r:
-            if r.status == 401:
-                raise web.HTTPBadRequest(text="Civitai didn't accept the key")
-            if r.status != 200:
-                raise web.HTTPBadRequest(text=f"Civitai answered {r.status}")
-            return await r.json()
+    try:
+        async with ClientSession(headers={"Authorization": f"Bearer {key}", "User-Agent": "Studio/1.0"}) as s:
+            async with s.get(CIVITAI + path, params=params, timeout=30) as r:
+                if r.status == 401:
+                    raise web.HTTPBadRequest(text="Civitai didn't accept the key")
+                if r.status != 200:
+                    raise web.HTTPBadRequest(text=f"Civitai answered {r.status}. Try again in a minute.")
+                return await r.json()
+    except web.HTTPException:
+        raise
+    except Exception as e:
+        raise web.HTTPBadRequest(text=f"Couldn't reach Civitai ({type(e).__name__}). Check the PC's internet connection.")
 
 
 @routes.get("/manny/api/civitai/status")
@@ -1758,17 +1785,22 @@ async def civ_key(request):
 async def civ_search(request):
     q = request.query
     mature = auth.unlocked(request) and _flag(q.get("private"))
-    params = {"types": "LORA", "limit": "24", "sort": q.get("sort") or "Most Downloaded", "nsfw": "true" if mature else "false"}
+    ctype = q.get("type") or "LORA"
+    if ctype not in CIV_TYPES:
+        ctype = "LORA"
+    params = {"types": ctype, "limit": "24", "sort": q.get("sort") or "Most Downloaded", "nsfw": "true" if mature else "false"}
     if q.get("q"):
         params["query"] = q["q"][:100]
-    if q.get("base"):
-        params["baseModels"] = q["base"]
+    plist = list(params.items())
+    for bm in [x for x in (q.get("base") or "").split("|") if x][:12]:
+        plist.append(("baseModels", bm))
+    params = plist
     if q.get("cursor"):
-        params["cursor"] = q["cursor"]
-    if q.get("period"):
-        params["period"] = q["period"]
+        params.append(("cursor", q["cursor"]))
+    if q.get("period") in ("Day", "Week", "Month", "Year"):
+        params.append(("period", q["period"]))
     data = await _civ_get("/models", params)
-    items = [_civ_item(m, mature) for m in data.get("items", []) if mature or not m.get("nsfw")]
+    items = [dict(_civ_item(m, mature), type=m.get("type")) for m in data.get("items", []) if mature or not m.get("nsfw")]
     return web.json_response({"items": items, "next": (data.get("metadata") or {}).get("nextCursor")})
 
 
@@ -1820,8 +1852,13 @@ async def _civ_download(job, b, private):
     if not f:
         raise RuntimeError("This LoRA has no .safetensors file (other formats are refused for safety)")
     name = "".join(ch for ch in f["name"] if ch.isalnum() or ch in " .-_()").strip()
+    ctype = (info.get("model") or {}).get("type") or b.get("type") or "LORA"
+    folder = _civ_folder(ctype, info.get("baseModel"))
     rel = os.path.join(_base_folder(info.get("baseModel")), name)
-    root = folder_paths.get_folder_paths("loras")[0]
+    roots = _folder_roots(folder)
+    if not roots:
+        raise RuntimeError(f"ComfyUI has no {folder} folder")
+    root = roots[0]
     dest = os.path.join(root, rel)
     if os.path.isfile(dest):
         job["stage"] = "Already installed"
@@ -1854,16 +1891,41 @@ async def _civ_download(job, b, private):
     imgs = info.get("images") or []
     safe = [i for i in imgs if (i.get("nsfwLevel") or 1) <= SAFE_LEVEL]
     meta = _lora_meta()
-    meta[rel.replace("\\", "/")] = {"model": info.get("modelId"), "version": vid, "name": (info.get("model") or {}).get("name") or name,
+    meta[_meta_key(folder, rel)] = {"folder": folder, "type": ctype, **{"model": info.get("modelId"), "version": vid, "name": (info.get("model") or {}).get("name") or name,
                                     "versionName": info.get("name"), "base": info.get("baseModel"), "trained": info.get("trainedWords") or [],
                                     "preview": _civ_img((imgs[0] if private and imgs else (safe[0] if safe else {})).get("url", "")),
-                                    "private": private, "at": time.time()}
+                                    "private": private, "at": time.time()}}
     _save_lora_meta(meta)
-    try:
-        folder_paths.filename_list_cache.pop("loras", None)   # let ComfyUI see the new file without a restart
-    except Exception:
-        pass
-    return {"file": rel.replace("\\", "/")}
+    _forget_list(folder)   # let ComfyUI see the new file without a restart
+    return {"file": rel.replace("\\", "/"), "folder": folder, "type": ctype}
+
+
+@routes.get("/manny/api/civitai/updates")
+async def civ_updates(request):
+    """For every model downloaded through Studio: is there a newer version on Civitai?"""
+    private = auth.unlocked(request) and _flag(request.query.get("private"))
+    meta = _lora_meta()
+    by_model = {}
+    for key, m in meta.items():
+        if m.get("model") and (private or not m.get("private")):
+            by_model.setdefault(m["model"], []).append((key, m))
+    out = []
+    for mid, rows in list(by_model.items())[:60]:
+        try:
+            info = await _civ_get(f"/models/{mid}", {})
+        except Exception:
+            continue
+        vers = info.get("modelVersions") or []
+        if not vers:
+            continue
+        latest = vers[0]
+        have = {r[1].get("version") for r in rows}
+        if latest.get("id") not in have:
+            k, m = rows[0]
+            out.append({"key": k, "model": mid, "name": m.get("name"), "installed": m.get("versionName"), "type": info.get("type"),
+                        "latest": {"id": latest.get("id"), "name": latest.get("name"), "base": latest.get("baseModel"),
+                                   "date": (latest.get("publishedAt") or latest.get("createdAt") or "")[:10]}})
+    return web.json_response(out)
 
 
 @routes.post("/manny/api/civitai/download")
@@ -1921,6 +1983,296 @@ def _inject_loras(api, loras):
                 if isinstance(v, list) and len(v) == 2 and str(v[0]) == nid and v[1] == 0:
                     n["inputs"][kk] = prev
     return api
+
+
+# ---------------------------------------------------------------- every Civitai model type, and managing model files
+CIV_TYPES = {   # Civitai type -> ComfyUI models folder
+    "LORA": "loras", "LoCon": "loras", "DoRA": "loras", "Checkpoint": "checkpoints", "TextualInversion": "embeddings",
+    "VAE": "vae", "Controlnet": "controlnet", "Upscaler": "upscale_models", "Hypernetwork": "hypernetworks", "MotionModule": "animatediff_models",
+}
+SD_FAMILY = ("sd 1", "sd1", "sdxl", "pony", "illustrious", "noobai")
+MODEL_FOLDERS = ["checkpoints", "diffusion_models", "loras", "text_encoders", "vae", "upscale_models", "latent_upscale_models",
+                 "embeddings", "controlnet", "clip_vision", "audio_encoders", "model_patches", "hypernetworks", "animatediff_models"]
+
+
+def _civ_folder(ctype, base):
+    f = CIV_TYPES.get(ctype, "loras")
+    if f == "checkpoints" and base and not any(k in base.lower() for k in SD_FAMILY):
+        f = "diffusion_models"   # FLUX, Qwen, Wan, Z-Image... checkpoints are usually the model alone
+    return f
+
+
+def _meta_key(folder, rel):
+    rel = rel.replace("\\", "/")
+    return rel if folder == "loras" else f"{folder}:{rel}"
+
+
+def _folder_roots(folder):
+    try:
+        return [r for r in folder_paths.get_folder_paths(folder) if r]
+    except Exception:
+        return []
+
+
+def _forget_list(folder):
+    try:
+        folder_paths.filename_list_cache.pop(folder, None)
+    except Exception:
+        pass
+
+
+_apps_text = {"at": 0, "text": ""}
+
+
+def _apps_blob():
+    if time.time() - _apps_text["at"] > 60:
+        parts = []
+        for rel in _list_apps():
+            try:
+                with open(_safe_app_path(rel), encoding="utf-8") as f:
+                    parts.append((os.path.basename(rel)[:-9], f.read()))
+            except Exception:
+                pass
+        _apps_text.update(at=time.time(), text=parts)
+    return _apps_text["text"]
+
+
+def _used_by(name):
+    base = os.path.basename(name.replace("\\", "/"))
+    return [n.replace("Manny Studio - ", "").replace("Studio - ", "") for n, t in _apps_blob() if base in t]
+
+
+def _model_file(folder, name):
+    if folder not in MODEL_FOLDERS:
+        raise web.HTTPBadRequest(text="bad folder")
+    for root in _folder_roots(folder):
+        r = os.path.realpath(root)
+        full = os.path.realpath(os.path.join(r, name))
+        if full.startswith(r + os.sep) and os.path.isfile(full):
+            return r, full
+    raise web.HTTPNotFound(text="model not found")
+
+
+def _trash_dir(root, folder):
+    d = os.path.join(os.path.dirname(os.path.realpath(root)), "_studio_removed", folder)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+@routes.get("/manny/api/models")
+async def models_list(request):
+    """Every model file Studio can see, with size, Civitai info and the apps that use it."""
+    want = request.query.get("folder")
+    private = auth.unlocked(request) and _flag(request.query.get("private"))
+    meta = _lora_meta()
+
+    def scan():
+        out = []
+        for folder in ([want] if want else MODEL_FOLDERS):
+            if folder not in MODEL_FOLDERS:
+                continue
+            seen = set()
+            for root in _folder_roots(folder):
+                if not os.path.isdir(root):
+                    continue
+                for dp, dirs, files in os.walk(root):
+                    dirs[:] = [d for d in dirs if not d.startswith((".", "_studio_removed"))]
+                    for fn in files:
+                        if not fn.lower().endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft")):
+                            continue
+                        full = os.path.join(dp, fn)
+                        rel = os.path.relpath(full, root).replace("\\", "/")
+                        if rel in seen:
+                            continue
+                        seen.add(rel)
+                        m = meta.get(_meta_key(folder, rel)) or {}
+                        if m.get("private") and not private:
+                            continue
+                        try:
+                            st = os.stat(full)
+                        except OSError:
+                            continue
+                        out.append({"folder": folder, "name": rel, "size": st.st_size, "mtime": st.st_mtime, "used_by": _used_by(rel),
+                                    "title": m.get("name") or "", "base": m.get("base") or "", "trained": m.get("trained") or [],
+                                    "preview": m.get("preview") or "", "civitai": m.get("model"), "private": bool(m.get("private"))})
+        return out
+    items = await asyncio.to_thread(scan)
+    try:
+        du = shutil.disk_usage(_folder_roots("checkpoints")[0])
+        disk = {"free": du.free, "total": du.total}
+    except Exception:
+        disk = None
+    return web.json_response({"items": items, "disk": disk})
+
+
+@routes.post("/manny/api/models/remove")
+async def models_remove(request):
+    """Moves a model to the Studio trash (models/_studio_removed). Nothing is deleted."""
+    b = await request.json()
+    root, full = _model_file(b.get("folder"), b.get("name", ""))
+    dest = os.path.join(_trash_dir(root, b["folder"]), b["name"].replace("/", os.sep))
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if os.path.exists(dest):
+        base, ext = os.path.splitext(dest)
+        dest = f"{base}_{int(time.time())}{ext}"
+    await asyncio.to_thread(shutil.move, full, dest)
+    _forget_list(b["folder"])
+    return web.json_response({"ok": True})
+
+
+def _trash_items():
+    out = []
+    for folder in MODEL_FOLDERS:
+        for root in _folder_roots(folder):
+            d = os.path.join(os.path.dirname(os.path.realpath(root)), "_studio_removed", folder)
+            if not os.path.isdir(d):
+                continue
+            for dp, _dirs, files in os.walk(d):
+                for fn in files:
+                    full = os.path.join(dp, fn)
+                    out.append({"folder": folder, "name": os.path.relpath(full, d).replace("\\", "/"), "size": os.path.getsize(full),
+                                "_full": full, "_root": root})
+    return out
+
+
+@routes.get("/manny/api/models/removed")
+async def models_removed(request):
+    items = await asyncio.to_thread(_trash_items)
+    return web.json_response([{k: v for k, v in i.items() if not k.startswith("_")} for i in items])
+
+
+@routes.post("/manny/api/models/restore")
+async def models_restore(request):
+    b = await request.json()
+    it = next((i for i in _trash_items() if i["folder"] == b.get("folder") and i["name"] == b.get("name")), None)
+    if not it:
+        raise web.HTTPNotFound()
+    dest = os.path.join(it["_root"], it["name"].replace("/", os.sep))
+    if os.path.exists(dest):
+        raise web.HTTPConflict(text="A file with that name is back already")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    await asyncio.to_thread(shutil.move, it["_full"], dest)
+    _forget_list(it["folder"])
+    return web.json_response({"ok": True})
+
+
+@routes.post("/manny/api/models/purge")
+async def models_purge(request):
+    """Deletes trashed models for good. Only from this PC or an unlocked browser."""
+    if not (auth.is_local(request) or auth.unlocked(request)):
+        raise web.HTTPForbidden(text="Deleting for good works on the PC itself, or with Incognito unlocked")
+    b = await request.json()
+    items = _trash_items()
+    if not b.get("all"):
+        items = [i for i in items if i["folder"] == b.get("folder") and i["name"] == b.get("name")]
+    freed = 0
+    for i in items:
+        freed += i["size"]
+        await asyncio.to_thread(os.remove, i["_full"])
+    return web.json_response({"deleted": len(items), "freed": freed})
+
+
+# which loader file each Studio model starts from, so a downloaded finetune ("style") of the same family
+# can take its place. Only the branch of the chosen model runs, so replacing all matches is safe.
+UNET_FAMILY = {"moss": r"^moss_image_sft", "qwen": r"^qwen_image_2\.1", "krea": r"krea2", "flux3": r"^flux3-image-klein",
+               "zimage": r"^z_image_turbo", "anima": r"^anima-base", "h3": r"^minimax_h3_ref2va"}
+
+
+def _inject_unet(api, family, name):
+    """Uses a finetune (a Civitai checkpoint, MOSS-heal, NitroFusion2…) in place of the family's stock model."""
+    import re as _re
+    pat = UNET_FAMILY.get(family)
+    if not pat or name not in set(folder_paths.get_filename_list("diffusion_models") or []):
+        return api
+    hit = False
+    for n in api.values():
+        if n.get("class_type") in ("UNETLoader", "UnetLoaderGGUF"):
+            cur = str(n["inputs"].get("unet_name", ""))
+            if _re.search(pat, os.path.basename(cur.replace("\\", "/")), _re.I):
+                n["inputs"]["unet_name"] = name
+                hit = True
+    if hit:
+        title = "".join(ch for ch in os.path.splitext(os.path.basename(name.replace("\\", "/")))[0] if ch.isalnum() or ch in " -_.")[:60]
+        for n in api.values():
+            if n.get("class_type") == "SaveImage" and isinstance(n["inputs"].get("filename_prefix"), str):
+                n["inputs"]["filename_prefix"] = "Images/" + title
+    return api
+
+
+def _inject_checkpoint(api, name):
+    """Uses one of your own SD/SDXL checkpoints in place of the Image app's SDXL model."""
+    have = set(folder_paths.get_filename_list("checkpoints") or [])
+    if name not in have:
+        return api
+    hit = False
+    for n in api.values():
+        if n.get("class_type") == "CheckpointLoaderSimple":
+            n["inputs"]["ckpt_name"] = name
+            hit = True
+    if hit:
+        title = "".join(ch for ch in os.path.splitext(os.path.basename(name.replace("\\", "/")))[0] if ch.isalnum() or ch in " -_.")[:60]
+        for n in api.values():
+            if n.get("class_type") == "SaveImage":
+                n["inputs"]["filename_prefix"] = "Images/" + title
+    return api
+
+
+# ---------------------------------------------------------------- resource monitor: CPU, RAM, GPU load and VRAM
+_gpu = {"util": None, "engine": None, "last_ask": 0, "running": False}
+
+
+def _gpu_sampler():
+    """Windows performance counters for GPU load (works for Intel Arc, NVIDIA and AMD). Runs only while someone looks."""
+    ps = ("$s=(Get-Counter '\\GPU Engine(*)\\Utilization Percentage' -ErrorAction SilentlyContinue).CounterSamples;"
+          "$g=@{};foreach($x in $s){if($x.InstanceName -match 'engtype_(\\w+)'){$k=$matches[1];$g[$k]=$g[$k]+$x.CookedValue}};"
+          "($g.GetEnumerator()|Sort-Object Value -Descending|Select-Object -First 1|%{\"$($_.Key) $([math]::Round($_.Value,1))\"})")
+    flags = getattr(subprocess_mod, "CREATE_NO_WINDOW", 0)
+    while time.time() - _gpu["last_ask"] < 30:
+        try:
+            r = subprocess_mod.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=10, creationflags=flags)
+            parts = (r.stdout or "").strip().split()
+            if len(parts) == 2:
+                _gpu["engine"], _gpu["util"] = parts[0], min(100.0, float(parts[1]))
+        except Exception:
+            _gpu["util"] = None
+        time.sleep(1.5)
+    _gpu["running"] = False
+
+
+import subprocess as subprocess_mod  # noqa: E402
+
+
+@routes.get("/manny/api/sysmon")
+async def manny_sysmon(request):
+    out = {}
+    try:
+        import psutil
+        out["cpu"] = psutil.cpu_percent(interval=None)
+        vm = psutil.virtual_memory()
+        out["ram"] = {"used": vm.total - vm.available, "total": vm.total}
+    except Exception:
+        pass
+    try:
+        import comfy.model_management as mm
+        dev = mm.get_torch_device()
+        total = mm.get_total_memory(dev)
+        free = mm.get_free_memory(dev)
+        out["vram"] = {"used": max(0, total - free), "total": total, "device": str(dev)}
+    except Exception:
+        pass
+    if os.name == "nt":
+        _gpu["last_ask"] = time.time()
+        if not _gpu["running"]:
+            _gpu["running"] = True
+            threading.Thread(target=_gpu_sampler, name="studio-gpu", daemon=True).start()
+        out["gpu"] = _gpu["util"]
+        out["gpu_engine"] = _gpu["engine"]
+    try:
+        out["job"] = _guard.job_status()
+        out["awake"] = _guard.STATE["awake"]
+    except Exception:
+        pass
+    return web.json_response(out)
 
 
 # ---------------------------------------------------------------- incognito housekeeping
@@ -2039,3 +2391,28 @@ threading.Thread(target=_housekeeping, name="studio-incognito", daemon=True).sta
 
 
 print(f"[Studio] {VERSION} ready at /manny")
+
+
+# ---------------------------------------------------------------- 3D: sets, scenes and Blender renders
+from . import previs as _previs  # noqa: E402
+_previs.setup(globals())
+
+# ---------------------------------------------------------------- Topaz upscalers (Gigapixel, Topaz Video)
+from . import topaz as _topaz  # noqa: E402
+_topaz.setup(globals())
+
+# ---------------------------------------------------------------- render guard (keep awake, free memory, stall watch)
+from . import guard as _guard  # noqa: E402
+_guard.setup(globals())
+
+# ---------------------------------------------------------------- Music (ACE-Step) and Voices (Chatterbox)
+from . import sound as _sound  # noqa: E402
+_sound.setup(globals())
+
+# ---------------------------------------------------------------- render later (scheduled queue items)
+from . import schedule as _schedule  # noqa: E402
+_schedule.setup(globals())
+
+# ---------------------------------------------------------------- Projects: idea -> script -> film
+from . import projects as _projects  # noqa: E402
+_projects.setup(globals())

@@ -11,7 +11,7 @@
 <title>Studio</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/manny/static/style.css?v=170">
+<link rel="stylesheet" href="/manny/static/style.css?v=206">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff6b3d'/%3E%3Cpath d='M12 8.5v15l12-7.5z' fill='%23111'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -29,14 +29,18 @@
     <button class="incog-btn side-g" title=""><svg viewBox="0 0 32 20" width="22" height="14"><path d="M2 6h28M6.5 6c-1 0-1.6.7-1.5 1.7l.6 5.2C5.8 15 7.4 16.5 9.5 16.5h1.6c2 0 3.6-1.4 3.9-3.4l.5-3.5c.1-.9.8-1.6 1.5-1.6s1.4.7 1.5 1.6l.5 3.5c.3 2 1.9 3.4 3.9 3.4h1.6c2.1 0 3.7-1.5 3.9-3.6l.6-5.2c.1-1-.5-1.7-1.5-1.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
     <nav id="nav">
       <a href="#/home" data-page="home"><i>⌂</i>Home</a>
+      <a href="#/projects" data-page="projects"><i>◧</i>Projects</a>
       <a href="#/create" data-page="create"><i>✦</i>Create</a>
       <a href="#/gallery" data-page="gallery"><i>▦</i>Gallery</a>
       <a href="#/storyboard" data-page="storyboard"><i>▤</i>Storyboard</a>
       <a href="#/characters" data-page="characters"><i>☺</i>Characters</a>
+      <a href="#/3d" data-page="3d"><i>◰</i>3D</a>
       <a href="#/reel" data-page="reel"><i>♫</i>Reel</a>
-      <a href="#/loras" data-page="loras"><i>◈</i>LoRAs</a>
+      <a href="#/sound" data-page="sound"><i>♪</i>Music &amp; voices</a>
+      <a href="#/loras" data-page="loras"><i>◈</i>Models</a>
       <div class="nav-sep"></div>
       <a href="/" target="_blank" class="ext"><i>⎔</i>Node graph <small>↗</small></a>
+      <a href="#/settings" data-page="settings"><i>⚙</i>Settings</a>
       <a href="/manny/password" id="nav-pw" class="hidden"><i>🔒</i>Password</a>
 
     </nav>
@@ -44,6 +48,12 @@
       <div class="q-head"><span class="dot" id="q-dot"></span><span id="q-title">Idle</span><span class="q-count" id="q-count"></span></div>
       <div class="q-sub" id="q-sub">Nothing rendering</div>
       <div class="bar"><div id="q-bar"></div></div>
+    </div>
+    <div id="mon" class="mon" title="Updates every 3 seconds while Studio is open">
+      <div class="mrow2"><span>CPU</span><div class="mbar"><i id="m-cpu"></i></div><b id="t-cpu">–</b></div>
+      <div class="mrow2"><span>GPU</span><div class="mbar"><i id="m-gpu"></i></div><b id="t-gpu">–</b></div>
+      <div class="mrow2"><span>VRAM</span><div class="mbar"><i id="m-vram"></i></div><b id="t-vram">–</b></div>
+      <div class="mrow2"><span>RAM</span><div class="mbar"><i id="m-ram"></i></div><b id="t-ram">–</b></div>
     </div>
     <div id="sys" class="sys">ComfyUI · <span id="sys-mem">…</span></div>
   </aside>
@@ -67,6 +77,6 @@
 </div>
 <div id="modal" class="modal hidden"></div>
 <div id="toast"></div>
-<script src="/manny/static/app.js?v=170"></script>
+<script src="/manny/static/app.js?v=206"></script>
 </body>
 </html>

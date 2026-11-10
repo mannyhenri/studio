@@ -60,6 +60,28 @@ async function upload(file) {
   return d.subfolder ? `${d.subfolder}/${d.name}` : d.name;
 }
 
+/* copy text: the Clipboard API only works on https or this PC (127.0.0.1); over the LAN (http://192.168…) it
+   doesn't exist, so fall back to the old select-and-copy trick, and as a last resort show the text selected */
+async function copyText(text, what = "Copied") {
+  let ok = false;
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); ok = true; } } catch { }
+  if (!ok) {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
+    document.body.append(ta); ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    ta.remove();
+  }
+  if (ok) { toast(what); return true; }
+  // its own layer, so an open viewer underneath stays as it is
+  const m = h(`<div class="modal copylayer"></div>`); document.body.append(m);
+  const d = h(`<div class="dialog"><div class="row" style="justify-content:space-between"><h2>Copy</h2><button class="icon" data-x>✕</button></div>
+    <p class="hint" style="margin:0">Your browser blocked copying. The text is selected: press Ctrl+C (or long-press › Copy on a phone).</p><textarea rows="8" readonly></textarea></div>`);
+  m.append(d); const t = $("textarea", d); t.value = text; t.focus(); t.select();
+  const close = () => m.remove();
+  $("[data-x]", d).onclick = close; m.onclick = e => { if (e.target === m) close(); };
+  return false;
+}
 function toast(msg, err = false) {
   const t = h(`<div class="t ${err ? "err" : ""}">${esc(msg)}</div>`);
   $("#toast").append(t); setTimeout(() => t.remove(), err ? 7000 : 3200);
@@ -115,7 +137,7 @@ function layout(app) {
 }
 
 /* ------------------------------------------------------------ router */
-const pages = { home: pageHome, create: pageCreate, gallery: pageGallery, characters: pageCharacters, storyboard: pageStoryboard, loras: pageLoras, reel: pageReel };
+const pages = { home: pageHome, create: pageCreate, gallery: pageGallery, characters: pageCharacters, storyboard: pageStoryboard, loras: pageLoras, reel: pageReel, sound: pageSound, projects: pageProjects, "3d": page3D, settings: pageSettings };
 function route() {
   const [, page = "home", arg] = location.hash.split("/");
   $$("#nav a, #bnav a").forEach(a => a.classList.toggle("active", a.dataset.page === page));
@@ -235,15 +257,51 @@ function renderForm(form, app) {
 
   // model
   if (L.model) {
-    const ms = h(`<div class="fsec"><label class="lbl">${esc(L.model.label)}</label><div class="models"></div></div>`);
+    const uin = uncInput(app), cov = uncCovers(uin, v[L.model.key]);
+    const uncOn = uin && v[uin.key];
+    const ms = h(`<div class="fsec"><div class="lblrow"><label class="lbl">${esc(L.model.label)}</label>${uin ? `<label class="uncsw ${uncOn ? "on" : ""} ${cov ? "" : "na"}" title="${esc(uin.label)}"><input type="checkbox" ${uncOn ? "checked" : ""}><span>🔓 Uncensored</span></label>` : ""}</div>
+      ${uin && uncOn && !cov ? `<p class="hint unchint">Uncensored works with ${esc((/\(([^)]*)\)/.exec(uin.label) || [, "some models"])[1])}${app.kind === "image" ? " (Anima always is)" : ""}. Pick one of those.</p>` : ""}
+      ${uin && uncOn && cov ? `<p class="hint unchint">On: no content filter, and results are saved privately (Incognito).</p>` : ""}<div class="models"></div></div>`);
     const box = $(".models", ms);
+    if (uin) { const sw = $(".uncsw input", ms); sw.onchange = () => { set(uin.key, sw.checked); renderForm(form, app); }; }
     L.model.options.forEach(o => {
       const [title, sub] = splitOption(o);
-      const el = h(`<div class="model ${v[L.model.key] === o ? "on" : ""}"><div class="radio"></div><div><b>${esc(title)}</b>${sub ? `<span>${esc(sub)}</span>` : ""}</div></div>`);
-      el.onclick = () => { set(L.model.key, o); if ((S.loras[mkey(app)] || []).length) return renderForm(form, app); $$(".model", box).forEach(x => x.classList.remove("on")); el.classList.add("on"); };
+      const slow = SLOW_HERE.find(([re]) => re.test(o));
+      const uc = uin ? uncCovers(uin, o) : false;
+      const el = h(`<div class="model ${v[L.model.key] === o ? "on" : ""}"><div class="radio"></div><div><b>${esc(title)}${uc ? ` <i class="unctag" title="${uc === "always" ? "No content filter" : "Can be uncensored with the 🔓 switch"}">🔓</i>` : ""}</b>${sub ? `<span>${esc(sub)}</span>` : ""}${slow ? `<span class="slowtag" title="${esc(slow[2])}">${esc(slow[1])}</span>` : ""}</div></div>`);
+      el.onclick = () => { set(L.model.key, o); if (S.ckpt && S.ckpt[mkey(app)]) { delete S.ckpt[mkey(app)]; store.set("ckpt", S.ckpt); } renderForm(form, app); };
       box.append(el);
+      // styles: finetunes of this model you downloaded (Civitai checkpoints, MOSS-heal, NitroFusion2…)
+      if (v[L.model.key] === o && !isTool(app)) {
+        const fam = modelFamily(o);
+        if (fam && fam !== "sdxl" && !(fam === "h3" && !/reference/i.test(o))) loadVariants().then(list => {
+          const mine = list.filter(x => x.family === fam); if (!mine.length) return;
+          const cur = ((S.variant[mkey(app)] || {})[fam]) || "";
+          const row = h(`<div class="styles"><label class="lbl">Style</label><div class="chips"></div></div>`);
+          [{ file: "", title: "Original" }, ...mine].forEach(x => {
+            const c = h(`<div class="chip ${cur === x.file ? "on" : ""}" title="${esc(x.file || "The model as Studio ships it")}">${esc(x.title.length > 34 ? x.title.slice(0, 33) + "…" : x.title)}</div>`);
+            c.onclick = e => { e.stopPropagation(); const m = S.variant[mkey(app)] || (S.variant[mkey(app)] = {}); if (x.file) m[fam] = x.file; else delete m[fam]; store.set("variant", S.variant); $$(".chip", row).forEach(y => y.classList.toggle("on", y === c)); };
+            $(".chips", row).append(c);
+          });
+          el.after(row);
+        });
+      }
     });
     if (app.kind === "image" && !isTool(app)) {
+      const sdxlOpt = L.model.options.find(o => /anime desire|illustrious/i.test(o));
+      if (sdxlOpt) loadCkpts().then(list => {
+        if (!list.length) return;
+        const cur = (S.ckpt || {})[mkey(app)];
+        const g = h(`<div class="ckg"><label class="lbl">Your checkpoints</label></div>`);
+        list.forEach(c => {
+          const on = cur === c.name && v[L.model.key] === sdxlOpt;
+          const el = h(`<div class="model ${on ? "on" : ""}"><div class="radio"></div><div><b>${esc(c.title || c.name.split("/").pop().replace(/\.[^.]+$/, ""))}</b><span>${esc(c.base || "SD")} · runs like Anime Desire (SDXL pipeline)</span></div></div>`);
+          el.onclick = () => { S.ckpt = S.ckpt || {}; S.ckpt[mkey(app)] = c.name; store.set("ckpt", S.ckpt); set(L.model.key, sdxlOpt); renderForm(form, app); };
+          g.append(el);
+        });
+        box.append(g);
+        if (cur && v[L.model.key] === sdxlOpt) $$(".model", box).forEach(x => { if (!x.closest(".ckg")) x.classList.remove("on"); });
+      });
       const cmp = h(`<button class="ghost compare-btn">⊞ Compare all ${L.model.options.length} models with this prompt</button>`);
       cmp.onclick = () => compareModels(app);
       ms.append(cmp);
@@ -255,7 +313,7 @@ function renderForm(form, app) {
   // settings
   if (L.settings.length) {
     const ss = h(`<div class="fsec set"></div>`);
-    L.settings.forEach(i => ss.append(control(app, i, v, set)));
+    L.settings.filter(i => !(i.kind === "toggle" && /uncensored/i.test(i.label) && L.model)).forEach(i => ss.append(control(app, i, v, set)));
     form.append(ss);
   }
 
@@ -280,9 +338,11 @@ function renderForm(form, app) {
   const go = h(`<div class="go">
       <div class="stepper" title="How many"><button data-d="-1">−</button><span>${S.count}</span><button data-d="1">+</button></div>
       <button class="btn primary" id="gen">Generate ${S.count > 1 ? S.count + " " + (app.kind === "video" ? "shots" : "pictures") : ""}</button>
+      <button class="btn" id="later" title="Render later: at a set time or when the PC is free">⏱ Later</button>
     </div>`);
   $$(".stepper button", go).forEach(b => b.onclick = () => { S.count = Math.max(1, Math.min(8, S.count + +b.dataset.d)); saveState(); renderForm(form, app); });
   $("#gen", go).onclick = () => generate(app);
+  $("#later", go).onclick = e => scheduleMenu(app, e.currentTarget);
   form.append(go);
 }
 
@@ -468,15 +528,60 @@ function buildValues(app) {
   return v;
 }
 
+function runBody(app) {
+  const seedKeys = app.inputs.filter(i => i.kind === "seed" && (S.randomSeed[app.id] || {})[i.key] !== false).map(i => i.key);
+  const vals = buildValues(app);
+  const loras = loraPayload(app, vals);
+  const ck = (S.ckpt || {})[mkey(app)];
+  const checkpoint = ck && L0(app).model && /anime desire|illustrious/i.test(vals[L0(app).model.key] || "") ? ck : null;
+  const unc = app.inputs.some(i => i.kind === "toggle" && /uncensored/i.test(i.label) && vals[i.key]);
+  const priv = S.incog || unc;
+  const fam = L0(app).model ? modelFamily(vals[L0(app).model.key]) : "";
+  const vfile = fam && (S.variant[mkey(app)] || {})[fam];
+  const unet = vfile ? { family: fam, file: vfile } : null;
+  return { body: { app: app.id, values: vals, count: S.count, client_id: clientId, random_seed_keys: seedKeys, private: priv, loras, checkpoint, unet }, priv, vals };
+}
+/* render later: Studio keeps the job and sends it at a set time, or once the PC has been idle for 2 minutes */
+function scheduleMenu(app, anchor) {
+  document.querySelectorAll(".schedmenu").forEach(x => x.remove());
+  const tonight = new Date(); tonight.setHours(1, 0, 0, 0); if (tonight < new Date()) tonight.setDate(tonight.getDate() + 1); else if (new Date().getHours() >= 1) tonight.setDate(tonight.getDate() + 1);
+  const local = d => new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
+  const m = h(`<div class="schedmenu"><b>Render later</b>
+    <button data-w="idle">When the PC is free<small>after the queue has been empty for 2 min</small></button>
+    <button data-h="1">In 1 hour</button><button data-h="3">In 3 hours</button>
+    <button data-t="${tonight.getTime()}">Tonight at 1:00 AM</button>
+    <div class="row"><input type="datetime-local" value="${local(new Date(Date.now() + 2 * 3600e3))}"><button class="btn sm" data-c>Set</button></div></div>`);
+  document.body.append(m);
+  const r = anchor.getBoundingClientRect(); m.style.left = Math.max(8, Math.min(window.innerWidth - 300, r.right - 290)) + "px"; m.style.top = Math.max(8, r.top - m.offsetHeight - 8) + "px";
+  const close = () => { m.remove(); document.removeEventListener("mousedown", out, true); };
+  const out = e => { if (!m.contains(e.target) && e.target !== anchor) close(); };
+  setTimeout(() => document.addEventListener("mousedown", out, true), 0);
+  const send = async (when, at) => {
+    close();
+    try {
+      const { body, priv, vals } = runBody(app); const L = layout(app);
+      const txt = L.prompt ? String(vals[L.prompt.key] || "").slice(0, 70) : "";
+      await post("/manny/api/schedule", { run: body, when, at: at ? at / 1000 : null, kind: app.kind, label: priv ? `${appShort(app)} (Incognito)` : `${appShort(app)}${txt ? ": " + txt : ""}` });
+      toast(when === "idle" ? "Scheduled: it starts when the PC is free" : "Scheduled for " + new Date(at).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }));
+      loadSchedule();
+    } catch (e) { toast("Couldn't schedule: " + e.message.slice(0, 200), true); }
+  };
+  $("[data-w]", m).onclick = () => send("idle");
+  $$("[data-h]", m).forEach(b => b.onclick = () => send("at", Date.now() + +b.dataset.h * 3600e3));
+  $("[data-t]", m).onclick = () => send("at", +$("[data-t]", m).dataset.t);
+  $("[data-c]", m).onclick = () => { const v = $("input", m).value; if (!v) return; const t = new Date(v).getTime(); if (t < Date.now()) return toast("Pick a time in the future", true); send("at", t); };
+}
+S.sched = [];
+async function loadSchedule() {
+  try { S.sched = await api("/manny/api/schedule" + (S.incog ? "?private=1" : "")); } catch { S.sched = []; }
+  if (!$("#drawer").classList.contains("hidden")) drawDrawer();
+  drawQueueCard();
+}
 async function generate(app) {
   const btn = $("#gen"); if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
   try {
-    const seedKeys = app.inputs.filter(i => i.kind === "seed" && (S.randomSeed[app.id] || {})[i.key] !== false).map(i => i.key);
-    const vals = buildValues(app);
-    const loras = loraPayload(app, vals);
-    const unc = app.inputs.some(i => i.kind === "toggle" && /uncensored/i.test(i.label) && vals[i.key]);
-    const priv = S.incog || unc;
-    const res = await post("/manny/api/run", { app: app.id, values: vals, count: S.count, client_id: clientId, random_seed_keys: seedKeys, private: priv, loras });
+    const { body, priv } = runBody(app);
+    const res = await post("/manny/api/run", body);
     res.queued.forEach(q => S.mine[q.prompt_id] = { app: app.id, at: Date.now(), private: priv, hidden: priv && !S.incog });
     if (priv && !S.incog) toast("Saved privately.");
     toast(`Queued ${res.queued.length} ${app.kind === "video" ? "shot" : "picture"}${res.queued.length > 1 ? "s" : ""}`);
@@ -510,6 +615,11 @@ function renderStage(stage, app) {
   loadGallery().then(items => { const rl = items.filter(i => i.kind === app.kind).slice(0, 12); rl.forEach(it => g.append(tile(it, rl))); });
   updateJob();
 }
+/* measured on this PC (Intel Arc 140T): models whose weights the Arc has to emulate are very slow */
+const SLOW_HERE = [
+  [/wan 2\.2/i, "Very slow on this PC", "Wan 2.2 14B: about 20–25 minutes per step here (a 5 s clip can take an hour or more). LTX or MiniMax H3 are much faster."],
+  [/moss/i, "Slow here (~12 min)", "MOSS-Image: about 26 s per step on this PC, roughly 12 minutes a picture."],
+];
 function media(url, kind, controls) {
   return kind === "video" ? `<video src="${url}" ${controls ? "controls autoplay loop" : "muted loop preload='metadata'"} playsinline></video>` : `<img src="${url}">`;
 }
@@ -530,7 +640,7 @@ async function loadGallery(force) {
 function tile(it, list) {
   const url = itemUrl(it);
   const pv = it.kind === "video" ? `<video src="${bigVid(it) ? proxyUrl(it) : url}" poster="${thumbUrl(it)}" muted loop playsinline preload="none"></video>` : `<img src="${thumbUrl(it)}" loading="lazy" decoding="async">`;
-  const el = h(`<div class="tile">${it.kind === "video" ? `<span class="badge v">Video</span>` : ""}${pv}<button class="star ${it.fav ? "on" : ""}" title="Favorite">${it.fav ? "★" : "☆"}</button><div class="cap"><b>${esc(modelOf(it.filename))}</b></div></div>`);
+  const el = h(`<div class="tile">${it.kind === "video" ? `<span class="badge v">Video</span>` : ""}${isTopaz(it) ? `<span class="badge tz">Topaz</span>` : ""}${pv}<button class="star ${it.fav ? "on" : ""}" title="Favorite">${it.fav ? "★" : "☆"}</button><div class="cap"><b>${esc(modelOf(it.filename))}</b></div></div>`);
   $(".star", el).onclick = async e => { e.stopPropagation(); await toggleFav(it); const s = $(".star", el); s.classList.toggle("on", it.fav); s.textContent = it.fav ? "★" : "☆"; };
   if (it.kind === "video") { const vd = $("video", el); el.onmouseenter = () => vd.play().catch(() => {}); el.onmouseleave = () => vd.pause(); }
   el.onclick = () => lightbox(it, list);
@@ -623,10 +733,12 @@ function lightbox(it, list) {
        <button class="btn" data-to="edit:image">✎ Edit in words</button>
        <button class="btn" data-to="inpaint:image">◐ Inpaint an area</button>
        <button class="btn" data-to="upscale:image">⤢ Upscale 2K / 4K</button>
+       <button class="btn hidden" data-tz>✦ Topaz Gigapixel</button>
        <button class="btn" data-to="remove background:image">✂ Remove background</button>
        <button class="btn" data-to="image:image">▣ Use as reference</button>` : `
        <button class="btn" data-to="smooth motion:video">≋ Smooth motion</button>
-       <button class="btn" data-to="upscale video:video">⤢ Upscale to 1080p</button>`}
+       <button class="btn" data-to="upscale video:video">⤢ Upscale to 1080p</button>
+       <button class="btn hidden" data-tz>✦ Topaz Video</button>`}
      </div>
      <button class="ghost" data-board>＋ Add to storyboard${cur.kind === "image" ? " (as first frame)" : ""}</button>
      <div class="row"><a class="ghost" href="${url}" download="${esc(cur.filename)}">Download</a><button class="ghost danger" data-trash>Move to trash</button></div>
@@ -636,7 +748,7 @@ function lightbox(it, list) {
     api(`/manny/api/meta?filename=${encodeURIComponent(cur.filename)}&subfolder=${encodeURIComponent(cur.subfolder || "")}${cur.private ? "&private=1" : ""}`).then(md => {
       if (list[i] !== cur) return; meta = md;
       const pt = $(".ptext", side);
-      if (md.prompt) { pt.classList.remove("muted"); pt.textContent = md.prompt; const cp = h(`<button class="ghost copy">Copy</button>`); cp.onclick = () => { navigator.clipboard?.writeText(md.prompt); toast("Prompt copied"); }; $(".promptbox", side).append(cp); }
+      if (md.prompt) { pt.classList.remove("muted"); pt.textContent = md.prompt; const cp = h(`<button class="ghost copy">Copy</button>`); cp.onclick = e => { e.stopPropagation(); copyText(md.prompt, "Prompt copied"); }; $(".promptbox", side).append(cp); }
       else pt.textContent = "No prompt saved in this file.";
       const kv = $("#kv", side);
       if (md.size) kv.insertAdjacentHTML("beforeend", `<span>Pixels</span><span>${md.size[0]} × ${md.size[1]}</span>`);
@@ -663,6 +775,12 @@ function lightbox(it, list) {
       close(); openApp(k); toast("Added to " + appShort(S.apps[k]));
     });
     $("[data-x]", side).onclick = close;
+    const tzb = $("[data-tz]", side);
+    if (tzb) topaz().then(t => {
+      const kind = cur.kind === "video" ? "video" : "image";
+      if (tzReady(t, kind)) { tzb.classList.remove("hidden"); tzb.onclick = () => topazDialog(cur); }
+      else if (tzApp(t, kind) && !cur.private) { tzb.textContent = kind === "video" ? "✦ Topaz Video" : "✦ Gigapixel"; tzb.classList.remove("hidden"); tzb.onclick = () => topazHandoff(cur); }
+    });
 
     $("[data-trash]", side).onclick = async () => {
       await post("/manny/api/trash", cur);
@@ -798,8 +916,49 @@ async function renderShot(b, s, o = {}) {
   const vs = videoSummary(); if (!vs) return toast("The Video app is missing", true);
   const app = vs.app, L = layout(app), vals = { ...valuesFor(app) };
   if (L.prompt) vals[L.prompt.key] = [s.prompt, s.camera].filter(Boolean).join(". ");
-  let first = true;
+  let first = true, motion = null;
+  const pv = s.previs && (s.previs.lit || s.previs.grey);
+  if (pv && s.engine === "render") {   // the Blender render itself becomes the take
+    s.takes.push({ pid: null, seed: null, q: "render", status: "done", output: pv.video });
+    if (s.pick == null) s.pick = s.takes.length - 1;
+    syncPick(s); saveBoard(b, true); return;
+  }
+  if (pv) {
+    await Promise.all([S.scenes ? 0 : loadScenes(), S.locs ? 0 : loadLocs()]);
+    const pick = (re) => { const opt = L.model && L.model.options.find(x => re.test(x)); if (opt) vals[L.model.key] = opt; };
+    const dur = app.inputs.find(i => /^duration/i.test(i.label));
+    if (dur) { const want = dur.options.find(x => parseFloat(x) >= (s.seconds || pv.secs) - 0.2) || dur.options[dur.options.length - 1]; vals[dur.key] = want; }
+    const imgs = L.refs.filter(r => r.media.kind === "image");
+    L.refs.forEach(r => { if (r.toggle) vals[r.toggle.key] = false; });
+    const setImg = (k, v) => { const r = imgs[k]; if (!r) return; vals[r.media.key] = v; if (r.toggle) vals[r.toggle.key] = true; };
+    if (s.engine === "motion") {
+      pick(/references/i);
+      const { loc, cast } = sceneRefs(b, s);
+      const pics = [];
+      if (loc && loc.pictures[0]) pics.push(["location", loc.pictures[0]]);
+      cast.forEach(c => { if (c.ch && c.ch.face) pics.push([c.name, c.ch.face, c.colorName]); });
+      pics.slice(0, imgs.length).forEach(([, v], k) => setImg(k, v));
+      const lines = pics.slice(0, imgs.length).map(([n, , col], k) => n === "location" ? `<Picture ${k + 1}> is the location and its lighting.` : `<Picture ${k + 1}> is ${n} (the ${col} figure in <Video 1>).`);
+      if (L.prompt) vals[L.prompt.key] = `Follow <Video 1> exactly: the same camera move, framing, timing and the way every figure moves, as a real filmed shot. ${lines.join(" ")} ${s.prompt || ""}`.trim();
+      motion = pv.video_in;
+    } else {
+      if (!s.styled || s.styled.from !== pv.first) {
+        s.status3d = "Styling frames…"; if (S.sbDraw) S.sbDraw();
+        try { await styleFrames(b, s, st => { s.status3d = st; const e = document.querySelector(`[data-shot="${s.id}"] .s3d`); if (e) e.textContent = st; }); }
+        catch (e) { s.status3d = ""; toast("Couldn't style the frames: " + e.message.slice(0, 200), true); return; }
+        s.status3d = ""; saveBoard(b, true);
+      }
+      pick(/first \+ last/i);
+      setImg(0, s.styled.first); setImg(1, s.styled.last);
+    }
+    first = false;
+  }
+  if (!pv && !s.image && L.model && /first frame\)|image 1 = first frame/i.test(vals[L.model.key] || "") && !/text only/i.test(vals[L.model.key] || "")) {
+    toast(`${splitOption(vals[L.model.key])[0]} needs a first frame: add one to the shot, or pick “MiniMax H3 First frame (or text only)” in the Video app.`, true);
+    return;
+  }
   L.refs.forEach(r => {
+    if (pv) return;
     if (r.media.kind === "image" && first) { first = false; if (s.image) { vals[r.media.key] = s.image; if (r.toggle) vals[r.toggle.key] = true; } else if (r.toggle) vals[r.toggle.key] = false; }
     else if (r.toggle) vals[r.toggle.key] = false;
   });
@@ -809,7 +968,7 @@ async function renderShot(b, s, o = {}) {
   if (o.seed != null && K.seed) { vals[K.seed.key] = o.seed; seedKeys = seedKeys.filter(k => k !== K.seed.key); }
   try {
     const loras = loraPayload(app, vals);
-    const res = await post("/manny/api/run", { app: app.id, values: vals, count: o.count || 1, client_id: clientId, random_seed_keys: seedKeys, private: !!b.private, loras });
+    const res = await post("/manny/api/run", { app: app.id, values: vals, count: o.count || 1, client_id: clientId, random_seed_keys: seedKeys, private: !!b.private, loras, motion_video: motion });
     res.queued.forEach(q => {
       const seed = o.seed != null ? o.seed : (K.seed ? (q.seed || [])[seedKeys.indexOf(K.seed.key)] : null);
       s.takes.push({ pid: q.prompt_id, seed: seed ?? null, q: o.q || "", status: "queued", output: null, from: o.from ?? null });
@@ -972,15 +1131,107 @@ function compareTakes(b, s, onPick) {
   draw(); tick();
 }
 
+/* ---- Topaz (Gigapixel for pictures, Topaz Video for clips) */
+let tzCache = null;
+async function topaz(force) {
+  if (!tzCache || force) tzCache = await api("/manny/api/topaz/status" + (force ? "?force=1" : "")).catch(() => null);
+  return tzCache;
+}
+const tzReady = (t, kind) => !!(t && t.prefs && t.prefs.use && t[kind] && t[kind].ready);
+const tzApp = (t, kind) => !!(t && t.apps && t.apps[kind] && t.apps[kind].exe);
+const isTopaz = it => /topaz|gigapixel|[-_ ](prob|rhea|iris|apo|chr|ahq|nyx|proteus|apollo|chronos)-?\d/i.test(it.filename || "");
+async function topazHandoff(cur) {
+  const kind = cur.kind === "video" ? "video" : "image", app = kind === "video" ? "Topaz Video" : "Gigapixel";
+  if (cur.private) return toast("Incognito files can't go to the Topaz app", true);
+  try {
+    const r = await post("/manny/api/topaz/open", { filename: cur.filename, subfolder: cur.subfolder || "" });
+    // one click: the picture opens in the app on the PC. The first time, the export folder is put on the
+    // clipboard so it can be pasted once as the app's output folder; after that it's just open + export.
+    if (!store.get("tzhint-" + kind, false)) { store.set("tzhint-" + kind, true); await copyText(r.export_to, `Opened in ${app} · its output folder is copied: paste it once in ${app}'s export settings`); }
+    else toast(`Opened in ${app} on the PC · exports appear here`);
+    tzWatch();
+  } catch (e) { toast(e.message.slice(0, 200), true); }
+}
+/* after a hand-off, refresh the gallery when a new upscaled file shows up (checks for 30 min) */
+let tzW = null;
+function tzWatch() {
+  clearInterval(tzW); const t0 = Date.now(); let seen = null;
+  tzW = setInterval(async () => {
+    if (Date.now() - t0 > 30 * 60e3) return clearInterval(tzW);
+    try {
+      const g = await api("/manny/api/gallery"); const ups = (g.items || g).filter(x => /Upscaled/.test(x.subfolder || "")).map(x => x.filename).join("|");
+      if (seen === null) seen = ups; else if (ups !== seen) { seen = ups; toast("New upscaled file in the gallery"); S.gallery = []; if (location.hash.startsWith("#/gallery") && $("#modal").classList.contains("hidden")) route(); }
+    } catch (e) { }
+  }, 8000);
+}
+const tzJobs = [];
+let tzT = null;
+function tzPoll() {
+  clearTimeout(tzT);
+  if (!tzJobs.length) { updateTz(); return; }
+  tzT = setTimeout(async () => {
+    for (const j of tzJobs.slice()) {
+      try {
+        const r = await api("/manny/api/job/" + j.id);
+        j.stage = r.stage;
+        if (r.status !== "running") {
+          tzJobs.splice(tzJobs.indexOf(j), 1);
+          if (r.status === "done") { toast(`Upscaled: ${r.result.filename}`); S.gallery = []; if (location.hash.startsWith("#/gallery")) route(); }
+          else toast("Topaz: " + (r.error || r.stage).slice(0, 240), true);
+        }
+      } catch (e) { }
+    }
+    updateTz(); tzPoll();
+  }, 3000);
+  updateTz();
+}
+function updateTz() {
+  let el = $("#tzcard");
+  if (!tzJobs.length) { if (el) el.remove(); return; }
+  if (!el) { el = h(`<div id="tzcard" class="tzcard"></div>`); document.body.append(el); }
+  el.innerHTML = tzJobs.map(j => `<div><b>✦ ${esc(j.label)}</b><small>${esc(j.stage || "Starting")}</small><button class="icon" data-s="${j.id}" title="Stop">✕</button></div>`).join("");
+  $$("[data-s]", el).forEach(b => b.onclick = () => post(`/manny/api/finish/${b.dataset.s}/stop`, {}).then(() => toast("Stopping…")));
+}
+async function topazDialog(cur) {
+  const t = await topaz(); const kind = cur.kind === "video" ? "video" : "image";
+  if (!tzReady(t, kind)) return toast(kind === "video" ? "Topaz Video isn't ready (see Settings › Topaz)" : "Gigapixel isn't ready (see Settings › Topaz)", true);
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const st = store.get("tz-" + kind, kind === "video" ? { size: "1080", fps: "keep" } : { size: "4k", model: t.prefs.image_model });
+  const sizes = kind === "video" ? [["keep", "Keep size"], ["1080", "1080p"], ["1440", "1440p"], ["4k", "4K"]] : [["2x", "2×"], ["4x", "4×"], ["2k", "2K"], ["4k", "4K"], ["8k", "8K"]];
+  const d = h(`<div class="dialog"><div class="row" style="justify-content:space-between"><h2>✦ Upscale with ${kind === "video" ? "Topaz Video" : "Gigapixel"}</h2><button class="icon" data-x>✕</button></div>
+    <p class="hint" style="margin:0">${esc(cur.filename)}. Runs on this PC beside the ComfyUI queue; the result lands in ${kind === "video" ? "Videos" : "Images"} › Upscaled.</p>
+    <div><label class="lbl">${kind === "video" ? "Size" : "Size (2K / 4K / 8K = long edge)"}</label><div class="chips" id="tz-size">${sizes.map(([v, l]) => `<div class="chip" data-v="${v}">${l}</div>`).join("")}</div></div>
+    ${kind === "video" ? `<div><label class="lbl">Frame rate</label><div class="chips" id="tz-fps"><div class="chip" data-v="keep">Keep</div><div class="chip" data-v="48">48 fps</div><div class="chip" data-v="60">60 fps</div></div></div>
+      <p class="hint" style="margin:0">Model: ${esc((t.video_models.find(x => x[0] === t.prefs.video_model) || [, t.prefs.video_model])[1])} · change it in Settings.</p>` :
+      `<div><label class="lbl">Model</label><select id="tz-model">${t.image_models.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}</select></div>`}
+    <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Upscale</button></div></div>`);
+  m.append(d);
+  const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
+  $$("[data-x]", d).forEach(x => x.onclick = close);
+  const chips = (id, key) => $$(`#${id} .chip`, d).forEach(c => { c.classList.toggle("on", c.dataset.v === st[key]); c.onclick = () => { st[key] = c.dataset.v; chips(id, key); }; });
+  chips("tz-size", "size"); if (kind === "video") chips("tz-fps", "fps"); else $("#tz-model", d).value = st.model || "std";
+  $("[data-go]", d).onclick = async () => {
+    if (kind === "image") st.model = $("#tz-model", d).value;
+    if (kind === "video" && st.size === "keep" && st.fps === "keep") return toast("Pick a size or a frame rate", true);
+    store.set("tz-" + kind, { ...st });
+    try {
+      const r = await post("/manny/api/topaz/" + kind, { filename: cur.filename, subfolder: cur.subfolder || "", private: !!cur.private, size: st.size === "keep" ? "" : st.size, fps: st.fps, model: st.model });
+      tzJobs.push({ id: r.id, label: cur.filename, stage: "Starting" }); close(); toast("Upscaling with Topaz…"); tzPoll();
+    } catch (e) { toast("Couldn't start: " + e.message.slice(0, 200), true); }
+  };
+}
+
 /* ---- finish a picked take: upscale, smoother motion, sound */
 function finishDialog(b, s, n, after) {
   const t = s.takes[s.pick]; if (!t || !t.output) return;
   const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
-  const st = store.get("finish", { upscale: true, fps: "keep", sound: "keep" });
+  const st = store.get("finish", { upscale: true, fps: "keep", sound: "keep", size: "1080" });
+  st.size = st.size || "1080";
   let audio = "";
   const d = h(`<div class="dialog"><div class="row" style="justify-content:space-between"><h2>Finish shot ${n + 1}</h2><button class="icon" data-x>✕</button></div>
     <p class="hint" style="margin:0">Uses take ${s.pick + 1}${t.q === "final" ? " (final quality)" : t.q === "draft" ? ' (draft quality: render it in final quality first for the best result)' : ""}. Runs in the queue; you can leave this page.</p>
-    <label class="tog"><input type="checkbox" id="f-up" ${st.upscale ? "checked" : ""}><span><b>Upscale to 1080p</b><small>Upscale video app. The slow step: several minutes per shot.</small></span></label>
+    <label class="tog"><input type="checkbox" id="f-up" ${st.upscale ? "checked" : ""}><span><b id="f-upt">Upscale to 1080p</b><small id="f-ups">Upscale video app. The slow step: several minutes per shot.</small></span></label>
+    <div class="chips hidden" id="f-size"><div class="chip" data-v="1080">1080p</div><div class="chip" data-v="1440">1440p</div><div class="chip" data-v="4k">4K</div></div>
     <div><label class="lbl">Frame rate</label><div class="chips" id="f-fps"><div class="chip" data-v="keep">Keep</div><div class="chip" data-v="48">48 fps</div><div class="chip" data-v="60">60 fps</div></div></div>
     <div><label class="lbl">Sound</label><div class="chips" id="f-snd"><div class="chip" data-v="keep">Keep</div><div class="chip" data-v="mute">Mute</div><div class="chip" data-v="replace">Replace…</div></div></div>
     <div class="ref audio hidden" id="f-aud" style="aspect-ratio:auto;min-height:70px"><span class="plus">+</span><span class="rl">Drop a sound or song (wav, mp3). It's cut to the shot's length with a short fade.</span><input type="file" hidden accept="audio/*"></div>
@@ -989,7 +1240,8 @@ function finishDialog(b, s, n, after) {
   const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
   $$("[data-x]", d).forEach(x => x.onclick = close);
   const chips = (id, key) => { $$(`#${id} .chip`, d).forEach(c => { c.classList.toggle("on", c.dataset.v === st[key]); c.onclick = () => { st[key] = c.dataset.v; chips(id, key); $("#f-aud", d).classList.toggle("hidden", st.sound !== "replace"); }; }); };
-  chips("f-fps", "fps"); chips("f-snd", "sound"); $("#f-aud", d).classList.toggle("hidden", st.sound !== "replace");
+  chips("f-fps", "fps"); chips("f-snd", "sound"); chips("f-size", "size"); $("#f-aud", d).classList.toggle("hidden", st.sound !== "replace");
+  topaz().then(tz => { if (!tzReady(tz, "video")) return; $("#f-upt", d).textContent = "Upscale with Topaz Video"; $("#f-ups", d).textContent = "Topaz Video also makes the 48 / 60 fps version in the same pass. Falls back to the ComfyUI apps if it fails."; $("#f-size", d).classList.remove("hidden"); });
   const au = $("#f-aud", d), fi = $("input", au);
   const take = async f => { audio = await upload(f); au.classList.add("on"); $(".plus", au).className = "wave"; $(".wave", au).textContent = "♪"; $(".rl", au).textContent = f.name; };
   au.onclick = () => fi.click(); fi.onchange = () => fi.files[0] && take(fi.files[0]);
@@ -999,7 +1251,7 @@ function finishDialog(b, s, n, after) {
     if (st.sound === "replace" && !audio) return toast("Add the sound first", true);
     if (!st.upscale && st.fps === "keep" && st.sound === "keep") return toast("Pick at least one thing to change", true);
     try {
-      const r = await post("/manny/api/finish", { ...t.output, private: !!b.private, upscale: st.upscale, fps: st.fps, sound: st.sound, audio, name: `${b.name} shot ${n + 1}` });
+      const r = await post("/manny/api/finish", { ...t.output, private: !!b.private, upscale: st.upscale, size: st.size, fps: st.fps, sound: st.sound, audio, name: `${b.name} shot ${n + 1}` });
       s.finish = { id: r.id, stage: "Starting", status: "running", from: s.pick }; saveBoard(b, true); close(); toast("Finishing shot " + (n + 1)); after(); pollFinish();
     } catch (e) { toast("Couldn't start: " + e.message.slice(0, 200), true); }
   };
@@ -1059,8 +1311,10 @@ async function pageStoryboard(main) {
       const main = showFinal ? s.final : pk && pk.output;
       const pending = s.takes.find(t => !t.output && (t.status === "queued"));
       const fin = s.finish && s.finish.status === "running" ? `<div class="fbadge run">Finishing: ${esc(s.finish.stage)}…</div>` : showFinal ? `<div class="fbadge">✓ Finished</div>` : s.finish && s.finish.status === "failed" ? `<div class="fbadge bad" title="${esc(s.finish.error || "")}">Finish failed</div>` : "";
-      const el = h(`<div class="shot"><div class="shead"><b>SHOT ${n + 1}</b><div class="row"><button class="icon" data-up title="Move up">↑</button><button class="icon" data-dn title="Move down">↓</button><button class="icon" data-rm title="Remove">✕</button></div></div>
-        <div class="sbody"><div class="ref ${s.image ? "on" : ""} sframe">${s.image ? `<img src="${inputUrl(s.image)}">` : `<span class="plus">+</span>`}<span class="rl">${s.image ? (s.cont ? "Last frame of shot " + s.cont : "First frame") : "First frame (optional)"}</span><button class="x" title="Remove">✕</button><input type="file" hidden accept="image/*"></div>
+      const pv3 = s.previs && (s.previs.lit || s.previs.grey);
+      const el = h(`<div class="shot" data-shot="${s.id}"><div class="shead"><b>SHOT ${n + 1}${pv3 ? ` <span class="b3d">3D</span>` : ""}</b><div class="row"><button class="icon" data-up title="Move up">↑</button><button class="icon" data-dn title="Move down">↓</button><button class="icon" data-rm title="Remove">✕</button></div></div>
+        <div class="sbody">${pv3 ? `<div class="sframe s3dbox"><video src="${fileUrl(pv3.video, b.private)}" muted loop playsinline></video>${s.styled ? `<img src="${inputUrl(s.styled.first)}" title="Styled first frame">` : ""}
+          <select class="seng"><option value="keyframes">Styled keyframes</option><option value="motion">Follow 3D motion</option><option value="render">Blender render as is</option></select><span class="hint s3d">${esc(s.status3d || (s.styled ? "Frames styled" : ""))}</span>${s.styled ? `<button class="ghost sm" data-restyle>↻ Restyle frames</button>` : `<button class="ghost sm" data-style>🎨 Style frames</button>`}</div>` : ""}<div class="ref ${s.image ? "on" : ""} sframe ${pv3 ? "hidden" : ""}">${s.image ? `<img src="${inputUrl(s.image)}">` : `<span class="plus">+</span>`}<span class="rl">${s.image ? (s.cont ? "Last frame of shot " + s.cont : "First frame") : "First frame (optional)"}</span><button class="x" title="Remove">✕</button><input type="file" hidden accept="image/*"></div>
         <div class="scol"><textarea placeholder="What happens in this shot: who, action, place, mood, dialogue…">${esc(s.prompt)}</textarea>
           <div class="row"><select class="scam"><option value="">Camera: model decides</option>${CAMERA.map(([nm, w2]) => `<option value="${esc(w2)}" ${s.camera === w2 ? "selected" : ""}>Camera: ${esc(nm)}</option>`).join("")}</select><button class="ghost" data-pw>✎ Prompt writer</button></div>
           <details class="trim" ${s.trimIn || s.trimOut || s.caption ? "open" : ""}><summary>✂ Trim &amp; caption</summary><div class="row"><label>From <input type="number" min="0" step="0.1" data-tin value="${s.trimIn || ""}" placeholder="0"> s</label><label>to <input type="number" min="0" step="0.1" data-tout value="${s.trimOut || ""}" placeholder="end"> s</label></div><input type="text" data-cap placeholder="Caption on screen (optional)" value="${esc(s.caption || "")}"></details></div>
@@ -1072,7 +1326,14 @@ async function pageStoryboard(main) {
             ${s.takes.filter(t => t.output).length + (s.final ? 1 : 0) > 1 ? `<button class="ghost" data-cmp>⇆ Compare</button>` : ""}
             ${pk && pk.output ? `<button class="ghost" data-rev title="The local AI watches the take and scores it">✦ Review${pk.review && pk.review.review ? " · " + esc(String(pk.review.review.score)) + "/10" : ""}</button><button class="ghost" data-fin>✓ Finish…</button><button class="ghost" data-cont>Continue →</button>` : ""}
           </div></div></div></div>`);
-      const fr = $(".sframe", el), fi = $("input", fr);
+      const fr = $(".sframe:not(.s3dbox)", el), fi = $("input", fr);
+      const s3 = $(".s3dbox", el);
+      if (s3) {
+        const v3 = $("video", s3); s3.onmouseenter = () => v3.play().catch(() => { }); s3.onmouseleave = () => v3.pause();
+        $(".seng", s3).value = s.engine || "keyframes"; $(".seng", s3).onchange = e => { s.engine = e.target.value; saveBoard(b); };
+        const sty = $("[data-style],[data-restyle]", s3);
+        if (sty) sty.onclick = async () => { sty.disabled = true; try { await loadScenes(); await loadLocs(); await styleFrames(b, s, st => { const e = $(".s3d", s3); if (e) e.textContent = st; }); saveBoard(b, true); draw(); } catch (e) { toast(e.message.slice(0, 200), true); sty.disabled = false; } };
+      }
       const take = async f => { s.image = await upload(f); s.cont = null; saveBoard(b); draw(); };
       fr.onclick = e => { if (e.target.closest(".x")) return; fi.click(); };
       fi.onchange = () => fi.files[0] && take(fi.files[0]);
@@ -1173,7 +1434,44 @@ function modelFamily(opt) {
   if (/moss/.test(o)) return "moss";
   return "";
 }
-let loraCache = null;
+/* Civitai base names per Studio family (for "popular for this model") */
+const FAM_BASES = { moss: "MOSS Image", qwen: "Qwen", krea: "Krea 2|Krea 2 Turbo", flux3: "Flux.2 Klein 9B|Flux.2 Klein 4B|Flux.2 D", zimage: "ZImageTurbo",
+  anima: "Anima", sdxl: "Illustrious|NoobAI|Pony|SDXL 1.0", h3: "MiniMax H3", wan22: "Wan Video 2.2 I2V-A14B|Wan Video 2.2 T2V-A14B", ltx: "LTXV" };
+const FAM_NAME = { moss: "MOSS", qwen: "Qwen Image", krea: "Krea 2", flux3: "FLUX 3 Klein", zimage: "Z-Image", anima: "Anima", sdxl: "Anime Desire / SDXL", h3: "MiniMax H3", wan22: "Wan 2.2", ltx: "LTX" };
+// the files Studio's apps already use: everything else of the same family is a "style" (finetune) you added
+const STOCK_UNETS = /^(moss_image_sft_int8|qwen_image_2\.1|krea2_turbo|moodykrea2mix|flux3-image-klein|z_image_turbo_int8|anima-base|minimax_h3_|wan2\.2_|ltx-|seedvr2|p-h3-image|acestep|wan_animate|flux2_dev)/i;
+function fileFamily(name) {
+  const n = (name || "").toLowerCase().split(/[\\/]/).pop();
+  if (/moss/.test(n)) return "moss"; if (/nitrofusion|z[-_]?image/.test(n)) return "zimage"; if (/anima/.test(n)) return "anima";
+  if (/krea/.test(n)) return "krea"; if (/qwen[-_]?image/.test(n)) return "qwen"; if (/minimax[-_]?h3|_h3_/.test(n)) return "h3";
+  if (/klein|flux3/.test(n)) return "flux3"; return "";
+}
+let variantCache = null;
+async function loadVariants(force) {
+  if (!variantCache || force) {
+    try {
+      const items = (await api("/manny/api/models?folder=diffusion_models" + (S.incog ? "&private=1" : ""))).items || [];
+      variantCache = items.filter(m => !STOCK_UNETS.test(m.name.split(/[\\/]/).pop())).map(m => ({ file: m.name, title: m.title || m.name.split(/[\\/]/).pop().replace(/\.[^.]+$/, ""), base: m.base || "", family: loraFamily(m.base) || fileFamily(m.name) })).filter(m => m.family);
+    } catch { variantCache = []; }
+  }
+  return variantCache;
+}
+S.variant = store.get("variant", {});
+// which models the app's "Uncensored" switch covers (from its label), plus models that are uncensored anyway
+const UNCENSORED_ALWAYS = /anima/i;
+function uncInput(app) { return app.inputs.find(i => i.kind === "toggle" && /uncensored/i.test(i.label)); }
+function uncCovers(input, opt) {
+  if (UNCENSORED_ALWAYS.test(opt || "")) return "always";
+  const m = /\(([^)]*)\)/.exec(input ? input.label : ""); if (!m) return false;
+  return m[1].split(/[·,]/).map(x => x.replace(/only/i, "").trim().toLowerCase()).filter(Boolean).some(w => (opt || "").toLowerCase().includes(w)) ? "toggle" : false;
+}
+let loraCache = null, ckptCache = null;
+const L0 = app => layout(app);
+S.ckpt = store.get("ckpt", {});
+async function loadCkpts(force) {
+  if (!ckptCache || force) { try { ckptCache = (await api("/manny/api/models?folder=checkpoints" + (S.incog ? "&private=1" : ""))).items.filter(m => m.civitai); } catch { ckptCache = []; } }
+  return ckptCache;
+}
 async function loadLoras(force) { if (!loraCache || force) { try { loraCache = await api("/manny/api/loras" + PQ()); } catch { loraCache = []; } } return loraCache; }
 function loraSection(app, form) {
   const L = layout(app), v = valuesFor(app);
@@ -1191,7 +1489,51 @@ function loraSection(app, form) {
     box.append(el);
   });
   $("[data-add]", sec).onclick = () => loraPicker(app, fam, () => renderForm(form, app));
+  if (fam && FAM_BASES[fam]) suggestLoras(app, fam, sec, form);
   return sec;
+}
+/* "Popular for <model>": installed ones are one click to add, the rest one click to download (then added) */
+const sugCache = {};
+async function suggestLoras(app, fam, sec, form) {
+  const key = fam + (S.incog ? "|p" : "");
+  try {
+    if (!sugCache[key]) sugCache[key] = api(`/manny/api/civitai/search?type=LORA&base=${encodeURIComponent(FAM_BASES[fam])}&sort=${encodeURIComponent("Most Downloaded")}&period=Month${S.incog ? "&private=1" : ""}`);
+    const [d, mine] = await Promise.all([sugCache[key], loadLoras()]);
+    const items = (d.items || []).slice(0, 8); if (!items.length || !document.body.contains(sec)) return;
+    const have = new Set(mine.map(l => l.file.split(/[\\/]/).pop().toLowerCase()));
+    const picks = S.loras[mkey(app)] || [];
+    const row = h(`<div class="sugg"><label class="lbl">Popular for ${esc(FAM_NAME[fam] || fam)} this month</label><div class="sgrid"></div></div>`);
+    items.forEach(it => {
+      const vv = it.versions.find(x => loraFamily(x.base) === fam) || it.versions[0]; if (!vv) return;
+      const f = (vv.files || []).find(x => /\.safetensors$/i.test(x.name)); if (!f) return;
+      const installed = have.has(f.name.toLowerCase()), added = picks.some(p => p.name.split(/[\\/]/).pop().toLowerCase() === f.name.toLowerCase());
+      const img = (vv.images || [])[0] || it.image;
+      const c = h(`<div class="scard ${added ? "on" : ""}" title="${esc(it.name)} · ${esc(vv.base || "")} · ${(it.downloads || 0).toLocaleString()} downloads">${img ? `<img src="/manny/api/civitai/img?u=${encodeURIComponent(img.url || img)}" loading="lazy">` : `<div class="lph">LoRA</div>`}<b>${esc(it.name.slice(0, 40))}</b><button class="btn sm">${added ? "✓ Added" : installed ? "＋ Add" : "↓ Get"}</button></div>`);
+      const btn = $("button", c);
+      btn.onclick = async () => {
+        if (added) return;
+        const addPick = file => { const ps = S.loras[mkey(app)] || (S.loras[mkey(app)] = []); if (!ps.some(p => p.name === file)) ps.push({ name: file, label: it.name, strength: 0.8, trained: vv.trained || [], family: fam }); saveLoras(); };
+        if (installed) { const l = mine.find(l => l.file.split(/[\\/]/).pop().toLowerCase() === f.name.toLowerCase()); addPick(l.file); return renderForm(form, app); }
+        btn.disabled = true; btn.textContent = "Downloading…";
+        try {
+          const r = await post("/manny/api/civitai/download", { version: vv.id, file: f.name, type: "LORA", private: !!S.incog });
+          for (let k = 0; k < 400; k++) {
+            await new Promise(res => setTimeout(res, 3000));
+            const j = await api("/manny/api/job/" + r.id);
+            if (j.status === "running") { btn.textContent = (j.stage || "Downloading").replace(/^Downloading\s*/, "↓ ").slice(0, 16); continue; }
+            if (j.status !== "done") throw new Error(j.error || j.stage);
+            break;
+          }
+          loraCache = null; const all = await loadLoras(true);
+          const l = all.find(l => l.file.split(/[\\/]/).pop().toLowerCase() === f.name.toLowerCase());
+          if (l) addPick(l.file);
+          toast(`${it.name} downloaded and added`); if (document.body.contains(sec)) renderForm(form, app);
+        } catch (e) { btn.disabled = false; btn.textContent = "↓ Get"; toast("Download failed: " + e.message.slice(0, 160), true); }
+      };
+      $(".sgrid", row).append(c);
+    });
+    sec.append(row);
+  } catch { }
 }
 async function loraPicker(app, fam, done) {
   const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
@@ -1231,7 +1573,7 @@ function loraPayload(app, vals) {
 }
 
 async function pageLoras(main) {
-  const p = h(`<div class="page"><div class="eyebrow">Library</div><h1>LoRAs</h1>
+  const p = h(`<div class="page"><div class="eyebrow">Library</div><h1>Models &amp; LoRAs</h1>
     <div class="chips" id="ltab"><div class="chip on" data-t="mine">Installed</div><div class="chip" data-t="civ">Find on Civitai</div></div>
     <div id="lbody" style="margin-top:18px"></div></div>`);
   main.append(p);
@@ -1239,7 +1581,27 @@ async function pageLoras(main) {
   const tab = t => { $$("#ltab .chip", p).forEach(c => c.classList.toggle("on", c.dataset.t === t)); store.set("ltab", t); (t === "mine" ? mine : civ)(); };
   $$("#ltab .chip", p).forEach(c => c.onclick = () => tab(c.dataset.t));
   async function mine() {
-    body.innerHTML = `<div class="lgrid" id="lg"></div>`;
+    body.innerHTML = `<div id="upd"></div><h3 class="subh">LoRAs</h3><div class="lgrid" id="lg"></div><h3 class="subh">Other downloads</h3><div class="lgrid" id="og"></div><p class="hint">Remove models in <a href="#/settings">Settings</a>.</p>`;
+    api("/manny/api/civitai/status").then(st => st.has_key && api("/manny/api/civitai/updates" + PQ())).then(ups => {
+      const u = $("#upd", body); if (!u || !ups || !ups.length) return;
+      const box = h(`<div class="panel updbox"><b>${ups.length} update${ups.length > 1 ? "s" : ""} on Civitai</b></div>`);
+      ups.forEach(x => {
+        const r = h(`<div class="mrow"><div class="mn"><b>${esc(x.name)}</b><span>You have ${esc(x.installed || "an older version")} · latest is ${esc(x.latest.name)}${x.latest.date ? " (" + esc(x.latest.date) + ")" : ""}</span></div><span></span><span class="ms"></span><button class="btn sm">Get latest</button></div>`);
+        $("button", r).onclick = async () => {
+          const bt = $("button", r); bt.disabled = true;
+          try { const j = await post("/manny/api/civitai/download", { version: x.latest.id, type: x.type, private: S.incog }); await pollJob(j.id, s2 => bt.textContent = s2); bt.textContent = "Installed"; loraCache = null; ckptCache = null; toast(`${x.name} updated. Remove the old version in Settings if you like.`); }
+          catch (e) { toast(e.message, true); bt.disabled = false; bt.textContent = "Get latest"; }
+        };
+        box.append(r);
+      });
+      u.append(box);
+    }).catch(() => { });
+    api("/manny/api/models" + PQ()).then(r => {
+      const og = $("#og", body); if (!og) return;
+      const list = r.items.filter(m => m.folder !== "loras" && m.civitai);
+      if (!list.length) og.append(h(`<div class="empty">Checkpoints, VAEs, embeddings and upscalers you download from Civitai show up here.</div>`));
+      list.forEach(m => og.append(h(`<div class="lcard">${m.preview ? `<img src="/manny/api/civitai/img?u=${encodeURIComponent(m.preview)}" loading="lazy">` : `<div class="lph">${esc(m.folder.toUpperCase())}</div>`}<div class="lb2"><b>${esc(m.title || m.name)}</b><span>${esc(m.folder)} · ${esc(m.base)} · ${fmtSize(m.size)}</span></div></div>`)));
+    }).catch(() => { });
     const all = await loadLoras(true), g = $("#lg", body);
     if (!all.length) g.append(h(`<div class="empty">No LoRAs yet. Open “Find on Civitai”.</div>`));
     all.forEach(l => {
@@ -1266,16 +1628,18 @@ async function pageLoras(main) {
       $("#cks", k).onclick = async () => { try { await post("/manny/api/civitai/key", { key: $("#ck", k).value.trim() }); toast("Key saved"); civ(); } catch (e) { toast(e.message, true); } };
       return;
     }
-    const bases = [["", "All"], ["Illustrious", "Illustrious"], ["Pony", "Pony"], ["SDXL 1.0", "SDXL"], ["Qwen", "Qwen"], ["ZImageTurbo", "Z-Image"], ["Wan Video 2.2 I2V-A14B", "Wan 2.2 I2V"], ["Wan Video 2.2 T2V-A14B", "Wan 2.2 T2V"], ["LTXV", "LTX"], ["Flux.2 Klein 9B", "FLUX Klein"]];
-    body.innerHTML = `<div class="filters"><input type="text" class="search" id="cq" placeholder="Search Civitai LoRAs…"><select id="cb">${bases.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("")}</select>
-      <select id="cs"><option>Most Downloaded</option><option>Highest Rated</option><option>Newest</option></select><button class="ghost" id="cgo">Search</button><a href="javascript:void 0" id="ckx" class="hint">Change key</a></div>
+    const MINE = "Illustrious|Pony|SDXL 1.0|NoobAI|SD 1.5|Qwen|ZImageTurbo|Wan Video 2.2 I2V-A14B|Wan Video 2.2 T2V-A14B|LTXV|Anima";
+    const bases = [[MINE, "Works with my models"], ["", "Every base model"], ["Illustrious", "Illustrious"], ["Pony", "Pony"], ["SDXL 1.0", "SDXL"], ["Qwen", "Qwen"], ["ZImageTurbo", "Z-Image"], ["Wan Video 2.2 I2V-A14B", "Wan 2.2 I2V"], ["Wan Video 2.2 T2V-A14B", "Wan 2.2 T2V"], ["LTXV", "LTX"], ["Flux.2 Klein 9B", "FLUX Klein"]];
+    const ctypes = [["LORA", "LoRAs"], ["Checkpoint", "Checkpoints"], ["TextualInversion", "Embeddings"], ["VAE", "VAEs"], ["Upscaler", "Upscalers"], ["Controlnet", "ControlNets"], ["LoCon", "LyCORIS"]];
+    body.innerHTML = `<div class="filters"><select id="ct">${ctypes.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select><input type="text" class="search" id="cq" placeholder="Search Civitai…"><select id="cb">${bases.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("")}</select>
+      <select id="cs"><option>Newest</option><option>Most Downloaded</option><option>Highest Rated</option></select><select id="cp"><option value="">Any time</option><option value="Week">This week</option><option value="Month">This month</option><option value="Year">This year</option></select><button class="ghost" id="cgo">Search</button><a href="javascript:void 0" id="ckx" class="hint">Change key</a></div>
       <div class="lgrid" id="cg"></div><div class="row" style="justify-content:center;margin-top:16px"><button class="ghost hidden" id="cmore">More</button></div>`;
-    $("#cb", body).value = store.get("cbase", "");
+    $("#cb", body).value = store.get("cbase2", MINE); $("#ct", body).value = store.get("ctype", "LORA"); $("#cs", body).value = store.get("csort", "Newest"); $("#cp", body).value = store.get("cper", "");
     let next = null;
     const run = async more => {
       const g = $("#cg", body); if (!more) { g.innerHTML = `<div class="empty">Searching…</div>`; next = null; }
-      store.set("cbase", $("#cb", body).value);
-      const qs = new URLSearchParams({ q: $("#cq", body).value.trim(), base: $("#cb", body).value, sort: $("#cs", body).value });
+      store.set("cbase2", $("#cb", body).value); store.set("ctype", $("#ct", body).value); store.set("csort", $("#cs", body).value); store.set("cper", $("#cp", body).value);
+      const qs = new URLSearchParams({ q: $("#cq", body).value.trim(), base: $("#cb", body).value, sort: $("#cs", body).value, type: $("#ct", body).value, period: $("#cp", body).value });
       if (S.incog) qs.set("private", "1");
       if (more && next) qs.set("cursor", next);
       try {
@@ -1286,7 +1650,7 @@ async function pageLoras(main) {
         r.items.forEach(it => {
           const v = it.versions[0] || { images: [] }, im = v.images[0];
           const c = h(`<div class="lcard">${im ? (im.type === "video" ? `<video src="/manny/api/civitai/img?u=${encodeURIComponent(im.url)}" muted loop playsinline preload="none"></video>` : `<img src="/manny/api/civitai/img?u=${encodeURIComponent(im.url)}" loading="lazy">`) : `<div class="lph">LoRA</div>`}
-            <div class="lb2"><b>${esc(it.name)}</b><span>${esc(v.base || "")} · ⤓ ${(it.downloads || 0).toLocaleString()}</span></div></div>`);
+            <div class="lb2"><b>${esc(it.name)}</b><span>${esc(v.name || "")} <span class="latest">latest</span>${v.date ? " · " + esc(v.date) : ""}</span><span>${esc(v.base || "")} · ⤓ ${(it.downloads || 0).toLocaleString()}</span></div></div>`);
           const vd = $("video", c); if (vd) { c.onmouseenter = () => vd.play().catch(() => { }); c.onmouseleave = () => vd.pause(); }
           c.onclick = () => civDetail(it);
           g.append(c);
@@ -1295,7 +1659,7 @@ async function pageLoras(main) {
     };
     $("#cgo", body).onclick = () => run(false);
     $("#cq", body).onkeydown = e => { if (e.key === "Enter") run(false); };
-    $("#cb", body).onchange = $("#cs", body).onchange = () => run(false);
+    $("#cb", body).onchange = $("#cs", body).onchange = $("#ct", body).onchange = $("#cp", body).onchange = () => run(false);
     $("#cmore", body).onclick = () => run(true);
     $("#ckx", body).onclick = async () => { if (!confirm("Remove the saved Civitai key?")) return; await post("/manny/api/civitai/key", { key: "" }); civ(); };
     run(false);
@@ -1307,8 +1671,8 @@ function civDetail(it) {
   let vi = 0;
   const d = h(`<div class="dialog wide"><div class="row" style="justify-content:space-between"><h2>${esc(it.name)}</h2><button class="icon" data-x>✕</button></div>
     <div class="hint">by ${esc(it.creator || "?")} · ⤓ ${(it.downloads || 0).toLocaleString()} · 👍 ${(it.likes || 0).toLocaleString()}</div>
-    <select id="cv">${it.versions.map((v, k) => `<option value="${k}">${esc(v.name)} · ${esc(v.base || "")}</option>`).join("")}</select>
-    <div class="cimgs"></div><div class="cinfo"></div><div class="cdesc muted"></div>
+    <select id="cv">${it.versions.map((v, k) => `<option value="${k}">${k === 0 ? "★ Latest: " : ""}${esc(v.name)} · ${esc(v.base || "")}${v.date ? " · " + esc(v.date) : ""}</option>`).join("")}</select>
+    <div class="cimgs"></div><div class="cinfo"></div><select id="cf"></select><div class="cdesc muted"></div>
     <div class="foot"><span class="hint" id="cst" style="margin-right:auto"></span><button class="ghost" data-x>Close</button><button class="btn primary" id="cdl">Download</button></div></div>`);
   m.append(d);
   const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
@@ -1317,21 +1681,26 @@ function civDetail(it) {
   const draw = () => {
     const v = it.versions[vi];
     $(".cimgs", d).innerHTML = v.images.map(i => i.type === "video" ? `<video src="/manny/api/civitai/img?u=${encodeURIComponent(i.url)}" muted loop autoplay playsinline></video>` : `<img src="/manny/api/civitai/img?u=${encodeURIComponent(i.url)}" loading="lazy">`).join("") || `<div class="hint">No previews${S.incog ? "" : " (mature previews show only in private mode)"}.</div>`;
-    const f = v.files.find(x => x.primary) || v.files[0], fam = loraFamily(v.base);
-    const works = { sdxl: "Anime Desire", qwen: "Qwen Image 2.1", zimage: "Z-Image Turbo", anima: "Anima", wan22: "Video › Wan 2.2", ltx: "Video › LTX-2.5", h3: "Video › MiniMax H3", krea: "Krea 2", flux3: "FLUX 3 Klein", moss: "MOSS" }[fam];
+    const fsel = $("#cf", d); fsel.innerHTML = v.files.map((x, k) => `<option value="${k}" ${x.primary ? "selected" : ""}>${esc(x.name)} · ${fmtSize((x.sizeKB || 0) * 1024)}</option>`).join(""); fsel.classList.toggle("hidden", v.files.length < 2);
+    const f = v.files[+fsel.value] || v.files.find(x => x.primary) || v.files[0], fam = loraFamily(v.base), typ = it.type || "LORA";
+    const isSD = /sd 1|sd1|sdxl|pony|illustrious|noobai/i.test(v.base || "");
+    const works = typ === "Checkpoint" ? (isSD ? "Create › Image (under Your checkpoints)" : "the node graph (downloaded to diffusion_models)")
+      : /LORA|LoCon|DoRA/.test(typ) ? { sdxl: "Anime Desire and your SDXL checkpoints", qwen: "Qwen Image 2.1", zimage: "Z-Image Turbo", anima: "Anima", wan22: "Video › Wan 2.2", ltx: "Video › LTX-2.5", h3: "Video › MiniMax H3", krea: "Krea 2", flux3: "FLUX 3 Klein", moss: "MOSS" }[fam]
+      : "the node graph";
     $(".cinfo", d).innerHTML = `<div class="kv"><span>Made for</span><span>${esc(v.base || "?")}</span><span>Works with</span><span>${works ? esc(works) : "<span class='warn'>none of your models</span>"}</span>
       <span>Trigger words</span><span>${v.trained.length ? esc(v.trained.join(", ")) : "none"}</span><span>File</span><span>${f ? esc(f.name) + " · " + fmtSize((f.sizeKB || 0) * 1024) : "no .safetensors file"}</span></div>`;
     $("#cdl", d).disabled = !f;
   };
   $("#cv", d).onchange = e => { vi = +e.target.value; draw(); };
+  $("#cf", d).onchange = () => draw();
   draw();
   $("#cdl", d).onclick = async () => {
-    const v = it.versions[vi], f = v.files.find(x => x.primary) || v.files[0], btn = $("#cdl", d);
+    const v = it.versions[vi], f = v.files[+$("#cf", d).value] || v.files.find(x => x.primary) || v.files[0], btn = $("#cdl", d);
     btn.disabled = true;
     try {
-      const r = await post("/manny/api/civitai/download", { version: v.id, file: f.name, private: S.incog });
+      const r = await post("/manny/api/civitai/download", { version: v.id, file: f.name, type: it.type, private: S.incog });
       await pollJob(r.id, s => { const e = $("#cst", d); if (e) e.textContent = s; });
-      loraCache = null; toast(`${it.name} installed`); const e = $("#cst", d); if (e) e.textContent = "Installed. Add it from Create › LoRAs.";
+      loraCache = null; ckptCache = null; toast(`${it.name} installed`); const e = $("#cst", d); if (e) e.textContent = /LORA|LoCon|DoRA/.test(it.type || "LORA") ? "Installed. Add it from Create › LoRAs." : "Installed. It's in your model lists now.";
     } catch (e) { toast("Download failed: " + e.message, true); btn.disabled = false; }
   };
 }
@@ -1410,6 +1779,295 @@ function filmDialog(b, clipOf, after) {
 
 /* ------------------------------------------------------------ REEL: pictures and clips cut to a song */
 S.reel = { picks: [], song: "", aspect: "9:16", length: 30, cut: 1.2 };
+/* ------------------------------------------------------------ PROJECTS: idea → script → cast → keyframes → storyboard → sound → film */
+const P_CAMS = { static: "static locked-off camera", "push in": "slow dolly push-in toward the subject", "pull back": "slow dolly pull-back revealing the scene", "pan left": "smooth pan left", "pan right": "smooth pan right", tracking: "tracking shot following the subject", orbit: "camera orbits around the subject", "crane up": "crane shot rising up", "crane down": "crane shot descending", handheld: "handheld camera with natural shake", "close-up": "tight close-up", "low angle": "low-angle hero shot", drone: "aerial drone flyover", "slow motion": "slow motion" };
+const P_TONES = ["Cinematic drama", "Dark thriller", "Epic fantasy", "Sci-fi", "Anime", "Music video", "Comedy", "Horror", "Documentary", "Commercial"];
+let projSave = null;
+const saveProject = (pr, now) => { clearTimeout(projSave); const go = () => post("/manny/api/projects", pr).then(r => { if (!pr.id) pr.id = r.id; }); if (now || !pr.id) return go(); projSave = setTimeout(go, 700); };
+async function pollJob(id, onStage) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 3000));
+    const j = await api("/manny/api/job/" + id);
+    if (onStage) onStage(j.stage || "");
+    if (j.status === "done") return j.result;
+    if (j.status !== "running") throw new Error(j.error || j.stage || "failed");
+  }
+}
+// the shot text with each character's look written in, so every shot is self-contained
+function shotText(pr, s, withCamera) {
+  let t = s.action || "";
+  const cast = (pr.cast || []).map(id => S.chars.find(c => c.id === id)).filter(Boolean);
+  cast.forEach(c => { const first = c.name.split(" ")[0]; const look = [c.trigger, c.look].filter(Boolean).join(", "); if (look && new RegExp("\\b" + first + "\\b", "i").test(t) && !t.includes(look)) t = t.replace(new RegExp("\\b(" + c.name + "|" + first + ")\\b", "i"), `$1 (${look})`); });
+  if (withCamera && s.camera && P_CAMS[s.camera]) t = t.replace(/[.\s]*$/, "") + ". " + P_CAMS[s.camera] + ".";
+  return t;
+}
+async function pageProjects(main, arg) {
+  await loadChars();
+  let list = []; try { list = await api("/manny/api/projects" + PQ()); } catch { }
+  const pr = arg ? list.find(x => x.id === arg) : null;
+  if (pr) return projectView(main, pr);
+  const p = h(`<div class="page"><div class="eyebrow">Projects</div><h1>Projects</h1>
+    <p class="hint" style="max-width:720px">A project takes a film from an idea to the finished cut: the AI writes the script and shot list, you cast your characters, Studio makes a keyframe per shot, sends them to the Storyboard for takes, adds music and voices, and cuts the film.</p>
+    <div class="row" style="margin:14px 0"><button class="btn primary" id="np">＋ New project</button></div><div class="pgrid"></div></div>`);
+  main.append(p);
+  const g = $(".pgrid", p);
+  if (!list.length) g.append(h(`<div class="empty">No projects yet.</div>`));
+  list.forEach(x => {
+    const kf = (x.shots || []).find(s => s.keyframe);
+    const c = h(`<a class="pcard" href="#/projects/${x.id}"><div class="pthumb" style="${kf ? `background-image:url('${inputUrl(kf.keyframe)}')` : ""}">${kf ? "" : "▤"}</div><div class="pb"><b>${esc(x.title || x.name || "Untitled")}</b><span>${(x.shots || []).length} shots · ${esc(x.stage || "Idea")}</span></div></a>`);
+    g.append(c);
+  });
+  $("#np", p).onclick = async () => { const n = { name: "New film", idea: "", tone: "Cinematic drama", nshots: 6, seconds: 5, cast: [], shots: [], private: !!S.incog, stage: "Idea" }; await saveProject(n, true); location.hash = "#/projects/" + n.id; };
+}
+function projectView(main, pr) {
+  const p = h(`<div class="page proj"><div class="eyebrow"><a href="#/projects">Projects</a> ›</div>
+    <input class="ptitle" value="${esc(pr.title || pr.name || "")}" placeholder="Film title">
+    <div class="psteps"></div><div class="pbody"></div></div>`);
+  main.append(p);
+  $(".ptitle", p).oninput = e => { pr.title = e.target.value; saveProject(pr); };
+  const steps = [["idea", "1 · Idea"], ["script", "2 · Script"], ["cast", "3 · Cast"], ["frames", "4 · Keyframes"], ["board", "5 · Storyboard"], ["sound", "6 · Sound & film"]];
+  let cur = pr.step || (pr.shots && pr.shots.length ? "script" : "idea");
+  const go = k => { cur = k; pr.step = k; saveProject(pr); draw(); };
+  const draw = () => {
+    $(".psteps", p).innerHTML = ""; steps.forEach(([k, l]) => { const c = h(`<div class="chip ${k === cur ? "on" : ""}">${l}</div>`); c.onclick = () => go(k); $(".psteps", p).append(c); });
+    const b = $(".pbody", p); b.innerHTML = "";
+    ({ idea: stepIdea, script: stepScript, cast: stepCast, frames: stepFrames, board: stepBoard, sound: stepSound })[cur](b, pr, go, draw);
+  };
+  draw();
+}
+function stepIdea(b, pr, go) {
+  const d = h(`<div class="panel pform">
+    <label class="lbl">What's the film about?</label><textarea id="pi" rows="5" placeholder="e.g. A lighthouse keeper finds a girl washed ashore after a storm; she can't speak, and the sea keeps calling her back."></textarea>
+    <label class="lbl">Tone</label><div class="chips" id="pt"></div>
+    <div class="grid4"><div><label class="lbl">Shots</label><select id="pn">${[3, 4, 5, 6, 8, 10, 12].map(n => `<option>${n}</option>`).join("")}</select></div>
+      <div><label class="lbl">Seconds per shot</label><select id="ps">${[3, 5, 8, 10].map(n => `<option>${n}</option>`).join("")}</select></div></div>
+    <div class="row"><button class="btn primary" id="pw">✨ Write the script</button><span class="hint" id="pst"></span></div>
+    <p class="hint">The local AI (on this PC) writes a title, a logline, a music style and the shot list. You can edit everything after. Pick your characters in Cast first if you want them written in.</p></div>`);
+  b.append(d);
+  $("#pi", d).value = pr.idea || ""; $("#pn", d).value = pr.nshots || 6; $("#ps", d).value = pr.seconds || 5;
+  P_TONES.forEach(t => { const c = h(`<div class="chip ${pr.tone === t ? "on" : ""}">${t}</div>`); c.onclick = () => { pr.tone = t; saveProject(pr); $$("#pt .chip", d).forEach(x => x.classList.toggle("on", x === c)); }; $("#pt", d).append(c); });
+  $("#pi", d).oninput = e => { pr.idea = e.target.value; saveProject(pr); };
+  $("#pn", d).onchange = e => { pr.nshots = +e.target.value; saveProject(pr); };
+  $("#ps", d).onchange = e => { pr.seconds = +e.target.value; saveProject(pr); };
+  $("#pw", d).onclick = async () => {
+    if ((pr.idea || "").trim().length < 8) return toast("Describe the idea first", true);
+    if ((pr.shots || []).length && !confirm("Replace the current shot list with a new one?")) return;
+    const btn = $("#pw", d); btn.disabled = true;
+    try {
+      const cast = (pr.cast || []).map(id => S.chars.find(c => c.id === id)).filter(Boolean).map(c => ({ name: c.name, look: [c.trigger, c.look].filter(Boolean).join(", ") }));
+      const r = await post("/manny/api/projects/script", { idea: pr.idea, tone: pr.tone, shots: pr.nshots || 6, seconds: pr.seconds || 5, cast, private: !!pr.private });
+      const res = await pollJob(r.id, st => { const e = $("#pst", d); if (e) e.textContent = st + "…"; });
+      Object.assign(pr, { title: pr.title && pr.title !== "New film" ? pr.title : res.title, logline: res.logline, music: res.music, shots: res.shots, stage: "Script" });
+      await saveProject(pr, true); toast("Script written"); go("script");
+    } catch (e) { toast("The AI couldn't write it: " + e.message.slice(0, 200), true); btn.disabled = false; const s = $("#pst", d); if (s) s.textContent = ""; }
+  };
+}
+function stepScript(b, pr, go, draw) {
+  const d = h(`<div><div class="panel"><label class="lbl">Logline</label><textarea rows="2" id="pl"></textarea></div><div class="pshots"></div>
+    <div class="row" style="margin-top:10px"><button class="ghost" id="padd">＋ Add a shot</button><button class="btn primary" id="pnext">Next: cast →</button></div></div>`);
+  b.append(d);
+  $("#pl", d).value = pr.logline || ""; $("#pl", d).oninput = e => { pr.logline = e.target.value; saveProject(pr); };
+  const box = $(".pshots", d);
+  if (!(pr.shots || []).length) box.append(h(`<div class="empty">No shots yet. Write the script from the idea, or add shots by hand.</div>`));
+  (pr.shots || []).forEach((s, k) => {
+    const el = h(`<div class="pshot panel"><div class="row" style="justify-content:space-between"><input type="text" class="pst" value="${esc(s.title || "")}"><div class="row"><button class="icon" data-u title="Move up">↑</button><button class="icon" data-dn title="Move down">↓</button><button class="icon" data-x title="Remove">✕</button></div></div>
+      <textarea rows="3" class="pa" placeholder="What we see">${esc(s.action || "")}</textarea>
+      <div class="row wrap"><select class="pc">${Object.keys(P_CAMS).map(c => `<option ${c === s.camera ? "selected" : ""}>${c}</option>`).join("")}</select>
+      <select class="psec">${[3, 5, 8, 10].map(n => `<option ${n === +s.seconds ? "selected" : ""}>${n}</option>`).join("")}</select><span class="hint">s</span>
+      <input type="text" class="pd" placeholder="Dialogue (optional)" value="${esc(s.dialogue || "")}"></div><div class="hint">Shot ${k + 1}${(s.characters || []).length ? " · " + esc(s.characters.join(", ")) : ""}</div></div>`);
+    $(".pst", el).oninput = e => { s.title = e.target.value; saveProject(pr); };
+    $(".pa", el).oninput = e => { s.action = e.target.value; saveProject(pr); };
+    $(".pc", el).onchange = e => { s.camera = e.target.value; saveProject(pr); };
+    $(".psec", el).onchange = e => { s.seconds = +e.target.value; saveProject(pr); };
+    $(".pd", el).oninput = e => { s.dialogue = e.target.value; saveProject(pr); };
+    $("[data-x]", el).onclick = () => { pr.shots.splice(k, 1); saveProject(pr); draw(); };
+    $("[data-u]", el).onclick = () => { if (k) { pr.shots.splice(k - 1, 0, pr.shots.splice(k, 1)[0]); saveProject(pr); draw(); } };
+    $("[data-dn]", el).onclick = () => { if (k < pr.shots.length - 1) { pr.shots.splice(k + 1, 0, pr.shots.splice(k, 1)[0]); saveProject(pr); draw(); } };
+    box.append(el);
+  });
+  $("#padd", d).onclick = () => { (pr.shots = pr.shots || []).push({ id: Math.random().toString(36).slice(2, 10), title: "New shot", action: "", camera: "static", seconds: pr.seconds || 5, characters: [], dialogue: "" }); saveProject(pr); draw(); };
+  $("#pnext", d).onclick = () => go("cast");
+}
+function stepCast(b, pr, go) {
+  const named = [...new Set((pr.shots || []).flatMap(s => s.characters || []))];
+  const d = h(`<div class="panel"><p class="hint" style="margin-top:0">Pick the characters in this film. Their face is used for the keyframes and their look is written into every shot they're in.${named.length ? ` The script names: <b>${esc(named.join(", "))}</b>.` : ""}</p><div class="pcast"></div>
+    <div class="row" style="margin-top:12px"><a class="ghost" href="#/characters">＋ New character</a><button class="btn primary" id="pnext">Next: keyframes →</button></div></div>`);
+  b.append(d);
+  pr.cast = pr.cast || [];
+  if (!S.chars.length) $(".pcast", d).append(h(`<div class="empty">No characters yet. Make some on the Characters page.</div>`));
+  S.chars.forEach(c => {
+    const on = pr.cast.includes(c.id);
+    const el = h(`<div class="cpick ${on ? "on" : ""}">${c.face ? `<img src="${inputUrl(c.face)}">` : `<span class="av">${esc(c.name[0] || "?")}</span>`}${esc(c.name)}</div>`);
+    el.onclick = () => { const i = pr.cast.indexOf(c.id); if (i < 0) pr.cast.push(c.id); else pr.cast.splice(i, 1); saveProject(pr); el.classList.toggle("on"); };
+    $(".pcast", d).append(el);
+  });
+  $("#pnext", d).onclick = () => go("frames");
+}
+function stepFrames(b, pr, go, draw) {
+  const k = findApp("image"), app = k >= 0 ? S.apps[k] : null;
+  const d = h(`<div><div class="panel"><p class="hint" style="margin-top:0">One still per shot, made with the Image app's current model and settings${app ? ` (<b>${esc(String(valuesFor(app)[layout(app).model?.key] || "").split("(")[0])}</b> — change it in Create)` : ""}. Shots with one character use that character's face as the reference. They become each shot's first frame.</p>
+    <div class="row"><button class="btn primary" id="pk">▣ Make keyframes for shots without one</button><button class="ghost" id="pka">Redo all</button><span class="hint" id="pks"></span></div></div><div class="pframes"></div>
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="pnext">Next: storyboard →</button></div></div>`);
+  b.append(d);
+  (pr.shots || []).forEach((s, i) => {
+    const el = h(`<div class="pframe"><div class="pfi">${s.keyframe ? `<img src="${inputUrl(s.keyframe)}">` : `<span>Shot ${i + 1}</span>`}</div><b>${esc(s.title || "")}</b><button class="ghost sm">↻ Redo</button></div>`);
+    $("button", el).onclick = () => run([s]);
+    $(".pframes", d).append(el);
+  });
+  const run = async shots => {
+    if (!app) return toast("The Image app is missing", true);
+    if (!shots.length) return toast("Every shot has a keyframe. Use Redo to make new ones.");
+    const L = layout(app), v = buildValues(app);
+    const ref = L.refs.find(r => r.media.kind === "image");
+    const items = shots.map(s => {
+      const inShot = (pr.cast || []).map(id => S.chars.find(c => c.id === id)).filter(c => c && c.face && new RegExp("\\b" + c.name.split(" ")[0] + "\\b", "i").test((s.characters || []).join(" ") + " " + s.action));
+      return { id: s.id, prompt: shotText(pr, s, false) + (pr.tone ? `. ${pr.tone} style, film still` : ""), ref: inShot.length === 1 && ref ? inShot[0].face : "" };
+    });
+    try {
+      const r = await post(`/manny/api/projects/${pr.id}/keyframes`, { private: !!pr.private, values: v, shots: items, prompt_key: L.prompt?.key, ref_key: ref?.media.key, ref_toggle_key: ref?.toggle?.key, seed_keys: app.inputs.filter(i => i.kind === "seed").map(i => i.key) });
+      toast(`Making ${items.length} keyframe${items.length > 1 ? "s" : ""}. They render one after another; you can leave this page.`);
+      await pollJob(r.id, st => { const e = $("#pks", d); if (e) e.textContent = st; });
+      const fresh = (await api("/manny/api/projects" + PQ())).find(x => x.id === pr.id); if (fresh) Object.assign(pr, { shots: fresh.shots });
+      pr.stage = "Keyframes"; saveProject(pr); toast("Keyframes ready"); if (document.body.contains(d)) draw();
+    } catch (e) { toast("Keyframes stopped: " + e.message.slice(0, 200), true); }
+  };
+  $("#pk", d).onclick = () => run((pr.shots || []).filter(s => !s.keyframe));
+  $("#pka", d).onclick = () => { if (confirm("Make new keyframes for every shot?")) run(pr.shots || []); };
+  $("#pnext", d).onclick = () => go("board");
+}
+async function stepBoard(b, pr, go) {
+  await loadBoards();
+  const bd = S.boards.find(x => x.id === pr.board);
+  const d = h(`<div class="panel"><p class="hint" style="margin-top:0">Sends the shots to a Storyboard board: each shot's prompt (with the camera move and character looks) and its keyframe as the first frame. There you draft takes, pick the best, and finish them.</p>
+    <p>${bd ? `Board: <b>${esc(bd.name)}</b> · ${bd.shots.length} shots` : "No board yet."}</p>
+    <div class="row"><button class="btn primary" id="pbs">${bd ? "↻ Update the board" : "▤ Create the storyboard"}</button>${bd ? `<button class="btn" id="pbo">Open the board →</button>` : ""}</div>
+    <p class="hint">Updating keeps the takes you already made; it adds new shots and refreshes prompts and first frames of shots that have no takes yet.</p></div>`);
+  b.append(d);
+  $("#pbs", d).onclick = async () => {
+    let board = S.boards.find(x => x.id === pr.board);
+    if (!board) { board = { name: pr.title || "Project film", shots: [], private: !!pr.private }; S.boards.push(board); }
+    board.name = pr.title || board.name;
+    const old = board.shots;
+    board.shots = (pr.shots || []).map(s => {
+      const prev = old.find(x => x.projShot === s.id);
+      const text = shotText(pr, s, true);
+      if (prev) { if (!(prev.takes || []).length) { prev.prompt = text; prev.image = s.keyframe || prev.image; } return prev; }
+      const n = newShot(text, s.keyframe || ""); n.projShot = s.id; return n;
+    });
+    await saveBoard(board, true); pr.board = board.id; pr.stage = "Storyboard"; await saveProject(pr, true);
+    S.boardId = board.id; store.set("board", board.id); toast("Storyboard ready"); go("board");
+  };
+  const o = $("#pbo", d); if (o) o.onclick = () => { S.boardId = pr.board; store.set("board", pr.board); location.hash = "#/storyboard"; };
+}
+function stepSound(b, pr) {
+  const total = (pr.shots || []).reduce((a, s) => a + (+s.seconds || 5), 0);
+  const lines = (pr.shots || []).filter(s => s.dialogue);
+  const d = h(`<div><div class="panel pform"><label class="lbl">Music (${total} s, the film's length)</label><textarea id="pm" rows="2" placeholder="genre, mood, instruments"></textarea>
+    <div class="row"><button class="btn primary" id="pmk">♫ Make the music</button><span class="hint" id="pms">${pr.music_file ? "Made: " + esc(pr.music_file.filename) : ""}</span></div>${pr.music_file ? `<audio controls src="${fileUrl(pr.music_file, pr.music_file.private)}"></audio>` : ""}</div>
+    <div class="panel pform"><label class="lbl">Dialogue (${lines.length} line${lines.length === 1 ? "" : "s"})</label>${lines.length ? lines.map(s => `<div class="hint">“${esc(s.dialogue)}” <i>(${esc(s.title)})</i>${s.voice_file ? " ✓" : ""}</div>`).join("") : `<p class="hint">No dialogue in the script.</p>`}
+    ${lines.length ? `<div class="row"><button class="btn" id="pvk">☺ Make the voice lines</button><span class="hint" id="pvs"></span></div><p class="hint">Uses each character's voice sample when they have one (Characters page). Lines are in Music &amp; voices.</p>` : ""}</div>
+    <div class="panel"><p class="hint" style="margin-top:0">The cut: open the board and press 🎬 Make the film. It uses each shot's finished take, adds titles and crossfades, and the music bed.</p><div class="row"><button class="btn primary" id="pfo">🎬 Open the board to cut the film →</button></div></div></div>`);
+  b.append(d);
+  $("#pm", d).value = pr.music || ""; $("#pm", d).oninput = e => { pr.music = e.target.value; saveProject(pr); };
+  $("#pmk", d).onclick = async () => {
+    if (!(pr.music || "").trim()) return toast("Describe the music first", true);
+    const btn = $("#pmk", d); btn.disabled = true;
+    try {
+      const r = await post("/manny/api/music", { tags: pr.music, instrumental: true, seconds: Math.min(240, Math.max(15, total)), name: (pr.title || "Film") + " score", private: !!pr.private });
+      const res = await pollJob(r.id, st => { const e = $("#pms", d); if (e) e.textContent = st + "…"; });
+      pr.music_file = res; saveProject(pr, true); toast("Music ready. It's in Music & voices; pick it as the music in the film editor."); const e = $("#pms", d); if (e) e.textContent = "Made: " + res.filename;
+    } catch (e) { toast("Music failed: " + e.message.slice(0, 160), true); } finally { btn.disabled = false; }
+  };
+  const vk = $("#pvk", d); if (vk) vk.onclick = async () => {
+    vk.disabled = true;
+    for (const s of lines) {
+      const who = (pr.cast || []).map(id => S.chars.find(c => c.id === id)).find(c => c && (s.characters || []).some(n => c.name.toLowerCase().startsWith(n.toLowerCase().split(" ")[0])));
+      try {
+        $("#pvs", d).textContent = "Speaking: " + s.title;
+        const r = await post("/manny/api/voice", { text: s.dialogue, voice: who && who.voice ? who.voice : "", name: (pr.title || "Film") + " - " + s.title, private: !!pr.private });
+        s.voice_file = await pollJob(r.id); saveProject(pr);
+      } catch (e) { toast("Voice failed for " + s.title + ": " + e.message.slice(0, 120), true); }
+    }
+    $("#pvs", d).textContent = "Done"; vk.disabled = false; toast("Voice lines ready in Music & voices");
+  };
+  $("#pfo", d).onclick = () => { if (!pr.board) return toast("Create the storyboard first (step 5)", true); S.boardId = pr.board; store.set("board", pr.board); location.hash = "#/storyboard"; };
+}
+
+/* ------------------------------------------------------------ MUSIC + VOICES */
+async function pageSound(main) {
+  const st = store.get("sound", { tab: "music", tags: "", lyrics: "", seconds: 60, bpm: 100, key: "C major", timesig: "4", language: "en", instrumental: true, text: "", exag: 0.5, cfgw: 0.5, voice: "", voiceName: "" });
+  const opts = await api("/manny/api/sound/options").catch(() => ({ keys: ["C major"], languages: ["en"] }));
+  const p = h(`<div class="page"><div class="eyebrow">Sound</div><h1>Music &amp; voices</h1>
+    <div class="chips" id="stab"><div class="chip" data-v="music">♫ Music</div><div class="chip" data-v="voice">☺ Voice</div></div>
+    <div class="panel sform" id="f-music">
+      <label class="lbl">Style</label><textarea id="m-tags" rows="2" placeholder="Genre, mood, instruments, tempo feel. e.g. dark cinematic synthwave, pulsing bass, female vocals"></textarea>
+      <label class="tog"><input type="checkbox" id="m-inst"><span><b>Instrumental</b><small>No singing. Turn off to write lyrics.</small></span></label>
+      <div id="m-lyrbox"><label class="lbl">Lyrics</label><textarea id="m-lyr" rows="7" placeholder="[Verse 1]\n…\n[Chorus]\n…"></textarea></div>
+      <div class="grid4"><div><label class="lbl">Length</label><select id="m-sec">${[15, 30, 45, 60, 90, 120, 180, 240].map(v => `<option value="${v}">${v < 60 ? v + " s" : (v / 60) + " min"}</option>`).join("")}</select></div>
+        <div><label class="lbl">BPM</label><input type="number" id="m-bpm" min="40" max="220"></div>
+        <div><label class="lbl">Key</label><select id="m-key">${opts.keys.map(k => `<option>${k}</option>`).join("")}</select></div>
+        <div><label class="lbl">Time</label><select id="m-ts"><option value="4">4/4</option><option value="3">3/4</option><option value="6">6/8</option><option value="2">2/4</option></select></div></div>
+      <div class="row"><input type="text" id="m-name" placeholder="Name (optional)"><button class="btn primary" id="m-go">♫ Make the song</button></div>
+      <p class="hint">ACE-Step 1.5 XL Turbo, on this PC. Saved in Audio › Music.</p></div>
+    <div class="panel sform hidden" id="f-voice">
+      <label class="lbl">What to say</label><textarea id="v-text" rows="5" placeholder="Type the line or the whole speech."></textarea>
+      <label class="lbl">Voice to copy (optional)</label><div class="ref audio" id="v-ref" style="aspect-ratio:auto;min-height:70px"><span class="plus">+</span><span class="rl">Drop a clean 5–15 s recording of the voice (wav, mp3). Empty: a default voice.</span><input type="file" hidden accept="audio/*"></div>
+      <div class="grid4"><div><label class="lbl">Emotion</label><input type="range" id="v-exag" min="0.25" max="1.5" step="0.05"></div><div><label class="lbl">Pace / stability</label><input type="range" id="v-cfg" min="0.2" max="1" step="0.05"></div></div>
+      <div class="row"><input type="text" id="v-name" placeholder="Name (optional)"><button class="btn primary" id="v-go">☺ Speak</button></div>
+      <p class="hint">Chatterbox, on this PC. Only copy voices you have permission to use. Saved in Audio › Voices.</p></div>
+    <div id="sjobs"></div>
+    <div class="section-head"><h2>Your sounds</h2></div><div id="slist" class="slist"></div></div>`);
+  main.append(p);
+  const save = () => store.set("sound", { ...st });
+  const tab = v => { st.tab = v; save(); $$("#stab .chip", p).forEach(c => c.classList.toggle("on", c.dataset.v === v)); $("#f-music", p).classList.toggle("hidden", v !== "music"); $("#f-voice", p).classList.toggle("hidden", v !== "voice"); };
+  $$("#stab .chip", p).forEach(c => c.onclick = () => tab(c.dataset.v)); tab(st.tab);
+  $("#m-tags", p).value = st.tags; $("#m-lyr", p).value = st.lyrics; $("#m-sec", p).value = st.seconds; $("#m-bpm", p).value = st.bpm; $("#m-key", p).value = st.key; $("#m-ts", p).value = st.timesig; $("#m-inst", p).checked = st.instrumental;
+  const lyr = () => $("#m-lyrbox", p).classList.toggle("hidden", $("#m-inst", p).checked); lyr(); $("#m-inst", p).onchange = lyr;
+  $("#v-text", p).value = st.text; $("#v-exag", p).value = st.exag; $("#v-cfg", p).value = st.cfgw;
+  const ref = $("#v-ref", p), fi = $("input", ref);
+  const showRef = () => { if (st.voice) { ref.classList.add("on"); $(".plus", ref).textContent = "♪"; $(".rl", ref).textContent = st.voiceName || st.voice; } };
+  showRef();
+  const take = async f => { try { st.voice = await upload(f); st.voiceName = f.name; save(); showRef(); } catch (e) { toast(e.message, true); } };
+  ref.onclick = e => { if (e.shiftKey && st.voice) { st.voice = ""; st.voiceName = ""; save(); route(); return; } fi.click(); }; fi.onchange = () => fi.files[0] && take(fi.files[0]);
+  ref.ondragover = e => e.preventDefault(); ref.ondrop = e => { e.preventDefault(); e.dataTransfer.files[0] && take(e.dataTransfer.files[0]); };
+  const jobs = [];
+  const drawJobs = () => { $("#sjobs", p).innerHTML = jobs.map(j => `<div class="sjob ${j.status}"><b>${j.kind === "music" ? "♫" : "☺"} ${esc(j.label)}</b><span>${esc(j.stage)}</span></div>`).join(""); };
+  const poll = async j => {
+    while (j.status === "running") {
+      await new Promise(r => setTimeout(r, 3000));
+      if (!document.body.contains(p)) return;
+      try { const r = await api("/manny/api/job/" + j.id); j.stage = r.stage; j.status = r.status === "lost" ? "failed" : r.status; if (r.error) j.stage = r.error.slice(0, 220); } catch { }
+      drawJobs();
+    }
+    if (j.status === "done") { toast(j.kind === "music" ? "Song ready" : "Voice ready"); loadList(); }
+  };
+  const go = async (kind, body, label) => {
+    try { const r = await post("/manny/api/" + kind, { ...body, private: !!S.incog }); const j = { id: r.id, kind, label, stage: "Queued", status: "running" }; jobs.unshift(j); drawJobs(); poll(j); }
+    catch (e) { toast("Couldn't start: " + e.message.slice(0, 200), true); }
+  };
+  $("#m-go", p).onclick = () => {
+    Object.assign(st, { tags: $("#m-tags", p).value, lyrics: $("#m-lyr", p).value, seconds: +$("#m-sec", p).value, bpm: +$("#m-bpm", p).value || 100, key: $("#m-key", p).value, timesig: $("#m-ts", p).value, instrumental: $("#m-inst", p).checked }); save();
+    if (!st.tags.trim()) return toast("Describe the style first", true);
+    if (!st.instrumental && !st.lyrics.trim()) return toast("Write lyrics, or tick Instrumental", true);
+    go("music", { tags: st.tags, lyrics: st.instrumental ? "" : st.lyrics, instrumental: st.instrumental, seconds: st.seconds, bpm: st.bpm, key: st.key, timesig: st.timesig, name: $("#m-name", p).value }, $("#m-name", p).value || st.tags.slice(0, 40));
+  };
+  $("#v-go", p).onclick = () => {
+    Object.assign(st, { text: $("#v-text", p).value, exag: +$("#v-exag", p).value, cfgw: +$("#v-cfg", p).value }); save();
+    if (!st.text.trim()) return toast("Write what to say", true);
+    go("voice", { text: st.text, voice: st.voice, exaggeration: st.exag, cfg_weight: st.cfgw, name: $("#v-name", p).value }, $("#v-name", p).value || st.text.slice(0, 40));
+  };
+  const loadList = async () => {
+    const box = $("#slist", p); let list = [];
+    try { list = await api("/manny/api/sounds" + (S.incog ? "?private=1" : "")); } catch { }
+    box.innerHTML = list.length ? "" : `<div class="empty">Songs and voices you make show up here.</div>`;
+    list.forEach(it => {
+      const url = fileUrl(it, it.private);
+      box.append(h(`<div class="sitem"><div class="sic">${it.group === "music" ? "♫" : "☺"}</div><div class="sn"><b>${esc(it.filename.replace(/_\d+_?\.\w+$/, ""))}</b><small>${fmtDate(it.mtime)} · ${fmtSize(it.size)}</small></div><audio src="${url}" controls preload="none"></audio><a class="ghost sm" href="${url}" download="${esc(it.filename)}">Download</a></div>`));
+    });
+  };
+  loadList();
+}
+
 async function pageReel(main) {
   const R = S.reel;
   const p = h(`<div class="page"><div class="eyebrow">Reel</div><h1>Cut to the beat</h1>
@@ -1470,13 +2128,458 @@ async function pageReel(main) {
 function moreMenu() {
   const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
   const d = h(`<div class="dialog sheet"><div class="row" style="justify-content:space-between"><h2>More</h2><button class="icon" data-x>✕</button></div>
-    <a href="#/home" class="mitem">⌂ Home</a><a href="#/characters" class="mitem">☺ Characters</a><a href="#/loras" class="mitem">◈ LoRAs</a><a href="#/reel" class="mitem">♫ Reel</a></div>`);
+    <a href="#/home" class="mitem">⌂ Home</a><a href="#/projects" class="mitem">◧ Projects</a><a href="#/characters" class="mitem">☺ Characters</a><a href="#/3d" class="mitem">◰ 3D sets</a><a href="#/settings" class="mitem">⚙ Settings</a><a href="#/loras" class="mitem">◈ Models &amp; LoRAs</a><a href="#/reel" class="mitem">♫ Reel</a><a href="#/sound" class="mitem">♪ Music &amp; voices</a></div>`);
   m.append(d);
   const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
   $("[data-x]", d).onclick = close; $$("a", d).forEach(a => a.addEventListener("click", close));
 }
 
+/* ------------------------------------------------------------ LOCATIONS (places, used for sets and as references) */
+async function loadLocs() { try { S.locs = await api("/manny/api/locations" + PQ()); } catch { S.locs = []; } return S.locs; }
+function editLoc(l, done) {
+  l = l ? JSON.parse(JSON.stringify(l)) : { name: "", description: "", pictures: [] };
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const d = h(`<div class="dialog wide"><div class="row" style="justify-content:space-between"><h2>${l.id ? "Edit location" : "New location"}</h2><button class="icon" data-x>✕</button></div>
+    <div><label class="lbl">Name</label><input type="text" id="ln" placeholder="Neon alley, Tokyo"></div>
+    <div><label class="lbl">What it looks like</label><textarea id="ld" rows="3" placeholder="narrow wet alley, vending machines, red lanterns, steam, night"></textarea></div>
+    <div><label class="lbl">Pictures (the first one is the main view)</label><div class="locpics"></div></div>
+    <div class="foot">${l.id ? `<button class="ghost danger" data-del style="margin-right:auto">Delete</button>` : ""}<button class="ghost" data-x>Cancel</button><button class="btn primary" data-save>Save</button></div></div>`);
+  m.append(d);
+  $("#ln", d).value = l.name || ""; $("#ld", d).value = l.description || "";
+  const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
+  $$("[data-x]", d).forEach(x => x.onclick = close);
+  const draw = () => {
+    const box = $(".locpics", d); box.innerHTML = "";
+    l.pictures.forEach((p, k) => { const t = h(`<div class="ref on"><img src="${inputUrl(p)}"><button class="x">✕</button></div>`); $(".x", t).onclick = () => { l.pictures.splice(k, 1); draw(); }; box.append(t); });
+    const add = h(`<div class="ref"><span class="plus">+</span><span class="rl">Add pictures</span><input type="file" hidden accept="image/*" multiple></div>`);
+    const fi = $("input", add); add.onclick = () => fi.click();
+    const take = async fs => { for (const f of fs) l.pictures.push(await upload(f)); draw(); };
+    fi.onchange = () => take([...fi.files]); add.ondragover = e => e.preventDefault(); add.ondrop = e => { e.preventDefault(); take([...e.dataTransfer.files]); };
+    box.append(add);
+  };
+  draw();
+  $("[data-save]", d).onclick = async () => {
+    l.name = $("#ln", d).value.trim(); l.description = $("#ld", d).value.trim(); l.private = S.incog;
+    if (!l.name) return toast("Give the location a name", true);
+    await post("/manny/api/locations", l); close(); toast("Saved " + l.name); done && done();
+  };
+  const del = $("[data-del]", d); if (del) del.onclick = async () => { if (!confirm("Delete " + l.name + "?")) return; await api("/manny/api/locations/" + l.id, { method: "DELETE" }); close(); done && done(); };
+}
+
+/* ------------------------------------------------------------ 3D: sets and scenes */
+const MOVES = [["static", "Static", 0], ["push_in", "Push in", 1.5], ["pull_back", "Pull back", 1.5], ["truck_left", "Truck left", 1.5], ["truck_right", "Truck right", 1.5],
+  ["orbit_left", "Orbit left", 30], ["orbit_right", "Orbit right", 30], ["crane_up", "Crane up", 1.5], ["crane_down", "Crane down", 1], ["pan_left", "Pan left", 25], ["pan_right", "Pan right", 25],
+  ["tilt_up", "Tilt up", 1], ["tilt_down", "Tilt down", 1], ["zoom_in", "Zoom in", 0.6], ["zoom_out", "Zoom out", 0.6], ["handheld", "Handheld", 0]];
+const MOVE_WORDS = { static: "static locked-off camera", push_in: "slow dolly push-in", pull_back: "slow dolly pull-back", truck_left: "camera trucks left", truck_right: "camera trucks right",
+  orbit_left: "camera orbits left around the subject", orbit_right: "camera orbits right around the subject", crane_up: "crane shot rising up", crane_down: "crane shot coming down",
+  pan_left: "camera pans left", pan_right: "camera pans right", tilt_up: "camera tilts up", tilt_down: "camera tilts down", zoom_in: "slow zoom in", zoom_out: "slow zoom out", handheld: "handheld camera" };
+const CAST_COLORS = [[0.92, 0.55, 0.3], [0.3, 0.5, 0.92], [0.35, 0.8, 0.45], [0.7, 0.4, 0.85], [0.95, 0.85, 0.3], [0.9, 0.35, 0.45]];
+const CAST_NAMES = ["orange", "blue", "green", "purple", "yellow", "red"];
+const rgbCss = c => `rgb(${c.map(v => Math.round(v * 255)).join(",")})`;
+function moveEnd(cam, move, amt) {   // same maths as blender/studio_scene.py
+  let P = [cam.x, cam.y, cam.z ?? 1.6], T = [cam.tx, cam.ty, cam.tz ?? 1.4], L = cam.lens || 35;
+  const d = [T[0] - P[0], T[1] - P[1], T[2] - P[2]], dl = Math.hypot(...d) || 1, fl = Math.hypot(d[0], d[1]) || 1;
+  const f = [d[0] / fl, d[1] / fl], side = [f[1], -f[0]];
+  const rot = (v, c, deg) => { const a = deg * Math.PI / 180, x = v[0] - c[0], y = v[1] - c[1]; return [c[0] + x * Math.cos(a) - y * Math.sin(a), c[1] + x * Math.sin(a) + y * Math.cos(a), v[2]]; };
+  let P2 = [...P], T2 = [...T], L2 = L;
+  switch (move) {
+    case "push_in": P2 = P.map((v, i) => v + d[i] / dl * amt); break;
+    case "pull_back": P2 = P.map((v, i) => v - d[i] / dl * amt); break;
+    case "truck_left": P2 = [P[0] - side[0] * amt, P[1] - side[1] * amt, P[2]]; T2 = [T[0] - side[0] * amt, T[1] - side[1] * amt, T[2]]; break;
+    case "truck_right": P2 = [P[0] + side[0] * amt, P[1] + side[1] * amt, P[2]]; T2 = [T[0] + side[0] * amt, T[1] + side[1] * amt, T[2]]; break;
+    case "orbit_left": P2 = rot(P, T, amt); break;
+    case "orbit_right": P2 = rot(P, T, -amt); break;
+    case "crane_up": P2 = [P[0], P[1], P[2] + amt]; break;
+    case "crane_down": P2 = [P[0], P[1], P[2] - amt]; break;
+    case "pan_left": T2 = rot(T, P, amt); break;
+    case "pan_right": T2 = rot(T, P, -amt); break;
+    case "tilt_up": T2 = [T[0], T[1], T[2] + amt]; break;
+    case "tilt_down": T2 = [T[0], T[1], T[2] - amt]; break;
+    case "zoom_in": L2 = L * (1 + amt); break;
+    case "zoom_out": L2 = Math.max(8, L / (1 + amt)); break;
+  }
+  return { P2, T2, L2 };
+}
+async function loadSets() { try { S.sets = await api("/manny/api/sets" + PQ()); } catch { S.sets = []; } return S.sets; }
+async function loadScenes() { try { S.scenes = await api("/manny/api/scenes" + PQ()); } catch { S.scenes = []; } return S.scenes; }
+const sceneSaves = {};
+function saveScene(sc, now) {
+  clearTimeout(sceneSaves[sc.id || "new"]);
+  if (sc.private == null) sc.private = S.incog;
+  const go = async () => { const r = await post("/manny/api/scenes", sc); if (!sc.id) sc.id = r.id; };
+  if (now || !sc.id) return go();
+  sceneSaves[sc.id] = setTimeout(go, 700);
+}
+const planUrl = st => `/manny/api/sets/${st.id}/plan.png?t=${Math.round(st.updated || 0)}`;
+
+async function page3D(main, arg) {
+  if (arg) return sceneEditor(main, arg);
+  const p = h(`<div class="page"><div class="eyebrow">3D</div><h1>Sets &amp; scenes</h1>
+    <p class="muted" style="max-width:720px">A set is a Blender file. Claude can build one from your location pictures, Studio can make a quick one, or you can add any .blend. Plan cameras on the set, render previews, then turn shots into footage in the Storyboard.</p>
+    <div class="hint" id="blst"></div>
+    <div class="section-head"><h2>Sets</h2><div class="row"><button class="ghost" id="qset">＋ Quick set</button><button class="ghost" id="aset">＋ Add a .blend</button><button class="ghost" id="cl">Build with Claude…</button></div></div>
+    <div class="lgrid" id="sg"></div>
+    <div class="section-head"><h2>Scenes</h2></div><div class="sclist" id="scl"></div>
+    <div class="section-head"><h2>Locations</h2><button class="ghost" id="nloc">＋ New location</button></div><div class="lgrid" id="lcg"></div></div>`);
+  main.append(p);
+  api("/manny/api/blender/status").then(s => { $("#blst", p).innerHTML = s.found ? `Blender: <b>${esc(s.path)}</b> · sets folder: <b>${esc(s.sets_folder)}</b>` : `<span class="warn">Blender wasn't found on this PC.</span>`; S.setsFolder = s.sets_folder; }).catch(() => { });
+  const [sets, scenes, locs] = await Promise.all([loadSets(), loadScenes(), loadLocs()]);
+  const sg = $("#sg", p);
+  if (!sets.length) sg.append(h(`<div class="empty">No sets yet.</div>`));
+  sets.forEach(st => {
+    const c = h(`<div class="lcard"><img src="${planUrl(st)}" class="plan"><div class="lb2"><b>${esc(st.name)}</b><span>${{ claude: "Built by Claude", studio: "Quick set", blend: ".blend" }[st.source] || ""} · ${(st.cameras || []).length} camera${(st.cameras || []).length === 1 ? "" : "s"}</span>
+      <div class="row" style="gap:6px;margin-top:6px"><button class="ghost" data-new>New scene</button><button class="icon" data-ref title="Read the .blend again">↻</button><button class="icon" data-rm title="Remove from Studio (the file stays)">✕</button></div></div></div>`);
+    $("[data-new]", c).onclick = async () => { const sc = { name: st.name + " scene", set: st.id, cast: [], shots: [] }; await saveScene(sc, true); location.hash = "#/3d/" + sc.id; };
+    $("[data-ref]", c).onclick = async () => { const r = await post(`/manny/api/sets/${st.id}/refresh`, {}); toast("Reading the set…"); await pollJob(r.id); route(); };
+    $("[data-rm]", c).onclick = async () => { if (!confirm(`Remove “${st.name}” from Studio? The .blend file stays where it is.`)) return; await api("/manny/api/sets/" + st.id, { method: "DELETE" }); route(); };
+    sg.append(c);
+  });
+  const scl = $("#scl", p);
+  if (!scenes.length) scl.append(h(`<div class="empty">No scenes yet. Pick a set and press “New scene”.</div>`));
+  scenes.forEach(sc => {
+    const st = sets.find(s => s.id === sc.set);
+    const r = h(`<a class="scrow" href="#/3d/${sc.id}"><b>${esc(sc.name)}</b><span>${esc(st ? st.name : "missing set")} · ${(sc.shots || []).length} shots · ${(sc.cast || []).length} cast</span></a>`);
+    scl.append(r);
+  });
+  const lg = $("#lcg", p);
+  locs.forEach(l => { const c = h(`<div class="lcard">${l.pictures[0] ? `<img src="${inputUrl(l.pictures[0])}">` : `<div class="lph">PLACE</div>`}<div class="lb2"><b>${esc(l.name)}</b><span>${esc((l.description || "").slice(0, 70))}</span></div></div>`); c.onclick = () => editLoc(l, route); lg.append(c); });
+  $("#nloc", p).onclick = () => editLoc(null, route);
+  $("#qset", p).onclick = () => quickSetDialog(locs);
+  $("#aset", p).onclick = () => addBlendDialog();
+  $("#cl", p).onclick = () => claudeHelp();
+}
+function jobDialog(title, body, start) {
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const d = h(`<div class="dialog"><div class="row" style="justify-content:space-between"><h2>${title}</h2><button class="icon" data-x>✕</button></div>${body}<div class="foot"><span class="hint" id="jst" style="margin-right:auto"></span><button class="ghost" data-x>Cancel</button><button class="btn primary" id="jgo">Go</button></div></div>`);
+  m.append(d);
+  const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
+  $$("[data-x]", d).forEach(x => x.onclick = close);
+  $("#jgo", d).onclick = async () => {
+    $("#jgo", d).disabled = true;
+    try { const r = await start(d); await pollJob(r.id, s => { const e = $("#jst", d); if (e) e.textContent = s; }); close(); route(); }
+    catch (e) { toast(e.message.slice(0, 300), true); $("#jgo", d).disabled = false; }
+  };
+  return d;
+}
+function quickSetDialog(locs) {
+  let back = "", kind = "room";
+  const d = jobDialog("Quick set", `<p class="hint" style="margin:0">A blocking set: floor, walls, a backdrop picture and a few boxes. Good for planning; ask Claude for a detailed one.</p>
+    <div><label class="lbl">Name</label><input type="text" id="qn" value="Set ${(S.sets || []).length + 1}"></div>
+    <div><label class="lbl">Kind</label><div class="chips" id="qk"><div class="chip" data-v="room">Room</div><div class="chip" data-v="street">Street</div><div class="chip" data-v="stage">Stage + backdrop</div><div class="chip" data-v="exterior">Open ground</div></div></div>
+    <div class="two"><div><label class="lbl">Width (m)</label><input type="number" id="qw" value="8"></div><div><label class="lbl">Depth (m)</label><input type="number" id="qd" value="8"></div></div>
+    <div><label class="lbl">Backdrop picture</label><select id="ql"><option value="">None</option>${locs.filter(l => l.pictures[0]).map(l => `<option value="${esc(l.pictures[0])}">${esc(l.name)}</option>`).join("")}</select></div>`,
+    async dd => post("/manny/api/sets/build", { name: $("#qn", dd).value, private: S.incog, location: null, set: { kind, w: +$("#qw", dd).value || 8, d: +$("#qd", dd).value || 8, h: 3.2, backdrop: $("#ql", dd).value || "" } }));
+  const chip = () => $$("#qk .chip", d).forEach(c => { c.classList.toggle("on", c.dataset.v === kind); c.onclick = () => { kind = c.dataset.v; chip(); }; }); chip();
+}
+function addBlendDialog() {
+  let up = "";
+  const d = jobDialog("Add a .blend", `<div><label class="lbl">Path on the PC</label><input type="text" id="bp" placeholder="C:\\Users\\Manny\\Documents\\Studio Sets\\Alley.blend"></div>
+    <div class="hint">or</div><div class="ref" id="bu" style="aspect-ratio:auto;min-height:64px"><span class="plus">+</span><span class="rl">Upload a .blend from this device</span><input type="file" hidden accept=".blend"></div>
+    <div><label class="lbl">Name</label><input type="text" id="bn" placeholder="(file name)"></div>`,
+    async dd => post("/manny/api/sets/add", { blend: up ? "input:" + up : $("#bp", dd).value, name: $("#bn", dd).value, private: S.incog }));
+  const bu = $("#bu", d), fi = $("input", bu); bu.onclick = () => fi.click();
+  fi.onchange = async () => { if (!fi.files[0]) return; $(".rl", bu).textContent = "Uploading…"; up = await upload(fi.files[0]); bu.classList.add("on"); $(".rl", bu).textContent = fi.files[0].name; };
+}
+function claudeHelp() {
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const root = "C:\\Users\\Manny\\AppData\\Local\\Comfy-Desktop\\ComfyUI-Installs\\ComfyUI\\ComfyUI";
+  const cfg = JSON.stringify({ mcpServers: { studio: { command: root + "\\.venv\\Scripts\\python.exe", args: [root + "\\custom_nodes\\ComfyUI-MannyStudio\\studio_mcp.py"] } } }, null, 2);
+  const d = h(`<div class="dialog wide"><div class="row" style="justify-content:space-between"><h2>Build sets with Claude</h2><button class="icon" data-x>✕</button></div>
+    <ol class="muted" style="line-height:1.7;margin:0;padding-left:18px"><li>Add a <b>Location</b> here with a few pictures of the place.</li>
+    <li>In Claude (desktop app), with the Studio connector and the Higgsfield Bridge on, ask: <i>“Build a 3D set in Blender from my Studio location ‘Neon alley’ and add it to Studio.”</i></li>
+    <li>Claude reads the pictures from Studio, builds the set in Blender, saves it in the Studio Sets folder and registers it. It shows up here with its cameras.</li></ol>
+    <label class="lbl">One-time setup: add this to Claude config (run Add Studio to Claude.cmd in Downloads › Studio MCP setup)</label><pre class="cfg"></pre><button class="ghost" id="cp">Copy</button></div>`);
+  m.append(d); $(".cfg", d).textContent = cfg;
+  $("#cp", d).onclick = () => copyText(cfg);
+  $("[data-x]", d).onclick = () => { m.classList.add("hidden"); m.innerHTML = ""; };
+}
+
+async function sceneEditor(main, id) {
+  const [scenes, sets] = await Promise.all([loadScenes(), loadSets()]); await loadChars(); await loadLocs();
+  const sc = scenes.find(x => x.id === id); if (!sc) { main.append(h(`<div class="page"><div class="empty">Scene not found.</div></div>`)); return; }
+  const st = sets.find(x => x.id === sc.set);
+  sc.cast = sc.cast || []; sc.shots = sc.shots || [];
+  let sel = sc.shots[0] ? sc.shots[0].id : null;
+  const p = h(`<div class="page"><div class="eyebrow"><a href="#/3d">3D</a> · ${esc(st ? st.name : "missing set")}</div>
+    <div class="row sbtop"><h1 id="scn" contenteditable="true" spellcheck="false">${esc(sc.name)}</h1></div>
+    <div class="sced"><div class="planbox"><div class="planwrap"><img class="planimg"><svg class="plansvg"></svg></div>
+      <p class="hint">Drag the camera ● and what it looks at ◆. Drag people. With a shot selected, ⇢ sets where a person walks to.</p></div>
+      <div class="scside">
+        <div class="panel"><div class="lblrow"><label class="lbl">Location</label></div><select id="sloc"><option value="">None</option>${S.locs.map(l => `<option value="${l.id}" ${sc.location === l.id ? "selected" : ""}>${esc(l.name)}</option>`).join("")}</select>
+          <div class="lblrow" style="margin-top:12px"><label class="lbl">Cast</label><select id="addc"><option value="">＋ Add…</option>${S.chars.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}<option value="_">Someone else</option></select></div><div id="castl"></div></div>
+        <div class="panel"><div class="lblrow"><label class="lbl">Shots</label><select id="adds"><option value="">＋ Add shot…</option><option value="_studio">Studio camera</option>${(st?.cameras || []).map(c => `<option value="${esc(c.name)}">Set camera: ${esc(c.name)}</option>`).join("")}</select></div><div id="shotl"></div></div>
+        <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn" id="rgrey">Render previews</button><button class="btn" id="rlit">Render lit</button><button class="btn primary" id="tosb">Send to Storyboard →</button></div>
+        <div class="hint" id="rst"></div>
+      </div></div></div>`);
+  main.append(p);
+  $("#scn", p).oninput = e => { sc.name = e.target.textContent.trim() || "Scene"; saveScene(sc); };
+  $("#sloc", p).onchange = e => { sc.location = e.target.value; saveScene(sc); };
+  const plan = st && st.plan ? st.plan : { cx: 0, cy: 0, span: 10 };
+  const img = $(".planimg", p), svg = $(".plansvg", p);
+  if (st) img.src = planUrl(st);
+  const SZ = 1000;
+  svg.setAttribute("viewBox", `0 0 ${SZ} ${SZ}`);
+  const toPx = (x, y) => [(x - (plan.cx - plan.span / 2)) / plan.span * SZ, ((plan.cy + plan.span / 2) - y) / plan.span * SZ];
+  const toM = (px, py) => [plan.cx - plan.span / 2 + px / SZ * plan.span, plan.cy + plan.span / 2 - py / SZ * plan.span];
+  const shot = () => sc.shots.find(s => s.id === sel);
+  const ns = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs) => { const e = document.createElementNS(ns, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+  function drag(node, onMove) {
+    node.style.cursor = "grab";
+    node.addEventListener("pointerdown", e => {
+      e.preventDefault(); node.setPointerCapture(e.pointerId);
+      const mv = ev => { const r = svg.getBoundingClientRect(); const [x, y] = toM((ev.clientX - r.left) / r.width * SZ, (ev.clientY - r.top) / r.height * SZ); onMove(Math.round(x * 100) / 100, Math.round(y * 100) / 100); drawPlan(); };
+      const up = () => { node.removeEventListener("pointermove", mv); node.removeEventListener("pointerup", up); saveScene(sc); drawShots(); };
+      node.addEventListener("pointermove", mv); node.addEventListener("pointerup", up);
+    });
+  }
+  function drawPlan() {
+    svg.innerHTML = "";
+    (st?.cameras || []).forEach(c => { const [x, y] = toPx(c.x, c.y), [tx, ty] = toPx(c.tx, c.ty); svg.append(el("line", { x1: x, y1: y, x2: tx, y2: ty, class: "pcl" })); const g = el("circle", { cx: x, cy: y, r: 9, class: "pcam set" }); g.append(Object.assign(el("title", {}), { textContent: c.name })); svg.append(g); });
+    const s = shot();
+    sc.cast.forEach((c, k) => {
+      const [x, y] = toPx(c.x, c.y), col = rgbCss(c.color || CAST_COLORS[k % 6]);
+      const to = s && s.walks && s.walks[c.id];
+      if (to) { const [wx, wy] = toPx(to[0], to[1]); svg.append(el("line", { x1: x, y1: y, x2: wx, y2: wy, class: "pwalk" })); const w = el("circle", { cx: wx, cy: wy, r: 12, class: "pghost", style: `stroke:${col}` }); drag(w, (mx, my) => { s.walks[c.id] = [mx, my]; }); svg.append(w); }
+      const a = (c.rot || 0) * Math.PI / 180;
+      svg.append(el("line", { x1: x, y1: y, x2: x - Math.sin(a) * 26, y2: y - Math.cos(a) * 26, class: "pface" }));
+      const n = el("circle", { cx: x, cy: y, r: 15, fill: col, class: "pman" }); drag(n, (mx, my) => { c.x = mx; c.y = my; }); svg.append(n);
+      const t = el("text", { x: x, y: y + 34, class: "plab" }); t.textContent = c.name; svg.append(t);
+    });
+    if (s && s.cam && !s.camera) {
+      const c = s.cam, [x, y] = toPx(c.x, c.y), [tx, ty] = toPx(c.tx, c.ty), e = moveEnd(c, s.move, s.amount || 0);
+      const [ex, ey] = toPx(e.P2[0], e.P2[1]), [etx, ety] = toPx(e.T2[0], e.T2[1]);
+      const fov = 2 * Math.atan(18 / (c.lens || 35)), ang = Math.atan2(ty - y, tx - x), R = 160;
+      svg.append(el("path", { d: `M${x},${y} L${x + Math.cos(ang - fov / 2) * R},${y + Math.sin(ang - fov / 2) * R} L${x + Math.cos(ang + fov / 2) * R},${y + Math.sin(ang + fov / 2) * R} Z`, class: "pfov" }));
+      if (s.move && s.move !== "static" && s.move !== "handheld") { svg.append(el("line", { x1: x, y1: y, x2: ex, y2: ey, class: "pmove" })); svg.append(el("circle", { cx: ex, cy: ey, r: 9, class: "pcam end" })); if (etx !== tx || ety !== ty) svg.append(el("line", { x1: tx, y1: ty, x2: etx, y2: ety, class: "pmove" })); }
+      svg.append(el("line", { x1: x, y1: y, x2: tx, y2: ty, class: "paim" }));
+      const tg = el("rect", { x: tx - 9, y: ty - 9, width: 18, height: 18, transform: `rotate(45 ${tx} ${ty})`, class: "ptgt" }); drag(tg, (mx, my) => { c.tx = mx; c.ty = my; }); svg.append(tg);
+      const cm = el("circle", { cx: x, cy: y, r: 14, class: "pcam" }); drag(cm, (mx, my) => { c.x = mx; c.y = my; }); svg.append(cm);
+    }
+  }
+  function drawCast() {
+    const box = $("#castl", p); box.innerHTML = "";
+    sc.cast.forEach((c, k) => {
+      const s = shot(), walking = s && s.walks && s.walks[c.id];
+      const r = h(`<div class="castrow"><span class="dot" style="background:${rgbCss(c.color || CAST_COLORS[k % 6])}"></span><b>${esc(c.name)}</b>
+        <label class="hint">facing <input type="range" min="-180" max="180" step="15" value="${c.rot || 0}"></label><label class="hint">${(c.height || 1.75).toFixed(2)} m <input type="range" class="ht" min="1.0" max="2.2" step="0.05" value="${c.height || 1.75}"></label>
+        ${s ? `<button class="ghost sm" data-walk>${walking ? "✓ walks" : "⇢ walks"}</button>` : ""}<button class="icon" data-rm>✕</button></div>`);
+      $("input", r).oninput = e => { c.rot = +e.target.value; drawPlan(); saveScene(sc); };
+      $(".ht", r).oninput = e => { c.height = +e.target.value; saveScene(sc); };
+      const w = $("[data-walk]", r); if (w) w.onclick = () => { s.walks = s.walks || {}; if (s.walks[c.id]) delete s.walks[c.id]; else s.walks[c.id] = [c.x + 1.5, c.y + 1]; saveScene(sc); drawCast(); drawPlan(); };
+      $("[data-rm]", r).onclick = () => { sc.cast.splice(k, 1); saveScene(sc); drawCast(); drawPlan(); };
+      box.append(r);
+    });
+  }
+  $("#addc", p).onchange = e => {
+    const v = e.target.value; e.target.value = ""; if (!v) return;
+    const ch = S.chars.find(c => c.id === v), k = sc.cast.length;
+    const name = ch ? ch.name : (prompt("Name?") || "Person " + (k + 1));
+    sc.cast.push({ id: Math.random().toString(36).slice(2, 8), char: ch ? ch.id : null, name, x: plan.cx + (k - 1) * 0.8, y: plan.cy, rot: 180, height: 1.75, color: CAST_COLORS[k % 6] });
+    saveScene(sc, true); drawCast(); drawPlan();
+  };
+  $("#adds", p).onchange = e => {
+    const v = e.target.value; e.target.value = ""; if (!v) return;
+    const n = sc.shots.length + 1, s = { id: "s" + Math.random().toString(36).slice(2, 7), name: "Shot " + n, seconds: 5, prompt: "", engine: "keyframes" };
+    if (v === "_studio") { const b = st?.bounds || [-4, -4, 4, 4]; s.cam = { x: plan.cx, y: b[1] + 0.8, z: 1.6, tx: plan.cx, ty: plan.cy + 1, tz: 1.4, lens: 35 }; s.move = "push_in"; s.amount = 1.5; }
+    else { s.camera = v; const c = (st.cameras || []).find(c => c.name === v); s.cam = c ? { ...c } : null; }
+    sc.shots.push(s); sel = s.id; saveScene(sc, true); drawShots(); drawCast(); drawPlan();
+  };
+  function drawShots() {
+    const box = $("#shotl", p); box.innerHTML = "";
+    if (!sc.shots.length) box.append(h(`<div class="hint">Add a shot: a Studio camera you place on the plan, or a camera from the set.</div>`));
+    sc.shots.forEach((s, k) => {
+      const pv = s.previs || {}, clip = pv.lit || pv.grey;
+      const r = h(`<div class="pshot ${s.id === sel ? "on" : ""}"><div class="row" style="justify-content:space-between"><b contenteditable="true" spellcheck="false" class="psn">${esc(s.name)}</b><div class="row" style="gap:4px"><span class="hint">${s.camera ? "set camera" : "Studio camera"}</span><button class="icon" data-rm>✕</button></div></div>
+        ${s.camera ? "" : `<div class="row" style="gap:8px"><select class="pmv">${MOVES.map(([v, l]) => `<option value="${v}" ${s.move === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+          <label class="hint">amount <input type="range" class="pam" min="0" max="${/orbit|pan/.test(s.move) ? 90 : 4}" step="${/orbit|pan/.test(s.move) ? 5 : 0.1}" value="${s.amount || 0}"></label>
+          <label class="hint">lens ${s.cam?.lens || 35} mm <input type="range" class="pln" min="14" max="135" step="1" value="${s.cam?.lens || 35}"></label>
+          <label class="hint">height <input type="range" class="pz" min="0.3" max="6" step="0.1" value="${s.cam?.z ?? 1.6}"></label></div>`}
+        <div class="row" style="gap:8px"><select class="psec">${[5, 8, 10, 15].map(v => `<option ${+s.seconds === v ? "selected" : ""} value="${v}">${v} s</option>`).join("")}</select>
+          <select class="peng"><option value="keyframes">Footage: styled keyframes (H3 first + last)</option><option value="motion">Footage: follow the 3D motion (H3)</option><option value="render">Use the Blender render as is</option></select></div>
+        <textarea class="ppr" rows="2" placeholder="What happens: action, mood, light, dialogue…">${esc(s.prompt || "")}</textarea>
+        ${clip ? `<video src="${fileUrl(clip.video, sc.private)}" muted loop playsinline class="pvid"></video><span class="hint">${pv.lit ? "lit" : "grey"} preview · ${clip.secs.toFixed(1)} s</span>` : ""}</div>`);
+      r.onclick = e => { if (e.target.closest("select,input,textarea,button,[contenteditable]")) return; sel = s.id; drawShots(); drawCast(); drawPlan(); };
+      $(".peng", r).value = s.engine || "keyframes";
+      $(".peng", r).onchange = e => { s.engine = e.target.value; saveScene(sc); };
+      $(".psec", r).onchange = e => { s.seconds = +e.target.value; saveScene(sc); };
+      $(".ppr", r).oninput = e => { s.prompt = e.target.value; saveScene(sc); };
+      $(".psn", r).oninput = e => { s.name = e.target.textContent.trim() || "Shot"; saveScene(sc); };
+      $("[data-rm]", r).onclick = () => { if (!confirm("Remove " + s.name + "?")) return; sc.shots.splice(k, 1); if (sel === s.id) sel = sc.shots[0]?.id; saveScene(sc, true); drawShots(); drawPlan(); };
+      const mv = $(".pmv", r); if (mv) mv.onchange = e => { s.move = e.target.value; s.amount = (MOVES.find(m => m[0] === s.move) || [0, 0, 1])[2]; saveScene(sc); drawShots(); drawPlan(); };
+      const am = $(".pam", r); if (am) am.oninput = e => { s.amount = +e.target.value; saveScene(sc); drawPlan(); };
+      const ln = $(".pln", r); if (ln) ln.oninput = e => { s.cam.lens = +e.target.value; e.target.previousSibling.textContent = `lens ${s.cam.lens} mm `; saveScene(sc); drawPlan(); };
+      const pz = $(".pz", r); if (pz) pz.oninput = e => { s.cam.z = +e.target.value; saveScene(sc); };
+      const v = $("video", r); if (v) { r.onmouseenter = () => v.play().catch(() => { }); r.onmouseleave = () => v.pause(); }
+      box.append(r);
+    });
+  }
+  const render = async look => {
+    if (!sc.shots.length) return toast("Add a shot first", true);
+    await saveScene(sc, true);
+    const st2 = $("#rst", p);
+    try {
+      const r = await post(`/manny/api/scenes/${sc.id}/render`, { look });
+      await pollJob(r.id, s => st2.textContent = s);
+      const fresh = (await loadScenes()).find(x => x.id === sc.id); if (fresh) sc.shots = fresh.shots;
+      st2.textContent = "Previews ready."; drawShots(); S.gallery = [];
+    } catch (e) { st2.textContent = ""; toast("Render failed: " + e.message.slice(0, 300), true); }
+  };
+  $("#rgrey", p).onclick = () => render("grey");
+  $("#rlit", p).onclick = () => render("lit");
+  $("#tosb", p).onclick = async () => {
+    const missing = sc.shots.filter(s => !(s.previs && (s.previs.grey || s.previs.lit)));
+    if (missing.length) return toast("Render previews first (" + missing.length + " shot" + (missing.length > 1 ? "s" : "") + " without one)", true);
+    await loadBoards();
+    let b = S.boards.find(x => x.scene === sc.id);
+    if (!b) { b = { name: sc.name, scene: sc.id, shots: [], private: sc.private }; S.boards.push(b); }
+    sc.shots.forEach(s => {
+      let t = b.shots.find(x => x.sceneShot === s.id);
+      if (!t) { t = newShot(s.prompt || ""); t.sceneShot = s.id; b.shots.push(t); }
+      t.prompt = t.prompt || s.prompt || ""; t.camera = s.camera ? "" : (MOVE_WORDS[s.move] || ""); t.engine = s.engine || "keyframes";
+      t.previs = s.previs; t.seconds = s.seconds; t.scene = sc.id;
+    });
+    await saveBoard(b, true); S.boardId = b.id; store.set("board", b.id); location.hash = "#/storyboard";
+  };
+  drawShots(); drawCast(); drawPlan();
+}
+
+/* ---- footage from a 3D shot (called by the Storyboard) */
+function sceneRefs(b, s) {
+  const sc = (S.scenes || []).find(x => x.id === s.scene) || {};
+  const loc = (S.locs || []).find(l => l.id === sc.location);
+  const cast = (sc.cast || []).map((c, k) => ({ ...c, colorName: CAST_NAMES[k % 6], ch: S.chars.find(x => x.id === c.char) }));
+  return { sc, loc, cast };
+}
+async function styleFrames(b, s, onStage) {
+  const pv = s.previs.lit || s.previs.grey, { loc, cast } = sceneRefs(b, s);
+  const who = cast.map(c => `the ${c.colorName} figure is ${c.name}${c.ch && c.ch.look ? " (" + c.ch.look + ")" : ""}`).join("; ");
+  const prompt = `Turn this ${s.previs.lit ? "3D render" : "grey 3D blocking render"} into a real cinematic film frame. Keep the exact camera angle, framing, perspective and where every figure stands. ${who ? who.charAt(0).toUpperCase() + who.slice(1) + ". " : ""}${loc ? "The place looks like the second picture: " + (loc.description || loc.name) + ". " : ""}${s.prompt || ""}`.trim();
+  const ref = loc && loc.pictures[0] ? loc.pictures[0] : (cast.find(c => c.ch && c.ch.face) || {}).ch?.face || "";
+  const one = async (still, label) => {
+    const r = await post("/manny/api/previs/style", { still, ref, prompt, private: !!b.private, model: "flux 3" });
+    return (await pollJob(r.id, st => onStage && onStage(label + ": " + st))).value;
+  };
+  const first = await one(pv.first, "First frame"), last = await one(pv.last, "Last frame");
+  s.styled = { first, last, from: pv.first };
+  s.image = first;
+  return s.styled;
+}
+
+/* ------------------------------------------------------------ SETTINGS: models, trash, keys */
+async function pageSettings(main) {
+  const p = h(`<div class="page"><div class="eyebrow">Settings</div><h1>Settings</h1>
+    <div class="chips stabs" id="settabs"><div class="chip" data-t="general">⚙ General</div><div class="chip" data-t="models">◈ Models on this PC</div></div>
+    <div data-tab="general">
+    <div class="section-head"><h2>Rendering safety</h2></div><div class="panel keybox" id="gdbox"><p class="muted">…</p></div>
+    <div class="section-head"><h2>Topaz</h2><button class="ghost" id="tzt">Check again</button></div><div class="panel keybox" id="tzbox"><p class="muted">Checking…</p></div>
+    <div class="section-head"><h2>Civitai</h2></div><div class="panel keybox"><p class="muted" id="ckst">…</p><div class="row"><input type="password" id="ck2" placeholder="New Civitai API key" autocomplete="off"><button class="btn" id="cks2">Save key</button><button class="ghost danger" id="ckr2">Remove key</button></div></div>
+    <div class="section-head"><h2>3D</h2></div><div class="panel keybox"><p class="muted" id="b3d">…</p></div>
+    </div>
+    <div data-tab="models" class="hidden">
+    <div class="section-head"><h2>Models</h2><span class="hint" id="disk"></span></div>
+    <div class="filters"><input type="text" class="search" id="mq2" placeholder="Search models…"><div class="chips" id="mf"></div><select id="ms"><option value="size">Biggest first</option><option value="name">By name</option><option value="new">Newest first</option></select></div>
+    <div id="mlist" class="mtable"></div>
+    <div class="section-head"><h2>Removed models</h2><button class="ghost danger hidden" id="purgeall">Delete all for good</button></div>
+    <p class="hint">Removed models wait here (models › _studio_removed) until you restore them or delete them for good.</p><div id="trash" class="mtable"></div>
+    </div></div>`);
+  main.append(p);
+  const showTab = t => { store.set("settab", t); $$("#settabs .chip", p).forEach(c => c.classList.toggle("on", c.dataset.t === t)); $$("[data-tab]", p).forEach(x => x.classList.toggle("hidden", x.dataset.tab !== t)); };
+  $$("#settabs .chip", p).forEach(c => c.onclick = () => showTab(c.dataset.t));
+  showTab(location.hash.includes("models") ? "models" : store.get("settab", "general"));
+  let all = [], folder = store.get("mfolder", ""), q = "";
+  const draw = () => {
+    const box = $("#mlist", p); box.innerHTML = "";
+    let list = all.filter(m => (!folder || m.folder === folder) && (!q || (m.name + " " + m.title + " " + m.base).toLowerCase().includes(q)));
+    const sort = $("#ms", p).value;
+    list.sort(sort === "name" ? (a, b) => a.name.localeCompare(b.name) : sort === "new" ? (a, b) => b.mtime - a.mtime : (a, b) => b.size - a.size);
+    if (!list.length) box.append(h(`<div class="empty">No models here.</div>`));
+    list.slice(0, 400).forEach(m => {
+      const r = h(`<div class="mrow"><div class="mn"><b>${esc(m.title || m.name.split("/").pop())}</b><span>${esc(m.folder)} › ${esc(m.name)}${m.base ? " · " + esc(m.base) : ""}</span>${m.used_by.length ? `<span class="used">Used by: ${esc(m.used_by.join(", "))}</span>` : ""}</div><span class="ms">${fmtSize(m.size)}</span><button class="ghost danger sm">Remove</button></div>`);
+      $("button", r).onclick = async () => {
+        const warn = m.used_by.length ? `\n\n${m.used_by.join(", ")} use${m.used_by.length === 1 ? "s" : ""} this model and will stop working until you restore it.` : "";
+        if (!confirm(`Remove ${m.name.split("/").pop()} (${fmtSize(m.size)})?\nIt moves to Removed models, so you can restore it.${warn}`)) return;
+        try { await post("/manny/api/models/remove", { folder: m.folder, name: m.name }); all = all.filter(x => x !== m); draw(); loadTrash(); loraCache = null; ckptCache = null; toast("Removed. Restore it below if needed."); }
+        catch (e) { toast(e.message, true); }
+      };
+      box.append(r);
+    });
+  };
+  const folders = [["", "All"], ["checkpoints", "Checkpoints"], ["diffusion_models", "Diffusion"], ["loras", "LoRAs"], ["text_encoders", "Text encoders"], ["vae", "VAE"], ["upscale_models", "Upscalers"], ["embeddings", "Embeddings"], ["controlnet", "ControlNet"], ["clip_vision", "CLIP vision"]];
+  folders.forEach(([v, l]) => { const c = h(`<div class="chip ${v === folder ? "on" : ""}">${l}</div>`); c.onclick = () => { folder = v; store.set("mfolder", v); $$("#mf .chip", p).forEach(x => x.classList.toggle("on", x === c)); draw(); }; $("#mf", p).append(c); });
+  $("#mq2", p).oninput = e => { q = e.target.value.trim().toLowerCase(); draw(); };
+  $("#ms", p).onchange = draw;
+  $("#mlist", p).append(h(`<div class="empty">Reading the model folders…</div>`));
+  api("/manny/api/models" + PQ()).then(r => {
+    all = r.items;
+    const tot = all.reduce((a, m) => a + m.size, 0);
+    $("#disk", p).textContent = `${all.length} files · ${fmtSize(tot)}` + (r.disk ? ` · ${fmtSize(r.disk.free)} free of ${fmtSize(r.disk.total)}` : "");
+    draw();
+  }).catch(e => { $("#mlist", p).innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+  async function loadTrash() {
+    const box = $("#trash", p); box.innerHTML = "";
+    const items = await api("/manny/api/models/removed").catch(() => []);
+    $("#purgeall", p).classList.toggle("hidden", !items.length);
+    if (!items.length) box.append(h(`<div class="empty">Nothing removed.</div>`));
+    items.forEach(m => {
+      const r = h(`<div class="mrow"><div class="mn"><b>${esc(m.name.split("/").pop())}</b><span>${esc(m.folder)} › ${esc(m.name)}</span></div><span class="ms">${fmtSize(m.size)}</span><button class="ghost sm" data-r>Restore</button><button class="ghost danger sm" data-d>Delete for good</button></div>`);
+      $("[data-r]", r).onclick = async () => { try { await post("/manny/api/models/restore", m); toast("Restored"); route(); } catch (e) { toast(e.message, true); } };
+      $("[data-d]", r).onclick = async () => { if (!confirm(`Delete ${m.name.split("/").pop()} for good? This frees ${fmtSize(m.size)} and can't be undone.`)) return; try { await post("/manny/api/models/purge", m); toast("Deleted"); loadTrash(); } catch (e) { toast(e.message, true); } };
+      box.append(r);
+    });
+    $("#purgeall", p).onclick = async () => { const tot = items.reduce((a, m) => a + m.size, 0); if (!confirm(`Delete all ${items.length} removed models for good? This frees ${fmtSize(tot)} and can't be undone.`)) return; try { const r = await post("/manny/api/models/purge", { all: true }); toast(`Deleted ${r.deleted} files, ${fmtSize(r.freed)} freed`); loadTrash(); } catch (e) { toast(e.message, true); } };
+  }
+  loadTrash();
+  const ckst = async () => { const s = await api("/manny/api/civitai/status").catch(() => ({})); $("#ckst", p).textContent = s.has_key ? "A Civitai key is saved on this PC (it's never shown)." : "No Civitai key saved."; };
+  ckst();
+  $("#cks2", p).onclick = async () => { try { await post("/manny/api/civitai/key", { key: $("#ck2", p).value.trim() }); $("#ck2", p).value = ""; toast("Key saved"); ckst(); } catch (e) { toast(e.message, true); } };
+  $("#ckr2", p).onclick = async () => { if (!confirm("Remove the saved Civitai key?")) return; await post("/manny/api/civitai/key", { key: "" }); ckst(); };
+  const tzDraw = async force => {
+    const box = $("#tzbox", p); box.innerHTML = `<p class="muted">Checking Topaz… (a few seconds)</p>`;
+    const t = await topaz(force); if (!t) { box.innerHTML = `<p class="muted">Couldn't check Topaz (restart ComfyUI after updating Studio).</p>`; return; }
+    const line = (x, name) => !x.found ? `<span class="bad">✕</span> ${name}: not installed` : x.ready ? `<span class="ok">✓</span> ${name}: ready${x.version ? " · " + esc(x.version) : ""}${x.fps === false ? " (no frame-rate filter)" : ""}` : `<span class="bad">!</span> ${name}: installed but not working. ${esc(x.error || "")}`;
+    const opt = (list, v) => list.map(([k, l]) => `<option value="${k}" ${k === v ? "selected" : ""}>${esc(l)}</option>`).join("");
+    const imgLine = !t.image.ready && /enterprise/i.test(t.image.error || "") && tzApp(t, "image") ? `<span class="ok">✓</span> Gigapixel (pictures): ready through the app hand-off (its command line needs Topaz Enterprise)` : line(t.image, "Gigapixel (pictures)");
+    box.innerHTML = `<p>${imgLine}<br>${line(t.video, "Topaz Video (clips)")}</p>
+      <label class="tog"><input type="checkbox" id="tz-use" ${t.prefs.use ? "checked" : ""}><span><b>Use Topaz for upscaling</b><small>Finish and the ✦ buttons in the viewer use Topaz. Off: the ComfyUI upscale apps (SeedVR2) are used.</small></span></label>
+      <div class="grid2"><div><label class="lbl">Video upscale model</label><select id="tz-vm">${opt(t.video_models, t.prefs.video_model)}</select></div>
+      <div><label class="lbl">Frame-rate model</label><select id="tz-fm">${opt(t.fps_models, t.prefs.fps_model)}</select></div>
+      <div><label class="lbl">Picture model</label><select id="tz-im">${opt(t.image_models, t.prefs.image_model)}</select></div>
+      <div><label class="lbl">Picture format</label><select id="tz-if">${opt([["png", "PNG"], ["jpg", "JPEG"], ["tif", "TIFF"]], t.prefs.image_format)}</select></div>
+      <div><label class="lbl">Video processor</label><select id="tz-dev">${opt([["-2", "Automatic"], ["0", "GPU 1 (Intel Arc)"], ["-1", "CPU only (slow)"]], t.prefs.device)}</select></div></div>
+      ${["image", "video"].filter(k => !t[k].ready && tzApp(t, k)).map(k => `<p><b>${k === "image" ? "Gigapixel" : "Topaz Video"} hand-off:</b> the viewer's ✦ button opens the file in the app. Set the app's export folder to <code>${esc(t.apps[k].export_to)}</code> <button class="ghost sm" data-cp="${esc(t.apps[k].export_to)}">Copy</button> and exports appear in the gallery.</p>`).join("")}
+      <p class="hint">Topaz uses your Topaz sign-in on this PC. If a model hasn't been used before, open the Topaz app once and preview with it so it downloads.</p>`;
+    const save = async () => { tzCache = null; await post("/manny/api/topaz/prefs", { use: $("#tz-use", box).checked, video_model: $("#tz-vm", box).value, fps_model: $("#tz-fm", box).value, image_model: $("#tz-im", box).value, image_format: $("#tz-if", box).value, device: $("#tz-dev", box).value }).then(() => toast("Saved")).catch(e => toast(e.message, true)); };
+    $$("input,select", box).forEach(x => x.onchange = save);
+    $$("[data-cp]", box).forEach(x => x.onclick = () => copyText(x.dataset.cp, "Folder copied"));
+  };
+  tzDraw(false); $("#tzt", p).onclick = () => tzDraw(true);
+  api("/manny/api/guard").then(g => {
+    const box = $("#gdbox", p), pr = g.prefs;
+    box.innerHTML = `<label class="tog"><input type="checkbox" data-k="free_between_models" ${pr.free_between_models ? "checked" : ""}><span><b>Free memory between different models</b><small>When the next job uses other models, ComfyUI unloads the old ones first. The graphics chip shares the PC's memory, so piling models up makes Windows page to disk and freeze.</small></span></label>
+      <label class="tog"><input type="checkbox" data-k="keep_awake" ${pr.keep_awake ? "checked" : ""}><span><b>Keep the PC awake while rendering</b><small>Sleep in the middle of a render leaves the job stuck.</small></span></label>
+      <div class="row"><label class="lbl" style="margin:0">Warn when a render shows no progress for</label><select data-k="stall_minutes">${[5, 10, 15, 30, 60].map(v => `<option ${v === pr.stall_minutes ? "selected" : ""}>${v}</option>`).join("")}</select><span class="hint">minutes</span></div>
+      <div class="row"><button class="ghost" id="gfree">Free memory now</button><button class="ghost" id="gpow">Check sleep & crash events</button></div><div id="gpowo" class="hint"></div>`;
+    $$("[data-k]", box).forEach(x => x.onchange = () => post("/manny/api/guard/prefs", { [x.dataset.k]: x.type === "checkbox" ? x.checked : +x.value }).then(() => toast("Saved")));
+    $("#gfree", box).onclick = () => post("/manny/api/guard/free", {}).then(() => toast("Memory will be freed after the current job"));
+    $("#gpow", box).onclick = async () => { const o = $("#gpowo", box); o.textContent = "Reading the Windows log…"; try { const ev = await api("/manny/api/diag/power?hours=24"); o.innerHTML = ev.length ? ev.map(e => `${esc(e.t)} · ${esc(e.msg || e.src)}`).join("<br>") : "No sleep, crash or low-memory events in the last 24 hours."; } catch (e) { o.textContent = e.message; } };
+  }).catch(() => { $("#gdbox", p).innerHTML = `<p class="muted">Restart ComfyUI to turn this on.</p>`; });
+  api("/manny/api/blender/status").then(s => { $("#b3d", p).innerHTML = s.found ? `Blender: <b>${esc(s.path)}</b><br>Sets folder: <b>${esc(s.sets_folder)}</b>` : "Blender wasn't found on this PC."; }).catch(() => { });
+}
 /* ------------------------------------------------------------ QUEUE + WS */
+/* progress from the server: works on every device (ComfyUI only sends step events to the browser that queued
+   the job) and moves smoothly through slow steps (Wan: ~23 min per step) using the last step's duration */
+const fmtEta = s => s == null ? "" : s < 90 ? "under 2 min left" : s < 3600 ? `about ${Math.round(s / 60)} min left` : `about ${(s / 3600).toFixed(1)} h left`;
+async function serverProgress() {
+  if (document.hidden || !S.running) return;
+  try {
+    const g = await api("/manny/api/guard"); const j = g.job;
+    if (!j || j.prompt_id !== S.running || j.overall == null) return;
+    S.progress = j.overall; S.srvAt = Date.now();
+    S.progressNode = [`Step ${j.step}/${j.max}`, j.phase, fmtEta(j.eta_s)].filter(Boolean).join(" · ");
+    drawQueueCard();
+  } catch { }
+}
 async function pollQueue() {
   try {
     const q = await api("/queue");
@@ -1495,7 +2598,8 @@ function drawQueueCard() {
   const run = q.queue_running[0];
   $("#q-dot").className = "dot" + (run ? " run" : "");
   $("#q-title").textContent = run ? "Rendering" : "Idle";
-  $("#q-sub").textContent = run ? `${appNameOf(run)}${S.progressNode ? " · " + S.progressNode : ""}${q.queue_pending.length ? " · " + q.queue_pending.length + " waiting" : ""}` : "Nothing rendering";
+  const nsch = (S.sched || []).filter(x => x.status === "waiting").length;
+  $("#q-sub").textContent = (run ? `${appNameOf(run)}${S.progressNode ? " · " + S.progressNode : ""}${q.queue_pending.length ? " · " + q.queue_pending.length + " waiting" : ""}` : "Nothing rendering") + (nsch ? ` · ⏱ ${nsch} later` : "");
   $("#q-bar").style.width = run ? Math.round(S.progress * 100) + "%" : "0%";
   $("#mq-dot").className = "dot" + (run ? " run" : "");
   $("#mq-t").textContent = run ? `${Math.round(S.progress * 100)}%${q.queue_pending.length ? " · +" + q.queue_pending.length : ""}` : (q.queue_pending.length ? q.queue_pending.length + " waiting" : "Idle");
@@ -1503,6 +2607,19 @@ function drawQueueCard() {
 }
 function drawDrawer() {
   const b = $("#drawer-body"); b.innerHTML = ""; const q = S.queue; if (!q) return;
+  const waiting = (S.sched || []).filter(x => x.status === "waiting"), recent = (S.sched || []).filter(x => x.status !== "waiting").slice(0, 5);
+  if (waiting.length || recent.length) {
+    b.append(h(`<div class="qhead">⏱ Scheduled</div>`));
+    waiting.forEach(x => {
+      const el = h(`<div class="qitem sched"><div class="row"><b>${esc(x.label)}</b><button class="icon" title="Cancel">✕</button></div><small>${x.when === "idle" ? "When the PC is free" : new Date(x.at * 1000).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</small><div class="row"><button class="ghost sm">Start now</button></div></div>`);
+      const [cx, now] = $$("button", el);
+      cx.onclick = async () => { await fetch("/manny/api/schedule/" + x.id, { method: "DELETE" }); loadSchedule(); toast("Cancelled"); };
+      now.onclick = async () => { try { await post(`/manny/api/schedule/${x.id}/now`, {}); toast("Sent to the queue"); } catch (e) { toast(e.message, true); } loadSchedule(); setTimeout(pollQueue, 500); };
+      b.append(el);
+    });
+    recent.forEach(x => b.append(h(`<div class="qitem done"><b>${esc(x.label)}</b><small>${x.status === "sent" ? "Started " + new Date(x.sent_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Failed: " + esc((x.error || "").slice(0, 160))}</small></div>`)));
+    b.append(h(`<div class="qhead">Queue</div>`));
+  }
   if (!q.queue_running.length && !q.queue_pending.length) b.append(h(`<div class="empty">The queue is empty.</div>`));
   q.queue_running.forEach(it => b.append(qItem(it, true)));
   q.queue_pending.slice().sort((a, b) => a[0] - b[0]).forEach(it => b.append(qItem(it, false)));
@@ -1516,7 +2633,7 @@ function qItem(it, running) {
   };
   return el;
 }
-$("#queue-card").onclick = () => { $("#drawer").classList.remove("hidden"); drawDrawer(); };
+$("#queue-card").onclick = () => { $("#drawer").classList.remove("hidden"); loadSchedule(); drawDrawer(); };
 $("#mq").onclick = () => { $("#drawer").classList.remove("hidden"); drawDrawer(); };
 $("#drawer [data-close]").onclick = () => $("#drawer").classList.add("hidden");
 $("#q-stop").onclick = async () => { await post("/interrupt", {}); setTimeout(pollQueue, 300); };
@@ -1535,7 +2652,7 @@ function connect() {
       case "status": pollQueue(); break;
       case "execution_start": S.running = d.prompt_id; S.progress = 0; S.progressNode = "Starting"; drawQueueCard(); break;
       case "executing": if (d.node == null) { S.progressNode = ""; pollQueue(); } else { S.progressNode = "Working"; drawQueueCard(); } break;
-      case "progress": S.progress = d.max ? d.value / d.max : 0; S.progressNode = `Step ${d.value}/${d.max}`; drawQueueCard(); { const w8 = S.compare && S.compare.items.find(x => x.prompt_id === S.running && !x.url); if (w8 && location.hash.startsWith("#/create")) { const c = $(`.cmpcell[data-pid="${w8.prompt_id}"] .cmpwait`); if (c) c.textContent = "Rendering " + Math.round(S.progress * 100) + "%"; } } { const tk = location.hash.startsWith("#/storyboard") && $(`.take[data-pid="${S.running}"] span`); if (tk) tk.textContent = Math.round(S.progress * 100) + "%"; } if (!$("#drawer").classList.contains("hidden")) drawDrawer(); break;
+      case "progress": if (!(S.srvAt && Date.now() - S.srvAt < 10000)) { S.progress = d.max ? d.value / d.max : 0; S.progressNode = `Step ${d.value}/${d.max}`; } drawQueueCard(); { const w8 = S.compare && S.compare.items.find(x => x.prompt_id === S.running && !x.url); if (w8 && location.hash.startsWith("#/create")) { const c = $(`.cmpcell[data-pid="${w8.prompt_id}"] .cmpwait`); if (c) c.textContent = "Rendering " + Math.round(S.progress * 100) + "%"; } } { const tk = location.hash.startsWith("#/storyboard") && $(`.take[data-pid="${S.running}"] span`); if (tk) tk.textContent = Math.round(S.progress * 100) + "%"; } if (!$("#drawer").classList.contains("hidden")) drawDrawer(); break;
       case "executed": onOutput(d); break;
       case "execution_success": S.progress = 1; drawQueueCard(); S.gallery = []; break;
       case "execution_error": toast("Render failed: " + (d.exception_message || "error").slice(0, 300), true); pollQueue(); break;
@@ -1575,6 +2692,31 @@ function onOutput(d) {
   if (mine) toast((isVid ? "Shot" : "Picture") + " ready");
 }
 
+async function sysMon() {
+  if (document.hidden || !$("#mon") || getComputedStyle($("#mon")).display === "none") return;
+  try {
+    const m = await api("/manny/api/sysmon");
+    const set = (k, pct, txt) => { const b = $("#m-" + k), t = $("#t-" + k); if (!b) return; b.style.width = (pct == null ? 0 : Math.max(2, Math.min(100, pct))) + "%"; b.className = pct > 90 ? "hot" : pct > 70 ? "warm" : ""; t.textContent = txt; };
+    set("cpu", m.cpu, m.cpu == null ? "–" : Math.round(m.cpu) + "%");
+    set("gpu", m.gpu, m.gpu == null ? "–" : Math.round(m.gpu) + "%");
+    if (m.vram) set("vram", m.vram.used / m.vram.total * 100, `${(m.vram.used / 1e9).toFixed(1)}/${(m.vram.total / 1e9).toFixed(0)} GB`);
+    if (m.ram) set("ram", m.ram.used / m.ram.total * 100, `${(m.ram.used / 1e9).toFixed(0)}/${(m.ram.total / 1e9).toFixed(0)} GB`);
+    let st = $("#m-stall");
+    const j = m.job;
+    if (j && j.stalled && (m.gpu == null || m.gpu < 20)) {
+      if (!st) { st = h(`<div id="m-stall" class="mstall"></div>`); $("#mon").append(st); }
+      st.innerHTML = `⚠ No progress for ${Math.round(j.idle_s / 60)} min${j.node_type ? " in " + esc(j.node_type) : ""}. <button class="ghost sm">Stop it</button>`;
+      $("button", st).onclick = async () => { await post("/interrupt", { prompt_id: j.prompt_id }); toast("Asked ComfyUI to stop. If it doesn't within a minute, restart ComfyUI."); };
+    } else if (st) st.remove();
+    $("#mon").classList.toggle("awake", !!m.awake);
+    let sl = $("#m-slow");
+    if (j && j.stalled && m.gpu >= 20) {
+      if (!sl) { sl = h(`<div id="m-slow" class="mslow"></div>`); $("#mon").append(sl); }
+      sl.textContent = `Slow step: ${Math.round(j.idle_s / 60)} min on step ${j.step || "?"}/${j.max || "?"}, GPU still working`;
+    } else if (sl) sl.remove();
+    $("#mon").title = (m.awake ? "Keeping the PC awake while renders run · " : "") + (j && j.max ? `Step ${j.step}/${j.max} · ` : "") + "GPU load from Windows" + (m.gpu_engine ? " (" + m.gpu_engine + " engine)" : "") + " · VRAM is the shared graphics memory ComfyUI can use";
+  } catch { }
+}
 async function sysStats() {
   try {
     const s = await api("/system_stats"); const dv = (s.devices || [])[0];
@@ -1638,7 +2780,9 @@ const bump = () => { clearTimeout(idleT); idleT = setTimeout(async () => { if (S
   try { const a = await api("/manny/api/private/status"); S.pw = a; if (a.local) $("#nav-pw").classList.remove("hidden"); setIncog(a.unlocked && store.get("incog", true), true); } catch { }
   migrateLocalValues();
   await loadChars();
-  connect(); pollQueue(); sysStats(); setInterval(sysStats, 15000); setInterval(pollQueue, 5000);
+  connect(); pollQueue(); sysStats(); setInterval(sysStats, 15000); setInterval(pollQueue, 5000); sysMon(); setInterval(sysMon, 3000);
+  setInterval(serverProgress, 3000);
+  loadSchedule(); setInterval(loadSchedule, 30000);
   route();
 })();
 })();
