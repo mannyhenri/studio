@@ -2475,6 +2475,8 @@ async function pageSettings(main) {
     <div class="section-head"><h2>Topaz</h2><button class="ghost" id="tzt">Check again</button></div><div class="panel keybox" id="tzbox"><p class="muted">Checking…</p></div>
     <div class="section-head"><h2>Civitai</h2></div><div class="panel keybox"><p class="muted" id="ckst">…</p><div class="row"><input type="password" id="ck2" placeholder="New Civitai API key" autocomplete="off"><button class="btn" id="cks2">Save key</button><button class="ghost danger" id="ckr2">Remove key</button></div></div>
     <div class="section-head"><h2>3D</h2></div><div class="panel keybox"><p class="muted" id="b3d">…</p></div>
+    <div class="section-head"><h2>Versions</h2><a class="ghost" id="gho" target="_blank" rel="noopener">GitHub ↗</a></div><div class="panel keybox" id="gitbox"><p class="muted">…</p></div>
+    <details class="adv"><summary>Advanced</summary><div class="panel keybox"><p class="hint" style="margin-top:0">Private space</p><a class="ghost" href="/manny/password">Change the Incognito password…</a></div></details>
     </div>
     <div data-tab="models" class="hidden">
     <div class="section-head"><h2>Models</h2><span class="hint" id="disk"></span></div>
@@ -2554,6 +2556,23 @@ async function pageSettings(main) {
     $$("[data-cp]", box).forEach(x => x.onclick = () => copyText(x.dataset.cp, "Folder copied"));
   };
   tzDraw(false); $("#tzt", p).onclick = () => tzDraw(true);
+  const gitDraw = async () => {
+    const box = $("#gitbox", p); let g;
+    try { g = await api("/manny/api/git/status"); } catch { box.innerHTML = `<p class="muted">Restart ComfyUI to turn on versions.</p>`; return; }
+    $("#gho", p).href = (g.remote || "").replace(/\.git$/, "");
+    if (!g.git) { box.innerHTML = `<p class="muted">Git isn't installed on this PC.</p>`; return; }
+    box.innerHTML = `<p class="hint" style="margin-top:0">Studio's code and apps are kept in <code>${esc(g.repo)}</code> and pushed to <code>${esc(g.remote)}</code>. ${g.exists ? (g.unpushed ? `<b>${g.unpushed} version${g.unpushed > 1 ? "s" : ""} not on GitHub yet.</b>` : "") : "Not set up yet: the first save creates it" + (g.bundle ? " from studio.bundle (with the history so far)." : ".")}</p>
+      <div class="row"><input type="text" id="gm" placeholder="What changed (optional)" style="flex:1"><button class="btn primary" id="gs">Save a version</button></div>
+      <p class="hint">The first push opens a GitHub sign-in on this PC. If GitHub says the repo doesn't exist, create an empty private repo named <b>studio</b> at github.com/new and save again.</p>
+      ${(g.log || []).length ? `<div class="glog">${g.log.map(x => `<div><code>${esc(x.hash)}</code> <span>${esc(x.date)}</span> ${esc(x.message.slice(0, 90))}</div>`).join("")}</div>` : ""}`;
+    $("#gs", box).onclick = async () => {
+      const b = $("#gs", box); b.disabled = true; b.textContent = "Saving…";
+      try { const r = await post("/manny/api/git/save", { message: $("#gm", box).value, push: true }); const res = await pollJob(r.id); toast(res.changed ? `Saved ${res.commit}${res.pushed ? " and pushed to GitHub" : ""}` : (res.pushed ? "Nothing new; GitHub is up to date" : "Nothing new to save")); }
+      catch (e) { toast(e.message.slice(0, 260), true); }
+      gitDraw();
+    };
+  };
+  gitDraw();
   api("/manny/api/guard").then(g => {
     const box = $("#gdbox", p), pr = g.prefs;
     box.innerHTML = `<label class="tog"><input type="checkbox" data-k="free_between_models" ${pr.free_between_models ? "checked" : ""}><span><b>Free memory between different models</b><small>When the next job uses other models, ComfyUI unloads the old ones first. The graphics chip shares the PC's memory, so piling models up makes Windows page to disk and freeze.</small></span></label>
@@ -2777,7 +2796,7 @@ const bump = () => { clearTimeout(idleT); idleT = setTimeout(async () => { if (S
   const ord = a => { const k = APP_ORDER.indexOf(appShort(a).toLowerCase()); return k < 0 ? 50 : k; };
   S.apps.sort((a, b) => ord(a) - ord(b) || appShort(a).localeCompare(appShort(b)));
   if (S.appIdx >= S.apps.length) S.appIdx = 0;
-  try { const a = await api("/manny/api/private/status"); S.pw = a; if (a.local) $("#nav-pw").classList.remove("hidden"); setIncog(a.unlocked && store.get("incog", true), true); } catch { }
+  try { const a = await api("/manny/api/private/status"); S.pw = a; setIncog(a.unlocked && store.get("incog", true), true); } catch { }
   migrateLocalValues();
   await loadChars();
   connect(); pollQueue(); sysStats(); setInterval(sysStats, 15000); setInterval(pollQueue, 5000); sysMon(); setInterval(sysMon, 3000);

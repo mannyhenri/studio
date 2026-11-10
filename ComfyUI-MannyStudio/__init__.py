@@ -23,7 +23,7 @@ from . import auth
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-VERSION = "1.15.0"
+VERSION = "1.16.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -2416,3 +2416,7 @@ _schedule.setup(globals())
 # ---------------------------------------------------------------- Projects: idea -> script -> film
 from . import projects as _projects  # noqa: E402
 _projects.setup(globals())
+
+# ---------------------------------------------------------------- Versions (git + GitHub)
+from . import gitver as _gitver  # noqa: E402
+_gitver.setup_routes(globals())
