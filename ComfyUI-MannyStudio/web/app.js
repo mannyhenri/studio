@@ -2698,9 +2698,36 @@ async function pageSettings(main) {
     $("#gho", p).href = (g.remote || "").replace(/\.git$/, "");
     if (!g.git) { box.innerHTML = `<p class="muted">Git isn't installed on this PC.</p>`; return; }
     box.innerHTML = `<p class="hint" style="margin-top:0">Studio's code and apps are kept in <code>${esc(g.repo)}</code> and pushed to <code>${esc(g.remote)}</code>. ${g.exists ? (g.unpushed ? `<b>${g.unpushed} version${g.unpushed > 1 ? "s" : ""} not on GitHub yet.</b>` : "") : "Not set up yet: the first save creates it" + (g.bundle ? " from studio.bundle (with the history so far)." : ".")}</p>
+      <div id="gup" class="gup"><span class="muted">Checking GitHub…</span></div>
       <div class="row"><input type="text" id="gm" placeholder="What changed (optional)" style="flex:1"><button class="btn primary" id="gs">Save a version</button></div>
       <p class="hint">The first push opens a GitHub sign-in on this PC. If GitHub says the repo doesn't exist, create an empty private repo named <b>studio</b> at github.com/new and save again.</p>
       ${(g.log || []).length ? `<div class="glog">${g.log.map(x => `<div><code>${esc(x.hash)}</code> <span>${esc(x.date)}</span> ${esc(x.message.slice(0, 90))}</div>`).join("")}</div>` : ""}`;
+    const up = $("#gup", box);
+    const ghFiles = f => `<div class="glog">${f.slice(0, 12).map(x => `<div><code>${esc(x.split("\t")[0])}</code> ${esc(x.split("\t").pop())}</div>`).join("")}${f.length > 12 ? `<div class="muted">…and ${f.length - 12} more</div>` : ""}</div>`;
+    const doPull = async prefer => {
+      up.innerHTML = `<span class="muted">Getting updates from GitHub…</span>`;
+      try {
+        const r = await post("/manny/api/git/pull", { prefer }); const res = await pollJob(r.id, st => up.innerHTML = `<span class="muted">${esc(st)}…</span>`);
+        if (res.conflicts) {
+          up.innerHTML = `<p><b>These files were changed both here and on GitHub:</b></p>${ghFiles(res.conflicts)}
+            <div class="row"><button class="btn" data-p="theirs">Use GitHub's version</button><button class="btn" data-p="ours">Keep this PC's version</button></div>`;
+          $$("[data-p]", up).forEach(b => b.onclick = () => doPull(b.dataset.p)); return;
+        }
+        const n = (res.installed || []).length + (res.removed || []).length;
+        toast(res.note || (`Got ${res.merged} change${res.merged > 1 ? "s" : ""} from GitHub` + (n ? `, ${n} file${n > 1 ? "s" : ""} updated on this PC` : "")) + (res.restart ? ". Restart ComfyUI to use the new code." : ""));
+        gitDraw();
+      } catch (e) { up.innerHTML = `<span class="warn">${esc(e.message.slice(0, 300))}</span>`; }
+    };
+    if (g.exists || g.bundle) (async () => {
+      try {
+        const r = await post("/manny/api/git/check", {}); const c = await pollJob(r.id);
+        if (!c.remote_branch) { up.innerHTML = `<span class="muted">GitHub is empty: the first save pushes everything.</span>`; return; }
+        if (!c.behind) { up.innerHTML = `<span class="ok">✓ Up to date with GitHub</span>${c.ahead ? ` <span class="muted">· ${c.ahead} version${c.ahead > 1 ? "s" : ""} to push</span>` : ""}`; return; }
+        up.innerHTML = `<p><b>GitHub has ${c.behind} change${c.behind > 1 ? "s" : ""} this PC doesn't have</b>${c.remote_log && c.remote_log[0] ? ` <span class="muted">(latest: “${esc(c.remote_log[0].message.slice(0, 70))}” by ${esc(c.remote_log[0].author)})</span>` : ""}. Get them before saving.</p>
+          ${ghFiles(c.files || [])}<button class="btn primary" id="gpull">⬇ Get updates from GitHub</button>`;
+        $("#gpull", up).onclick = () => doPull(null);
+      } catch (e) { up.innerHTML = `<span class="warn">${esc(e.message.slice(0, 300))}</span>`; }
+    })(); else up.innerHTML = "";
     $("#gs", box).onclick = async () => {
       const b = $("#gs", box); b.disabled = true; b.textContent = "Saving…";
       try { const r = await post("/manny/api/git/save", { message: $("#gm", box).value, push: true }); const res = await pollJob(r.id); toast(res.changed ? `Saved ${res.commit}${res.pushed ? " and pushed to GitHub" : ""}` : (res.pushed ? "Nothing new; GitHub is up to date" : "Nothing new to save")); }

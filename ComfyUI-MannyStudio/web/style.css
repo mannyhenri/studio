@@ -619,3 +619,4 @@ details.fold .lorasec .lblrow{justify-content:flex-end}
 .toolrow{display:flex;flex-wrap:wrap;gap:8px;margin:-6px 0 18px;padding:12px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.02)}
 .toolrow.hidden{display:none}
 .selecting .tile .badge.v{margin-left:30px}
+.gup{margin:10px 0 12px}.gup p{margin:6px 0}.gup .ok{color:#5fd38d}.gup .warn{color:#ff8a65}.gup .row{margin-top:8px;gap:8px}
