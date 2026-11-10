@@ -87,6 +87,54 @@ def _clean_shots(raw, n, secs):
     return shots
 
 
+CAMS_WORDS = {"static": "static locked-off camera", "push in": "slow dolly push-in toward the subject", "pull back": "slow dolly pull-back revealing the scene",
+              "pan left": "smooth pan left", "pan right": "smooth pan right", "tracking": "tracking shot following the subject",
+              "orbit": "camera orbits around the subject", "crane up": "crane shot rising up", "crane down": "crane shot descending",
+              "handheld": "handheld camera with natural shake", "close-up": "tight close-up", "low angle": "low-angle hero shot",
+              "drone": "aerial drone flyover", "slow motion": "slow motion"}
+
+
+def shot_text(proj, s, with_camera, chars):
+    """Same as the page's shotText: characters' looks written in, plus the camera move."""
+    t = s.get("action") or ""
+    for cid in proj.get("cast", []):
+        c = chars.get(cid)
+        if not c:
+            continue
+        first = c["name"].split(" ")[0]
+        look = ", ".join(x for x in [c.get("trigger"), c.get("look")] if x)
+        if look and re.search(r"\b" + re.escape(first) + r"\b", t, re.I) and look not in t:
+            t = re.sub(r"\b(" + re.escape(c["name"]) + "|" + re.escape(first) + r")\b", lambda m: f"{m.group(1)} ({look})", t, count=1, flags=re.I)
+    if with_camera and CAMS_WORDS.get(s.get("camera")):
+        t = t.rstrip(". ") + ". " + CAMS_WORDS[s["camera"]] + "."
+    return t
+
+
+def to_board(proj, chars):
+    boards = H["_load_boards"]()
+    b = next((x for x in boards if x.get("id") == proj.get("board")), None)
+    if not b:
+        b = {"id": uuid.uuid4().hex[:10], "name": proj.get("title") or "Project film", "shots": [], "private": bool(proj.get("private")), "created": time.time()}
+        boards.append(b)
+    b["name"] = proj.get("title") or b["name"]
+    old = b.get("shots", [])
+    new = []
+    for s in proj.get("shots", []):
+        prev = next((x for x in old if x.get("projShot") == s["id"]), None)
+        text = shot_text(proj, s, True, chars)
+        if prev:
+            if not prev.get("takes"):
+                prev["prompt"] = text
+                prev["image"] = s.get("keyframe") or prev.get("image", "")
+            new.append(prev)
+        else:
+            new.append({"id": uuid.uuid4().hex[:8], "prompt": text, "image": s.get("keyframe") or "", "camera": "", "projShot": s["id"]})
+    b["shots"] = new
+    b["updated"] = time.time()
+    H["_save_boards"](boards)
+    return b
+
+
 def setup(ns):
     H.update(ns)
     routes = ns["routes"]
@@ -178,6 +226,26 @@ def setup(ns):
         base = dict(b.get("values") or {})
         jobs = b.get("shots") or []                 # [{id, prompt, ref}] prepared by the page
         pkey, rkey, tkey = b.get("prompt_key"), b.get("ref_key"), b.get("ref_toggle_key")
+        if not pkey:                                # called by Claude: work it out from the Image app and the project
+            ins = app["inputs"]
+            pkey = next((i["key"] for i in ins if i["kind"] == "text" and "negative" not in i["label"].lower()), None)
+            rkey = next((i["key"] for i in ins if i["kind"] == "image"), None)
+            tkey = next((i["key"] for i in ins if i["kind"] == "toggle" and "reference" in i["label"].lower()), None)
+            b.setdefault("seed_keys", [i["key"] for i in ins if i["kind"] == "seed"])
+            if b.get("model"):
+                mdl = next((i for i in ins if i["kind"] == "choice" and "model" in i["label"].lower()), None)
+                want = mdl and next((o for o in mdl["options"] if b["model"].lower() in o.lower()), None)
+                if want:
+                    base[mdl["key"]] = want
+            if not jobs:
+                chars = {c.get("id"): c for c in ns["_load_chars"]()}
+                for s in proj.get("shots", []):
+                    if s.get("keyframe") and not b.get("redo"):
+                        continue
+                    cast = [chars[c] for c in proj.get("cast", []) if c in chars]
+                    inshot = [c for c in cast if c.get("face") and re.search(r"\b" + re.escape(c["name"].split(" ")[0]) + r"\b", " ".join(s.get("characters") or []) + " " + (s.get("action") or ""), re.I)]
+                    jobs.append({"id": s["id"], "prompt": shot_text(proj, s, False, chars) + (f". {proj['tone']} style, film still" if proj.get("tone") else ""),
+                                 "ref": inshot[0]["face"] if len(inshot) == 1 else ""})
         job = _new_job(private, kind="project-keyframes")
 
         async def run():
@@ -211,3 +279,18 @@ def setup(ns):
             return {"done": done}
         asyncio.ensure_future(_ai_job(job, run))
         return web.json_response({"id": job["id"]})
+
+    @routes.post("/manny/api/projects/{pid}/to_board")
+    async def to_board_route(request):
+        b = await request.json()
+        private = bool(b.get("private"))
+        _check(request, private)
+        proj = _get(request.match_info["pid"], private)
+        if not proj:
+            raise web.HTTPNotFound(text="No such project")
+        chars = {c.get("id"): c for c in ns["_load_chars"]()}
+        board = to_board(proj, chars)
+        proj["board"] = board["id"]
+        proj["stage"] = "Storyboard"
+        _put(proj)
+        return web.json_response({"board": board["id"], "name": board["name"], "shots": len(board["shots"])})

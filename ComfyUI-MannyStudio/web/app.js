@@ -1324,7 +1324,7 @@ async function pageStoryboard(main) {
             <button class="ghost" data-go>${s.takes.length ? "＋ " + b.takes + " more take" + (b.takes > 1 ? "s" : "") : "Draft " + b.takes + " take" + (b.takes > 1 ? "s" : "")}</button>
             ${pk && pk.output && pk.q !== "final" && pk.seed != null ? `<button class="ghost" data-hq title="Same seed, full steps. Usually close to the draft, with more detail.">★ Final quality</button>` : ""}
             ${s.takes.filter(t => t.output).length + (s.final ? 1 : 0) > 1 ? `<button class="ghost" data-cmp>⇆ Compare</button>` : ""}
-            ${pk && pk.output ? `<button class="ghost" data-rev title="The local AI watches the take and scores it">✦ Review${pk.review && pk.review.review ? " · " + esc(String(pk.review.review.score)) + "/10" : ""}</button><button class="ghost" data-fin>✓ Finish…</button><button class="ghost" data-cont>Continue →</button>` : ""}
+            ${pk && pk.output ? `<button class="ghost" data-rev title="The local AI watches the take and scores it">✦ Review${pk.review && pk.review.review ? " · " + esc(String(pk.review.review.score)) + "/10" : ""}</button><button class="ghost" data-fin>✓ Finish…</button><button class="ghost" data-cloud title="Ask Claude to make the final render on Seedance 2.5 (Higgsfield) from this approved take">${s.final_request && s.final_request.status === "waiting" ? "☁ Seedance requested" : "☁ Seedance…"}</button><button class="ghost" data-cont>Continue →</button>` : ""}
           </div></div></div></div>`);
       const fr = $(".sframe:not(.s3dbox)", el), fi = $("input", fr);
       const s3 = $(".s3dbox", el);
@@ -1354,6 +1354,15 @@ async function pageStoryboard(main) {
       const hq = $("[data-hq]", el); if (hq) hq.onclick = async () => { await renderShot(b, s, { q: "final", seed: pk.seed, from: s.pick }); toast("Final-quality render queued (same seed)"); draw(); pollQueue(); };
       const cmp = $("[data-cmp]", el); if (cmp) cmp.onclick = () => compareTakes(b, s, k => { s.pick = k; syncPick(s); saveBoard(b, true); draw(); });
       const fb = $("[data-fin]", el); if (fb) fb.onclick = () => finishDialog(b, s, n, draw);
+      const cld = $("[data-cloud]", el); if (cld) cld.onclick = async () => {
+        if (!b.id) return;
+        const on = s.final_request && s.final_request.status === "waiting";
+        if (on) { if (!confirm("Cancel the Seedance request for this shot?")) return; }
+        const notes = on ? "" : prompt("Final render on Seedance 2.5, done by Claude through Higgsfield (uses your Higgsfield credits).\nNotes for the render (optional):", "") ;
+        if (notes === null) return;
+        try { const r = await post(`/manny/api/boards/${b.id}/shots/${s.id}/final_request`, { engine: on ? "none" : "seedance", notes }); s.final_request = r.final_request || undefined; draw(); toast(on ? "Request cancelled" : "Requested. In Claude, say: “do the Seedance final renders in Studio”."); }
+        catch (e) { toast(e.message.slice(0, 200), true); }
+      };
       const rb = $("[data-rev]", el); if (rb) rb.onclick = () => reviewModal(b, s, pk, v => { s.prompt = v; saveBoard(b, true); draw(); toast("Prompt updated. Draft new takes when ready."); });
       $("[data-tin]", el).oninput = e => { s.trimIn = +e.target.value || 0; saveBoard(b); };
       $("[data-tout]", el).oninput = e => { s.trimOut = +e.target.value || 0; saveBoard(b); };
