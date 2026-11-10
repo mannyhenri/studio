@@ -192,7 +192,12 @@ def setup(ns):
                 async with s.get(url, timeout=None) as r:
                     if r.status != 200:
                         raise RuntimeError(f"Civitai answered {r.status}")
-                    data = await r.content.read(MAX_ZIP + 1)
+                    buf = bytearray()
+                    async for chunk in r.content.iter_chunked(1 << 20):
+                        buf += chunk
+                        if len(buf) > MAX_ZIP:
+                            break
+                    data = bytes(buf)
                     job["ctype"] = r.headers.get("Content-Type")
             if len(data) > MAX_ZIP:
                 raise RuntimeError("That pack is too big for a pose pack")

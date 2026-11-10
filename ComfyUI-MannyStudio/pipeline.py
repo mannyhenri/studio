@@ -173,7 +173,12 @@ def setup(ns):
             async with s.get(url, timeout=None) as r:
                 if r.status != 200:
                     raise web.HTTPBadRequest(text=f"Download failed ({r.status})")
-                data = await r.content.read(2 * 1024 ** 3 + 1)
+                buf = bytearray()
+                async for chunk in r.content.iter_chunked(1 << 20):
+                    buf += chunk
+                    if len(buf) > 2 * 1024 ** 3:
+                        break
+                data = bytes(buf)
                 if len(data) > 2 * 1024 ** 3:
                     raise web.HTTPBadRequest(text="Too big (over 2 GB)")
         name = bb.get("name") or os.path.basename(url.split("?")[0]) or "import.mp4"
