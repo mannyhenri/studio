@@ -19,7 +19,9 @@ import folder_paths
 from server import PromptServer
 
 from .mconv.workflow_to_api import convert_ui_to_api
+from .appwf import combo_options as _combo_options, apply_values as _apply_values, fix_custom_combos as _fix_custom_combos
 from . import auth
+from . import remote as _remote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
@@ -132,9 +134,6 @@ def _safe_app_path(rel):
     return full
 
 
-def _combo_options(node):
-    wv = node.get("widgets_values") or []
-    return [v for v in wv[2:] if isinstance(v, str) and v != ""]
 
 
 def _describe_app(rel):
@@ -188,58 +187,8 @@ def _describe_app(rel):
     return {"id": rel, "name": name, "kind": kind, "inputs": inputs, "outputs": outputs}
 
 
-def _apply_values(wf, values):
-    nodes = {str(n["id"]): n for n in wf.get("nodes", [])}
-    for key, val in (values or {}).items():
-        nid, wname = key.split(":", 1)
-        node = nodes.get(nid)
-        if not node:
-            continue
-        wv = node.setdefault("widgets_values", [])
-        t = node.get("type")
-        if not wv:
-            wv.append(val)
-            continue
-        if t == "CustomCombo":
-            opts = _combo_options(node)
-            wv[0] = val
-            if len(wv) > 1 and val in opts:
-                wv[1] = opts.index(val)
-        elif t == "PrimitiveInt":
-            wv[0] = int(val)
-            if len(wv) > 1:
-                wv[1] = "fixed"
-        elif t == "PrimitiveFloat":
-            wv[0] = float(val)
-        elif t == "PrimitiveBoolean":
-            wv[0] = bool(val)
-        else:
-            wv[0] = val
-    return wf
 
 
-def _fix_custom_combos(api, wf):
-    """The UI-to-API converter drops CustomCombo's option list, so the node's
-    INDEX output always came out 0 (aspect and size ignored). Send what the
-    ComfyUI frontend sends: choice, index and option1..N."""
-    nodes = {str(n["id"]): n for n in wf.get("nodes", [])}
-    for sg in (wf.get("definitions") or {}).get("subgraphs", []):
-        for n in sg.get("nodes", []):
-            nodes.setdefault(str(n["id"]), n)
-    for nid, node in api.items():
-        if node.get("class_type") != "CustomCombo":
-            continue
-        ui = nodes.get(nid.split(":")[-1])
-        if not ui:
-            continue
-        opts = _combo_options(ui)
-        choice = node["inputs"].get("choice")
-        ins = {"choice": choice, "index": opts.index(choice) if choice in opts else 0}
-        for k, o in enumerate(opts, 1):
-            ins[f"option{k}"] = o
-        ins[f"option{len(opts) + 1}"] = ""
-        node["inputs"] = ins
-    return api
 
 
 async def _build_prompt(app_id, values):
@@ -324,6 +273,13 @@ async def manny_run(request):
     client_id = body.get("client_id") or uuid.uuid4().hex
     seed_keys = body.get("random_seed_keys") or []
     private = bool(body.get("private"))  # writing privately needs no unlock; viewing does
+    target = body.get("target") or _remote.LOCAL
+    worker = None
+    if target != _remote.LOCAL:
+        try:
+            worker = _remote.find(_data_dir(), target)
+        except KeyError as e:
+            return web.json_response({"error": str(e)}, status=400)
     results = []
     async with ClientSession() as s:
         for i in range(count):
@@ -348,6 +304,15 @@ async def manny_run(request):
                 "client_id": client_id,
                 "extra_data": {"extra_pnginfo": {"workflow": wf}, "manny_app": app_id},
             }
+            if worker:
+                try:
+                    results.append(dict(await _remote.submit(worker, api, {k: v for k, v in payload.items() if k != "prompt"}, _dirs(), private, INCOMING),
+                                        seed=[vals.get(k) for k in seed_keys]))
+                except _remote.GateRefused as e:
+                    return web.json_response({"error": str(e), "refused": e.why, "worker": e.label, "queued": results}, status=409)
+                except Exception as e:
+                    return web.json_response({"error": str(e), "worker": worker["label"], "queued": results}, status=502)
+                continue
             async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=payload) as r:
                 data = await r.json()
                 if r.status != 200:
@@ -356,6 +321,53 @@ async def manny_run(request):
                 if private:
                     _pending_private.add(data.get("prompt_id"))
     return web.json_response({"queued": results})
+
+
+# ---------------------------------------------------------------- remote GPU workers (remote.py)
+def _dirs():
+    return {"input": folder_paths.get_input_directory(), "output": folder_paths.get_output_directory(),
+            "temp": folder_paths.get_temp_directory()}
+
+
+@routes.get("/manny/api/workers")
+async def manny_workers(request):
+    """This PC plus every configured worker, with live health (and its error when it's down)."""
+    async def one(w):
+        try:
+            return dict(w, online=True, info=await _remote.info(w))
+        except Exception as e:
+            return dict(w, online=False, error=str(e))
+    ws = await asyncio.gather(*(one(w) for w in _remote.load_workers(_data_dir())))
+    return web.json_response([{"label": _remote.LOCAL, "host": "127.0.0.1", "port": _port(), "online": True}] + list(ws))
+
+
+@routes.post("/manny/api/workers")
+async def manny_workers_save(request):
+    """Replace the worker list. Body: {"workers": [{label, host, port, device?}]} (comfy-mac's mac-workers.json works as is)."""
+    body = await request.json()
+    _remote.save_workers(_data_dir(), body.get("workers") or [])
+    return web.json_response({"workers": _remote.load_workers(_data_dir())})
+
+
+@routes.post("/manny/api/workers/check")
+async def manny_workers_check(request):
+    """Which machines can run this app with these values: {label: {"ok", "refused": [...]}}."""
+    body = await request.json()
+    _wf, api = await _build_prompt(body["app"], body.get("values") or {})
+    out = {_remote.LOCAL: {"ok": True, "refused": _remote.gate(api, await _get_object_info())}}
+    out[_remote.LOCAL]["ok"] = not out[_remote.LOCAL]["refused"]
+    for w in _remote.load_workers(_data_dir()):
+        try:
+            why = await _remote.check(w, api)
+            out[w["label"]] = {"ok": not why, "refused": why}
+        except Exception as e:
+            out[w["label"]] = {"ok": False, "error": str(e)}
+    return web.json_response(out)
+
+
+@routes.get("/manny/api/remote_jobs")
+async def manny_remote_jobs(request):
+    return web.json_response(sorted((_remote.job_view(j) for j in _remote.JOBS.values()), key=lambda j: -j["queued_at"]))
 
 
 @routes.post("/manny/api/preview_prompt")
