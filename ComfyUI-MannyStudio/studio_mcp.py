@@ -328,6 +328,16 @@ def build_run(a):
         body["unet"] = {"family": fam, "file": f}
     if a.get("motion_video"):
         body["motion_video"] = as_input(a["motion_video"], private)
+    if a.get("pose"):
+        pz = str(a["pose"]).replace("\\", "/")
+        if not pz.startswith("poses/"):
+            packs = (http("GET", "/manny/api/poses") or {}).get("packs", [])
+            hit = [x["file"] for p in packs for x in p["poses"] if pz.lower() in (p["name"] + "/" + x["name"]).lower()]
+            if not hit:
+                raise ValueError(f"No pose matches '{pz}'. Call studio_poses to see them.")
+            pz = hit[0]
+        body["pose"] = pz
+        body["pose_strength"] = float(a.get("pose_strength") or 0.85)
     return app, body, notes
 
 
@@ -425,6 +435,8 @@ TOOLS += [
          "images": {"type": "array", "items": S_, "description": "Image slots in order (local file paths or input values). Video app: image 1 = first frame."},
          "videos": {"type": "array", "items": S_}, "audio": {"type": "array", "items": S_},
          "motion_video": {"type": "string", "description": "MiniMax H3 References: a video whose camera move and motion to follow (<Video 1>)"},
+         "pose": {"type": "string", "description": "Image app, Anime Desire or your SD/SDXL checkpoints only: a pose picture (poses/<pack>/<file>.png, or part of its name; see studio_poses)"},
+         "pose_strength": {"type": "number", "description": "How closely to copy the pose, 0.3-1.2 (default 0.85)"},
          "loras": {"type": "array", "items": {"type": "object"}, "description": "[{name, strength}] installed LoRAs (part of the file name)"},
          "uncensored": B_, "private": {"type": "boolean", "description": "Save in Incognito"}, "count": N_, "seed": N_,
          "later": {"type": "string"}, "wait": B_, "timeout": {"type": "number", "description": "Seconds to wait (default 300)"}}, "required": ["app"]}},
@@ -440,6 +452,8 @@ TOOLS += [
      "inputSchema": {"type": "object", "properties": {"text": S_, "voice": {"type": "string", "description": "5-15 s recording to copy (path)"}, "emotion": N_, "name": S_, "private": B_}, "required": ["text"]}},
     {"name": "studio_upscale_video", "description": "Upscale a video and/or raise its frame rate with Topaz Video (on this PC). Give a path, or filename+subfolder from the gallery.",
      "inputSchema": {"type": "object", "properties": {"path": S_, "filename": S_, "subfolder": S_, "size": {"type": "string", "enum": ["1080", "1440", "4k", ""]}, "fps": {"type": "string", "enum": ["keep", "48", "60"]}, "private": B_}}},
+    {"name": "studio_poses", "description": "Pose packs on this PC (stick-figure pictures for the 'pose' option of studio_generate), and whether the pose ControlNets are installed.",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "studio_models", "description": "What's installed: LoRAs (with the model they're for) and finetunes ('styles') of each model.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "studio_list_boards", "description": "Storyboard boards with their shots: prompt, first frame, takes (files), the picked take, finished version and any final-render request.",
@@ -582,6 +596,9 @@ def call(name, a):
         r = http("POST", "/manny/api/topaz/video", dict(f, size=a.get("size", "1080"), fps=a.get("fps", "keep"), private=a.get("private")))
         res = job_wait(r["id"], 3600)
         return [{"type": "text", "text": json.dumps(dict(res, path=abs_out(res)), indent=1)}]
+    if name == "studio_poses":
+        d = http("GET", "/manny/api/poses")
+        return [{"type": "text", "text": json.dumps({"controlnets": d.get("controlnets"), "packs": [{"pack": p["name"], "poses": [x["file"] for x in p["poses"]]} for p in d.get("packs", [])]}, indent=1)}]
     if name == "studio_models":
         lo = http("GET", "/manny/api/loras")
         st = [m for m in http("GET", "/manny/api/models?folder=diffusion_models").get("items", [])]

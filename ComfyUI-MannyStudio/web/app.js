@@ -105,6 +105,7 @@ function seedRand(app, key) { const r = S.randomSeed[app.id] || (S.randomSeed[ap
 /* classify inputs into sections */
 const MEDIA_KINDS = ["image", "audio", "mask", "video"];
 const APP_ORDER = ["image", "video", "edit", "inpaint", "upscale", "upscale video", "remove background", "smooth motion"];
+const isFixer = a => isTool(a) || /character replace/i.test(appShort(a));
 const isTool = a => APP_ORDER.indexOf(appShort(a).toLowerCase()) > 1 || (APP_ORDER.indexOf(appShort(a).toLowerCase()) < 0 && !a.inputs.some(i => i.kind === "text"));
 const appIcon = a => ({ edit: "✎", inpaint: "◐", upscale: "⤢", "upscale video": "⤢", "remove background": "✂", "smooth motion": "≋" })[appShort(a).toLowerCase()] || (a.kind === "video" ? "▶" : "▣");
 const findApp = name => S.apps.findIndex(a => appShort(a).toLowerCase() === name);
@@ -200,11 +201,34 @@ function pageCreate(main, arg) {
   main.append(p);
   const tabs = $(".apptabs", p);
   const mkTab = (a, k, small) => { const t = h(`<div class="apptab ${small ? "small" : ""} ${k === S.appIdx ? "active" : ""}"><span>${appIcon(a)}</span>${esc(appShort(a))}</div>`); t.onclick = () => openApp(k); return t; };
-  S.apps.forEach((a, k) => { if (!isTool(a)) tabs.append(mkTab(a, k)); });
-  const tools = S.apps.map((a, k) => [a, k]).filter(([a]) => isTool(a));
-  if (tools.length) { tabs.append(h(`<div class="tabsep">Tools</div>`)); tools.forEach(([a, k]) => tabs.append(mkTab(a, k, true))); }
+  S.apps.forEach((a, k) => { if (!isFixer(a)) tabs.append(mkTab(a, k)); });
+  const tools = S.apps.map((a, k) => [a, k]).filter(([a]) => isFixer(a));
+  if (tools.length) {
+    const inTool = isFixer(app);
+    const ft = h(`<div class="apptab ${inTool ? "active" : ""}"><span>✦</span>Fix &amp; enhance ${inTool ? "" : "▾"}</div>`);
+    const row = h(`<div class="toolrow ${inTool ? "" : "hidden"}"></div>`);
+    tools.forEach(([a, k]) => row.append(mkTab(a, k, true)));
+    ft.onclick = () => { if (!inTool) row.classList.toggle("hidden"); };
+    tabs.append(ft); tabs.after(row);
+  }
   renderForm($(".form", p), app);
   renderStage($(".stage", p), app);
+}
+
+/* a section that folds away; remembers open/closed per section */
+function fold(key, title, summary, content, defOpen) {
+  const st = store.get("folds", {}), open = key in st ? st[key] : !!defOpen;
+  const d = h(`<details class="fold" ${open ? "open" : ""}><summary><span class="ft">${esc(title)}</span><em class="fs">${esc(summary || "")}</em></summary></details>`);
+  d.append(content);
+  d.ontoggle = () => { const f = store.get("folds", {}); f[key] = d.open; store.set("folds", f); };
+  return d;
+}
+/* "moss_image_heal_int8_convrot" -> "Moss image heal" */
+function prettyFile(n) {
+  let t = String(n || "").split(/[\\/]/).pop().replace(/\.[^.]+$/, "");
+  t = t.replace(/[_-](int8|fp8|fp16|bf16|fp32|w4a8|w6a8|nf4|gguf|q\d\w*|convrot|row-wise|runtime|mixed|pruned|scaled|e4m3fn|comfyui)(?=$|[_-])/gi, "").replace(/[_-](int8|fp8|fp16|bf16|convrot|pruned|mixed)$/gi, "");
+  t = t.replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
+  return t ? t[0].toUpperCase() + t.slice(1) : n;
 }
 
 function renderForm(form, app) {
@@ -259,7 +283,7 @@ function renderForm(form, app) {
   if (L.model) {
     const uin = uncInput(app), cov = uncCovers(uin, v[L.model.key]);
     const uncOn = uin && v[uin.key];
-    const ms = h(`<div class="fsec"><div class="lblrow"><label class="lbl">${esc(L.model.label)}</label>${uin ? `<label class="uncsw ${uncOn ? "on" : ""} ${cov ? "" : "na"}" title="${esc(uin.label)}"><input type="checkbox" ${uncOn ? "checked" : ""}><span>🔓 Uncensored</span></label>` : ""}</div>
+    const ms = h(`<div class="fsec modelsec ${S.modelOpen ? "" : "collapsed"}"><div class="lblrow"><label class="lbl">${esc(L.model.label)}</label><button class="ghost sm mtoggle">${S.modelOpen ? "Done ▴" : "Change ▾"}</button>${uin ? `<label class="uncsw ${uncOn ? "on" : ""} ${cov ? "" : "na"}" title="${esc(uin.label)}"><input type="checkbox" ${uncOn ? "checked" : ""}><span>🔓 Uncensored</span></label>` : ""}</div>
       ${uin && uncOn && !cov ? `<p class="hint unchint">Uncensored works with ${esc((/\(([^)]*)\)/.exec(uin.label) || [, "some models"])[1])}${app.kind === "image" ? " (Anima always is)" : ""}. Pick one of those.</p>` : ""}
       ${uin && uncOn && cov ? `<p class="hint unchint">On: no content filter, and results are saved privately (Incognito).</p>` : ""}<div class="models"></div></div>`);
     const box = $(".models", ms);
@@ -269,7 +293,7 @@ function renderForm(form, app) {
       const slow = SLOW_HERE.find(([re]) => re.test(o));
       const uc = uin ? uncCovers(uin, o) : false;
       const el = h(`<div class="model ${v[L.model.key] === o ? "on" : ""}"><div class="radio"></div><div><b>${esc(title)}${uc ? ` <i class="unctag" title="${uc === "always" ? "No content filter" : "Can be uncensored with the 🔓 switch"}">🔓</i>` : ""}</b>${sub ? `<span>${esc(sub)}</span>` : ""}${slow ? `<span class="slowtag" title="${esc(slow[2])}">${esc(slow[1])}</span>` : ""}</div></div>`);
-      el.onclick = () => { set(L.model.key, o); if (S.ckpt && S.ckpt[mkey(app)]) { delete S.ckpt[mkey(app)]; store.set("ckpt", S.ckpt); } renderForm(form, app); };
+      el.onclick = () => { if (!S.modelOpen) { S.modelOpen = true; renderForm(form, app); return; } set(L.model.key, o); if (S.ckpt && S.ckpt[mkey(app)]) { delete S.ckpt[mkey(app)]; store.set("ckpt", S.ckpt); } S.modelOpen = false; renderForm(form, app); };
       box.append(el);
       // styles: finetunes of this model you downloaded (Civitai checkpoints, MOSS-heal, NitroFusion2…)
       if (v[L.model.key] === o && !isTool(app)) {
@@ -295,8 +319,8 @@ function renderForm(form, app) {
         const g = h(`<div class="ckg"><label class="lbl">Your checkpoints</label></div>`);
         list.forEach(c => {
           const on = cur === c.name && v[L.model.key] === sdxlOpt;
-          const el = h(`<div class="model ${on ? "on" : ""}"><div class="radio"></div><div><b>${esc(c.title || c.name.split("/").pop().replace(/\.[^.]+$/, ""))}</b><span>${esc(c.base || "SD")} · runs like Anime Desire (SDXL pipeline)</span></div></div>`);
-          el.onclick = () => { S.ckpt = S.ckpt || {}; S.ckpt[mkey(app)] = c.name; store.set("ckpt", S.ckpt); set(L.model.key, sdxlOpt); renderForm(form, app); };
+          const el = h(`<div class="model ${on ? "on" : ""}"><div class="radio"></div><div><b>${esc(c.title || prettyFile(c.name))}</b><span>${esc(c.base || "SD")} · runs like Anime Desire (SDXL pipeline)</span></div></div>`);
+          el.onclick = () => { if (!S.modelOpen) { S.modelOpen = true; renderForm(form, app); return; } S.ckpt = S.ckpt || {}; S.ckpt[mkey(app)] = c.name; store.set("ckpt", S.ckpt); set(L.model.key, sdxlOpt); S.modelOpen = false; renderForm(form, app); };
           g.append(el);
         });
         box.append(g);
@@ -306,15 +330,26 @@ function renderForm(form, app) {
       cmp.onclick = () => compareModels(app);
       ms.append(cmp);
     }
+    $(".mtoggle", ms).onclick = () => { S.modelOpen = !S.modelOpen; renderForm(form, app); };
     form.append(ms);
   }
-  if (!isTool(app) && L.model) form.append(loraSection(app, form));
+  if (!isTool(app) && L.model) {
+    const n = (S.loras[mkey(app)] || []).length;
+    form.append(fold("loras", "LoRAs", n ? n + " on" : "none", loraSection(app, form), n > 0));
+  }
+  if (!isTool(app) && L.model && app.kind === "image" && /anime desire|illustrious/i.test(v[L.model.key] || "")) {
+    const pz = (S.pose || {})[mkey(app)];
+    form.append(fold("pose", "Pose", pz && pz.file ? pz.file.split("/").pop().replace(/\.[^.]+$/, "") : "off", poseSection(app), !!(pz && pz.file)));
+  }
 
   // settings
-  if (L.settings.length) {
-    const ss = h(`<div class="fsec set"></div>`);
-    L.settings.filter(i => !(i.kind === "toggle" && /uncensored/i.test(i.label) && L.model)).forEach(i => ss.append(control(app, i, v, set)));
-    form.append(ss);
+  const later = i => /upscale|steps/i.test(i.label) && !isTool(app);
+  const quick = L.settings.filter(i => !(i.kind === "toggle" && /uncensored/i.test(i.label) && L.model) && !later(i));
+  if (quick.length) {
+    const ss = h(`<div class="fsec set ${quick.every(i => i.kind === "choice") ? "quickset" : ""}"></div>`);
+    quick.forEach(i => ss.append(control(app, i, v, set)));
+    const anchor = $(".modelsec", form);
+    if (anchor) anchor.after(ss); else form.append(ss);
   }
 
   // references
@@ -323,11 +358,16 @@ function renderForm(form, app) {
     const box = $(".refs", rs);
     L.refs.forEach(r => box.append(refTile(app, r, v, set)));
     if (L.refs.strength) rs.append(control(app, L.refs.strength, v, set));
-    form.append(rs);
+    const optional = L.refs.every(r => r.toggle);
+    if (optional && !isTool(app)) {
+      const on = L.refs.filter(r => v[r.toggle.key]).length;
+      $(".lbl", rs).remove();
+      form.append(fold("refs-" + app.kind, app.kind === "video" ? "References · images & voices" : "Reference picture", on ? on + " on" : "off", rs, on > 0));
+    } else form.append(rs);
   }
 
   // advanced
-  const adv = [...(L.negative ? [L.negative] : []), ...L.adv];
+  const adv = [...L.settings.filter(later), ...(L.negative ? [L.negative] : []), ...L.adv];
   if (adv.length) {
     const d = h(`<details class="adv"><summary>More options</summary><div class="fsec"></div></details>`);
     adv.forEach(i => $(".fsec", d).append(control(app, i, v, set)));
@@ -528,6 +568,45 @@ function buildValues(app) {
   return v;
 }
 
+/* Pose: a stick-figure picture the checkpoint copies (OpenPose ControlNet). Works with Anime Desire and your SD / SDXL checkpoints. */
+function poseSection(app) {
+  const k = mkey(app), cur = S.pose[k] || {};
+  const sec = h(`<div class="fsec posesec"><label class="lbl">Pose <span class="muted">· optional, for checkpoints</span></label><div class="posebody muted">Loading poses…</div></div>`);
+  const body = $(".posebody", sec);
+  const save = () => { store.set("pose", S.pose); };
+  loadPoses().then(d => {
+    body.innerHTML = ""; body.classList.remove("muted");
+    const addBtn = h(`<label class="ghost addpose" title="A pose pack .zip from Civitai, or pose pictures">+ Add pack (.zip or pictures)<input type="file" accept=".zip,image/*" multiple hidden></label>`);
+    $("input", addBtn).onchange = async e => {
+      const fd = new FormData(); [...e.target.files].forEach(f => fd.append("file", f));
+      try { const r = await fetch("/manny/api/poses/upload", { method: "POST", body: fd }); if (!r.ok) throw new Error(await r.text()); const j = await r.json(); toast(`${j.poses} poses added to ${j.pack}`); await loadPoses(true); sec.replaceWith(poseSection(app)); }
+      catch (err) { toast(err.message, true); }
+    };
+    if (!d.packs.length) { body.append(h(`<div class="muted">No pose packs yet. Download a pack from Civitai (type “Poses”), then add the .zip here.</div>`), addBtn); return; }
+    if (!d.controlnets.sd15 && !d.controlnets.sdxl) body.append(h(`<div class="muted">The pose ControlNets are still downloading; poses will work once they're in.</div>`));
+    const pick = h(`<div class="chips posepacks"></div>`), grid = h(`<div class="posegrid"></div>`);
+    const none = h(`<div class="chip ${cur.file ? "" : "on"}">No pose</div>`);
+    none.onclick = () => { delete S.pose[k]; save(); $$(".pose", grid).forEach(x => x.classList.remove("on")); none.classList.add("on"); };
+    pick.append(none);
+    let pack = (cur.file && d.packs.find(p => cur.file.startsWith("poses/" + p.name + "/"))) || d.packs[0];
+    const show = p => {
+      pack = p; $$(".chip[data-p]", pick).forEach(c => c.classList.toggle("on", c.dataset.p === p.name));
+      grid.innerHTML = "";
+      p.poses.forEach(x => {
+        const t = h(`<div class="pose ${(S.pose[k] || {}).file === x.file ? "on" : ""}" title="${esc(x.name)}"><img loading="lazy" src="/view?type=input&subfolder=${encodeURIComponent(x.subfolder)}&filename=${encodeURIComponent(x.filename)}"></div>`);
+        t.onclick = () => { S.pose[k] = { file: x.file, strength: (S.pose[k] || {}).strength || 0.85 }; save(); $$(".pose", grid).forEach(y => y.classList.toggle("on", y === t)); none.classList.remove("on"); };
+        grid.append(t);
+      });
+    };
+    d.packs.forEach(p => { const c = h(`<div class="chip" data-p="${esc(p.name)}">${esc(p.name.length > 28 ? p.name.slice(0, 27) + "…" : p.name)} <span class="muted">${p.poses.length}</span></div>`); c.onclick = () => show(p); pick.append(c); });
+    const st = h(`<div class="row posestr"><span class="muted">How closely</span><input type="range" min="0.3" max="1.2" step="0.05" value="${cur.strength || 0.85}"><b>${(cur.strength || 0.85).toFixed(2)}</b></div>`);
+    $("input", st).oninput = e => { const val = +e.target.value; $("b", st).textContent = val.toFixed(2); if (S.pose[k]) { S.pose[k].strength = val; save(); } };
+    body.append(pick, grid, st, addBtn);
+    show(pack);
+  });
+  return sec;
+}
+
 function runBody(app) {
   const seedKeys = app.inputs.filter(i => i.kind === "seed" && (S.randomSeed[app.id] || {})[i.key] !== false).map(i => i.key);
   const vals = buildValues(app);
@@ -539,7 +618,9 @@ function runBody(app) {
   const fam = L0(app).model ? modelFamily(vals[L0(app).model.key]) : "";
   const vfile = fam && (S.variant[mkey(app)] || {})[fam];
   const unet = vfile ? { family: fam, file: vfile } : null;
-  return { body: { app: app.id, values: vals, count: S.count, client_id: clientId, random_seed_keys: seedKeys, private: priv, loras, checkpoint, unet }, priv, vals };
+  const pz = L0(app).model && /anime desire|illustrious/i.test(vals[L0(app).model.key] || "") ? (S.pose || {})[mkey(app)] : null;
+  return { body: { app: app.id, values: vals, count: S.count, client_id: clientId, random_seed_keys: seedKeys, private: priv, loras, checkpoint, unet,
+    pose: pz && pz.file ? pz.file : undefined, pose_strength: pz && pz.file ? pz.strength : undefined }, priv, vals };
 }
 /* render later: Studio keeps the job and sends it at a set time, or once the PC has been idle for 2 minutes */
 function scheduleMenu(app, anchor) {
@@ -648,7 +729,8 @@ function tile(it, list) {
 }
 async function pageGallery(main) {
   const p = h(`<div class="page"><div class="eyebrow">Library</div><h1>Gallery</h1>
-    <div class="filters"><input type="text" id="q" placeholder="Search prompts…" class="search"><div class="chips" id="kind"></div><select id="model"><option value="">Every model</option></select><span class="hint" id="cnt"></span></div>
+    <div class="filters"><input type="text" id="q" placeholder="Search prompts…" class="search"><div class="chips" id="kind"></div><select id="model"><option value="">Every model</option></select><span class="hint" id="cnt"></span><button class="btn sm" id="selbtn">☐ Select</button></div>
+    <div class="selbar hidden" id="selbar"><b id="selcnt">0 selected</b><button class="ghost" id="selall">Select all shown</button><button class="ghost" id="selnone">Clear</button><span class="sp"></span><button class="btn danger" id="seltrash">🗑 Move to trash</button><button class="ghost" id="seldone">Done</button></div>
     <div class="grid" id="g"></div></div>`);
   main.append(p);
   const items = await loadGallery(true);
@@ -659,6 +741,27 @@ async function pageGallery(main) {
   kinds.forEach(([k, l]) => { const c = h(`<div class="chip ${k === kind ? "on" : ""}">${l}</div>`); c.onclick = () => { kind = k; store.set("gkind", k); $$("#kind .chip", p).forEach(x => x.classList.remove("on")); c.classList.add("on"); draw(); }; $("#kind", p).append(c); });
   [...new Set(items.map(i => modelOf(i.filename)))].sort().forEach(m => $("#model", p).append(new Option(m, m)));
   $("#model", p).onchange = e => { model = e.target.value; draw(); };
+  let selMode = false, shownNow = [];
+  const sel = new Set();
+  const selUpd = () => { $("#selcnt", p).textContent = sel.size + " selected"; $("#seltrash", p).disabled = !sel.size; };
+  const setMode = on => { selMode = on; sel.clear(); $("#selbar", p).classList.toggle("hidden", !on); $("#selbtn", p).classList.toggle("hidden", on); p.classList.toggle("selecting", on); selUpd(); draw(); };
+  $("#selbtn", p).onclick = () => setMode(true);
+  $("#seldone", p).onclick = () => setMode(false);
+  $("#selnone", p).onclick = () => { sel.clear(); $$(".tile.sel", p).forEach(t => t.classList.remove("sel")); selUpd(); };
+  $("#selall", p).onclick = () => { shownNow.forEach(it => sel.add(it)); $$("#g .tile", p).forEach(t => t.classList.add("sel")); selUpd(); };
+  $("#seltrash", p).onclick = async () => {
+    const list = [...sel]; if (!list.length) return;
+    if (!confirm(`Move ${list.length} item${list.length > 1 ? "s" : ""} to the trash? You can get them back from the _trash folder.`)) return;
+    const bt = $("#seltrash", p); bt.disabled = true; let ok = 0, bad = 0;
+    for (const it of list) {
+      bt.textContent = `Moving ${ok + bad + 1} of ${list.length}…`;
+      try { await post("/manny/api/trash", it); ok++; const k = items.indexOf(it); if (k >= 0) items.splice(k, 1); S.gallery = S.gallery.filter(x => x !== it); }
+      catch { bad++; }
+    }
+    bt.textContent = "🗑 Move to trash";
+    toast(`${ok} moved to trash` + (bad ? `, ${bad} couldn't be moved` : ""), !!bad);
+    setMode(false);
+  };
   function draw() {
     const g = $("#g", p); g.innerHTML = "";
     const words = q.split(/\s+/).filter(Boolean);
@@ -666,7 +769,15 @@ async function pageGallery(main) {
       && words.every(w => ((i.prompt || "") + " " + i.filename).toLowerCase().includes(w)));
     $("#cnt", p).textContent = list.length + " items";
     if (!list.length) g.append(h(`<div class="empty">Nothing here yet.</div>`));
-    const shown = list.slice(0, 300); shown.forEach(it => g.append(tile(it, shown)));
+    const shown = list.slice(0, 300); shownNow = shown;
+    shown.forEach(it => {
+      const t = tile(it, shown);
+      if (selMode) {
+        t.classList.add("selectable"); if (sel.has(it)) t.classList.add("sel");
+        t.onclick = e => { e.stopPropagation(); if (sel.has(it)) sel.delete(it); else sel.add(it); t.classList.toggle("sel", sel.has(it)); selUpd(); };
+      }
+      g.append(t);
+    });
   }
   draw();
 }
@@ -1460,12 +1571,21 @@ async function loadVariants(force) {
   if (!variantCache || force) {
     try {
       const items = (await api("/manny/api/models?folder=diffusion_models" + (S.incog ? "&private=1" : ""))).items || [];
-      variantCache = items.filter(m => !STOCK_UNETS.test(m.name.split(/[\\/]/).pop())).map(m => ({ file: m.name, title: m.title || m.name.split(/[\\/]/).pop().replace(/\.[^.]+$/, ""), base: m.base || "", family: loraFamily(m.base) || fileFamily(m.name) })).filter(m => m.family);
+      const seen = new Map();
+      items.filter(m => !STOCK_UNETS.test(m.name.split(/[\\/]/).pop())).forEach(m => {
+        const k = m.name.split(/[\\/]/).pop().toLowerCase(), prev = seen.get(k);
+        const x = { file: m.name, title: (m.title || prettyFile(m.name)).split(/[|｜丨]/)[0].trim(), base: m.base || "", family: loraFamily(m.base) || fileFamily(m.name) };
+        if (!prev || (!prev.base && x.base)) seen.set(k, x);
+      });
+      variantCache = [...seen.values()].filter(m => m.family);
     } catch { variantCache = []; }
   }
   return variantCache;
 }
 S.variant = store.get("variant", {});
+S.pose = store.get("pose", {});
+let poseCache = null;
+async function loadPoses(force) { if (!poseCache || force) { try { poseCache = await api("/manny/api/poses"); } catch { poseCache = { packs: [], controlnets: {} }; } } return poseCache; }
 // which models the app's "Uncensored" switch covers (from its label), plus models that are uncensored anyway
 const UNCENSORED_ALWAYS = /anima/i;
 function uncInput(app) { return app.inputs.find(i => i.kind === "toggle" && /uncensored/i.test(i.label)); }
@@ -1478,7 +1598,7 @@ let loraCache = null, ckptCache = null;
 const L0 = app => layout(app);
 S.ckpt = store.get("ckpt", {});
 async function loadCkpts(force) {
-  if (!ckptCache || force) { try { ckptCache = (await api("/manny/api/models?folder=checkpoints" + (S.incog ? "&private=1" : ""))).items.filter(m => m.civitai); } catch { ckptCache = []; } }
+  if (!ckptCache || force) { try { ckptCache = (await api("/manny/api/models?folder=checkpoints" + (S.incog ? "&private=1" : ""))).items.filter(m => m.folder === "checkpoints" && !/inpaint/i.test(m.name)); } catch { ckptCache = []; } }
   return ckptCache;
 }
 async function loadLoras(force) { if (!loraCache || force) { try { loraCache = await api("/manny/api/loras" + PQ()); } catch { loraCache = []; } } return loraCache; }
@@ -1595,11 +1715,18 @@ async function pageLoras(main) {
       const u = $("#upd", body); if (!u || !ups || !ups.length) return;
       const box = h(`<div class="panel updbox"><b>${ups.length} update${ups.length > 1 ? "s" : ""} on Civitai</b></div>`);
       ups.forEach(x => {
-        const r = h(`<div class="mrow"><div class="mn"><b>${esc(x.name)}</b><span>You have ${esc(x.installed || "an older version")} · latest is ${esc(x.latest.name)}${x.latest.date ? " (" + esc(x.latest.date) + ")" : ""}</span></div><span></span><span class="ms"></span><button class="btn sm">Get latest</button></div>`);
-        $("button", r).onclick = async () => {
-          const bt = $("button", r); bt.disabled = true;
+        const r = h(`<div class="mrow"><div class="mn"><b>${esc(x.name)}</b><span>You have ${esc(x.installed || "an older version")} · latest is ${esc(x.latest.name)}${x.latest.date ? " (" + esc(x.latest.date) + ")" : ""}</span></div><span></span><span class="ms"></span>${x.paid
+          ? `<a class="btn sm ghost" target="_blank" rel="noopener" href="https://civitai.com/models/${encodeURIComponent(x.model)}?modelVersionId=${encodeURIComponent(x.latest.id)}" title="This version is paid or early access on Civitai">${x.paid === "paid" ? "Paid on Civitai" : "Free from " + esc(x.paid)}</a>`
+          : `<button class="btn sm">Get latest</button>`}</div>`);
+        const bt = $("button", r);
+        if (bt) bt.onclick = async () => {
+          bt.disabled = true; bt.textContent = "Starting…";
           try { const j = await post("/manny/api/civitai/download", { version: x.latest.id, type: x.type, private: S.incog }); await pollJob(j.id, s2 => bt.textContent = s2); bt.textContent = "Installed"; loraCache = null; ckptCache = null; toast(`${x.name} updated. Remove the old version in Settings if you like.`); }
-          catch (e) { toast(e.message, true); bt.disabled = false; bt.textContent = "Get latest"; }
+          catch (e) {
+            const msg = /403|paid|early access/i.test(e.message) ? "Not free yet on Civitai" : e.message;
+            toast(msg, true); bt.disabled = false; bt.textContent = "Try again";
+            const ms = $(".ms", r); if (ms) ms.textContent = msg;
+          }
         };
         box.append(r);
       });

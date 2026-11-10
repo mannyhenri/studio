@@ -23,7 +23,7 @@ from . import auth
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-VERSION = "1.17.0"
+VERSION = "1.18.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -339,6 +339,8 @@ async def manny_run(request):
                 _inject_unet(api, body["unet"].get("family"), body["unet"]["file"])
             if body.get("motion_video"):
                 _previs.inject_motion(api, body["motion_video"])
+            if body.get("pose"):
+                _poses.inject_pose(api, body["pose"], body.get("pose_strength"))
             if private:
                 _privatize(api)
             payload = {
@@ -1842,6 +1844,49 @@ def _base_folder(base):
     return os.path.join("Civitai", b)
 
 
+_CIV_LOCK = asyncio.Lock()   # Civitai downloads run one at a time
+
+
+async def _civ_fetch(job, url, part, total, key):
+    """Download into part, resuming after dropped connections (Range requests)."""
+    tries = 0
+    while True:
+        have = os.path.getsize(part) if os.path.isfile(part) else 0
+        if total and have >= total:
+            break
+        hdrs = {"Authorization": f"Bearer {key}", "User-Agent": "Studio/1.0"}
+        if have:
+            hdrs["Range"] = f"bytes={have}-"
+        try:
+            async with ClientSession(headers=hdrs) as s:
+                async with s.get(url, timeout=None) as r:
+                    if r.status not in (200, 206):
+                        if r.status == 403:
+                            raise RuntimeError("Civitai won't let you download this one yet (it's paid or early access)")
+                        raise RuntimeError(f"Civitai answered {r.status}" + (" (check your key)" if r.status == 401 else ""))
+                    if r.status == 200:      # no resume offered: start over
+                        have = 0
+                    total = (have + int(r.headers.get("Content-Length") or 0)) or total
+                    got = have
+                    with open(part, "ab" if have else "wb") as out:
+                        async for chunk in r.content.iter_chunked(1 << 20):
+                            if job.get("cancel"):
+                                raise RuntimeError("Stopped")
+                            out.write(chunk)
+                            got += len(chunk)
+                            job["stage"] = f"Downloading {got / 1e6:.0f} of {total / 1e6:.0f} MB" if total else f"Downloading {got / 1e6:.0f} MB"
+                            job["progress"] = got / total if total else None
+            break
+        except RuntimeError:
+            raise
+        except Exception as e:      # Civitai dropped the connection: pick up where it stopped
+            tries += 1
+            if tries > 30:
+                raise RuntimeError(f"Download keeps breaking ({e}); try again later")
+            job["stage"] = f"Connection dropped, resuming ({tries})"
+            await asyncio.sleep(min(60, 5 * tries))
+
+
 async def _civ_download(job, b, private):
     key = _civ_key()
     vid = int(b["version"])
@@ -1865,26 +1910,27 @@ async def _civ_download(job, b, private):
     else:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         import hashlib as _h
-        sha = _h.sha256()
         url = f["downloadUrl"] if f.get("downloadUrl", "").startswith("https://civitai.com/") else f"https://civitai.com/api/download/models/{vid}"
         part = dest + ".part"
-        async with ClientSession(headers={"Authorization": f"Bearer {key}", "User-Agent": "Studio/1.0"}) as s:
-            async with s.get(url, timeout=None) as r:
-                if r.status != 200:
-                    raise RuntimeError(f"Civitai answered {r.status}" + (" (check your key)" if r.status in (401, 403) else ""))
-                total = int(r.headers.get("Content-Length") or 0) or int((f.get("sizeKB") or 0) * 1024)
-                got = 0
-                with open(part, "wb") as out:
-                    async for chunk in r.content.iter_chunked(1 << 20):
-                        if job.get("cancel"):
-                            raise RuntimeError("Stopped")
-                        out.write(chunk)
-                        sha.update(chunk)
-                        got += len(chunk)
-                        job["stage"] = f"Downloading {got / 1e6:.0f} of {total / 1e6:.0f} MB" if total else f"Downloading {got / 1e6:.0f} MB"
-                        job["progress"] = got / total if total else None
+        total = int((f.get("sizeKB") or 0) * 1024)
+        if _CIV_LOCK.locked():
+            job["stage"] = "Waiting for the other download to finish"
+        await _CIV_LOCK.acquire()
+        try:
+            await _civ_fetch(job, url, part, total, key)
+        finally:
+            _CIV_LOCK.release()
+        job["stage"] = "Checking the file"
+
+        def _sha():
+            h = _h.sha256()
+            with open(part, "rb") as fh:
+                for blk in iter(lambda: fh.read(1 << 22), b""):
+                    h.update(blk)
+            return h.hexdigest()
+        digest = await asyncio.to_thread(_sha)
         want_sha = ((f.get("hashes") or {}).get("SHA256") or "").lower()
-        if want_sha and sha.hexdigest() != want_sha:
+        if want_sha and digest != want_sha:
             os.remove(part)
             raise RuntimeError("The download was damaged (checksum mismatch). Try again.")
         os.replace(part, dest)
@@ -1922,10 +1968,74 @@ async def civ_updates(request):
         have = {r[1].get("version") for r in rows}
         if latest.get("id") not in have:
             k, m = rows[0]
-            out.append({"key": k, "model": mid, "name": m.get("name"), "installed": m.get("versionName"), "type": info.get("type"),
+            paid = None
+            try:
+                vi = await _civ_get(f"/model-versions/{latest.get('id')}", {})
+                pa = vi.get("paidAccess") or {}
+                if pa.get("permanent"):
+                    paid = "paid"
+                elif pa.get("endsAt") or vi.get("earlyAccessEndsAt"):
+                    paid = (pa.get("endsAt") or vi.get("earlyAccessEndsAt") or "")[:10]
+            except Exception:
+                pass
+            out.append({"key": k, "model": mid, "name": m.get("name"), "installed": m.get("versionName"), "type": info.get("type"), "paid": paid,
                         "latest": {"id": latest.get("id"), "name": latest.get("name"), "base": latest.get("baseModel"),
                                    "date": (latest.get("publishedAt") or latest.get("createdAt") or "")[:10]}})
     return web.json_response(out)
+
+
+def _civ_pending(update=None, private=False):
+    """Downloads not finished yet, kept on disk so they carry on after a restart. Incognito ones are kept in the private space."""
+    p = os.path.join(_priv_root(), ".civitai_pending.json") if private else os.path.join(_data_dir(), "civitai_pending.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            items = json.load(fh)
+    except Exception:
+        items = []
+    if update is not None:
+        items = update(items)
+        with open(p + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(items, fh)
+        os.replace(p + ".tmp", p)
+    return items
+
+
+def _civ_start(b, private):
+    job = _new_job(private, kind="civitai", version=b.get("version"))
+    key = str(b.get("version"))
+    drop = lambda xs: [x for x in xs if str(x.get("version")) != key]
+    _civ_pending(lambda xs: drop(xs) + [{k: b.get(k) for k in ("version", "file", "type")}], private)
+
+    async def run():
+        try:
+            res = await _civ_download(job, b, private)
+        except Exception as e:
+            if "keeps breaking" not in str(e):   # only connection trouble is worth retrying after a restart
+                _civ_pending(drop, private)
+            raise
+        _civ_pending(drop, private)
+        return res
+    asyncio.ensure_future(_ai_job(job, run))
+    return job
+
+
+_civ_resumed = {"done": False}
+
+
+def _civ_resume_once():
+    if not _civ_resumed["done"]:
+        _civ_resumed["done"] = True
+        try:
+            _civ_resume_all()
+        except Exception as e:
+            print("[Studio] civitai resume:", e)
+
+
+def _civ_resume_all():
+    for private in (False, True):
+        for b in _civ_pending(private=private):
+            if not any(j.get("kind") == "civitai" and str(j.get("version")) == str(b.get("version")) and j.get("status") == "running" for j in _jobs.values()):
+                _civ_start(b, private)
 
 
 @routes.post("/manny/api/civitai/download")
@@ -1934,9 +2044,20 @@ async def civ_download(request):
     private = bool(b.get("private"))
     if private:
         _need_private(request)
-    job = _new_job(private)
-    asyncio.ensure_future(_ai_job(job, lambda: _civ_download(job, b, private)))
-    return web.json_response({"id": job["id"]})
+    return web.json_response({"id": _civ_start(b, private)["id"]})
+
+
+@routes.get("/manny/api/civitai/downloads")
+async def civ_downloads(request):
+    out = [{k: j.get(k) for k in ("id", "version", "status", "stage", "progress", "error")} for j in _jobs.values()
+           if j.get("kind") == "civitai" and not j.get("private")]
+    return web.json_response({"jobs": out, "pending": _civ_pending()})
+
+
+@routes.post("/manny/api/civitai/resume")
+async def civ_resume(request):
+    _civ_resume_all()
+    return web.json_response({"ok": True, "pending": _civ_pending()})
 
 
 @routes.get("/manny/api/loras")
@@ -1963,8 +2084,8 @@ async def manny_loras(request):
 
 def _inject_loras(api, loras):
     """Adds LoRAs after each model loader (SeedVR2 upscalers excluded). Only the branch of the chosen model runs."""
-    have = set(folder_paths.get_filename_list("loras") or [])
-    loras = [l for l in (loras or []) if l.get("name") in have][:4]
+    have = {x.replace("\\", "/"): x for x in (folder_paths.get_filename_list("loras") or [])}
+    loras = [dict(l, name=have[str(l.get("name", "")).replace("\\", "/")]) for l in (loras or []) if str(l.get("name", "")).replace("\\", "/") in have][:4]
     if not loras:
         return api
     loaders = [nid for nid, n in api.items() if n.get("class_type") in ("UNETLoader", "CheckpointLoaderSimple", "UnetLoaderGGUF")
@@ -2182,7 +2303,9 @@ def _inject_unet(api, family, name):
     """Uses a finetune (a Civitai checkpoint, MOSS-heal, NitroFusion2…) in place of the family's stock model."""
     import re as _re
     pat = UNET_FAMILY.get(family)
-    if not pat or name not in set(folder_paths.get_filename_list("diffusion_models") or []):
+    have = {x.replace("\\", "/"): x for x in (folder_paths.get_filename_list("diffusion_models") or [])}
+    name = have.get((name or "").replace("\\", "/"))   # Windows lists sub-folders with backslashes
+    if not pat or not name:
         return api
     hit = False
     for n in api.values():
@@ -2201,13 +2324,14 @@ def _inject_unet(api, family, name):
 
 def _inject_checkpoint(api, name):
     """Uses one of your own SD/SDXL checkpoints in place of the Image app's SDXL model."""
-    have = set(folder_paths.get_filename_list("checkpoints") or [])
-    if name not in have:
+    have = {x.replace("\\", "/"): x for x in (folder_paths.get_filename_list("checkpoints") or [])}
+    real = have.get((name or "").replace("\\", "/"))   # Windows lists sub-folders with backslashes
+    if not real:
         return api
     hit = False
     for n in api.values():
         if n.get("class_type") == "CheckpointLoaderSimple":
-            n["inputs"]["ckpt_name"] = name
+            n["inputs"]["ckpt_name"] = real
             hit = True
     if hit:
         title = "".join(ch for ch in os.path.splitext(os.path.basename(name.replace("\\", "/")))[0] if ch.isalnum() or ch in " -_.")[:60]
@@ -2244,6 +2368,7 @@ import subprocess as subprocess_mod  # noqa: E402
 
 @routes.get("/manny/api/sysmon")
 async def manny_sysmon(request):
+    _civ_resume_once()
     out = {}
     try:
         import psutil
@@ -2424,3 +2549,15 @@ _gitver.setup_routes(globals())
 # ---------------------------------------------------------------- 3D -> storyboard -> final render pipeline
 from . import pipeline as _pipeline  # noqa: E402
 _pipeline.setup(globals())
+
+# ---------------------------------------------------------------- poses (OpenPose ControlNet for checkpoints)
+from . import poses as _poses  # noqa: E402
+_poses.setup(globals())
+
+
+try:   # carry on with Civitai downloads that a restart interrupted
+    _lp = getattr(PromptServer.instance, "loop", None)
+    if _lp is not None:
+        _lp.call_soon_threadsafe(lambda: _lp.call_later(20, _civ_resume_once))
+except Exception as _e:
+    print("[Studio] civitai resume:", _e)
