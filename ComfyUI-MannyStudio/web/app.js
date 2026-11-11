@@ -1408,19 +1408,27 @@ function videoFixDialog(cur, prompt, at) {
 function videoExtendDialog(cur, prompt) {
   if (cur.private) return toast("Continuing Incognito videos isn't supported yet", true);
   const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
-  const st = { seconds: 7, ref: "" };
+  const st = { seconds: 5, ref: "", engine: store.get("xeng", "ltx") };
   const d = h(`<div class="dialog"><div class="row" style="justify-content:space-between"><h2>⏭ Continue this shot</h2><button class="icon" data-x>✕</button></div>
-    <p class="hint" style="margin:0">MiniMax H3 reads the last second of motion and sound and keeps going, then the new part is joined on. The result is a new, longer video; the original stays.</p>
+    <p class="hint" style="margin:0">The last second of the clip carries on into the new part, which is joined on. The result is a new, longer video; the original stays.</p>
+    <div><label class="lbl">Engine</label><div class="chips" id="xeng"><div class="chip" data-v="ltx" title="Runs safely on this PC">LTX-2.5 (sharp, up to +7 s)</div><div class="chip" data-v="h3" title="MiniMax H3 References: the H3 model that rendered fine here. Not yet tested since the Nov 10 ComfyUI update">MiniMax H3 (up to +11 s)</div></div></div>
     <div><label class="lbl">What happens next</label><textarea id="xprompt" rows="4" placeholder="She keeps walking toward the camera, then stops and looks over her shoulder…"></textarea></div>
     <div><label class="lbl">How much longer</label><div class="chips" id="xsec">${[5, 7, 9, 11].map(x => `<div class="chip" data-v="${x}">+${x} s</div>`).join("")}</div></div>
     <div class="row"><div class="ref" id="xref" title="Optional: a picture of the character, to keep them the same"><span class="plus">+</span><span class="rl">Character picture<br><small>optional</small></span><input type="file" accept="image/*" hidden></div>
-      <p class="hint" style="flex:1;margin:0">Without a picture, the clip's last frame is used to keep the look. ~10–25 min on this PC.</p></div>
+      <p class="hint" style="flex:1;margin:0" id="xhint"></p></div>
     <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Continue</button></div></div>`);
   m.append(d);
   const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
   $$("[data-x]", d).forEach(x => x.onclick = close);
   $("#xprompt", d).value = prompt || "";
-  const chips = () => $$("#xsec .chip", d).forEach(c => { c.classList.toggle("on", +c.dataset.v === st.seconds); c.onclick = () => { st.seconds = +c.dataset.v; chips(); }; });
+  const chips = () => {
+    const h3 = st.engine === "h3";
+    if (!h3 && st.seconds > 7) st.seconds = 7;
+    $$("#xeng .chip", d).forEach(c => { c.classList.toggle("on", c.dataset.v === st.engine); c.onclick = () => { st.engine = c.dataset.v; store.set("xeng", st.engine); chips(); }; });
+    $$("#xsec .chip", d).forEach(c => { const off = !h3 && +c.dataset.v > 7; c.classList.toggle("hidden", off); c.classList.toggle("on", +c.dataset.v === st.seconds); c.onclick = () => { st.seconds = +c.dataset.v; chips(); }; });
+    $("#xref", d).classList.toggle("hidden", !h3);
+    $("#xhint", d).textContent = h3 ? "H3: without a character picture, the clip's last frame keeps the look. ~15–30 min on this PC." : "LTX keeps going from the last second of motion and makes new sound. ~15–20 min on this PC.";
+  };
   chips();
   const rb = $("#xref", d), rf = $("input", rb);
   rb.onclick = () => rf.click();
@@ -1428,7 +1436,7 @@ function videoExtendDialog(cur, prompt) {
   $("[data-go]", d).onclick = async () => {
     const pr = $("#xprompt", d).value.trim(); if (!pr) return toast("Say what happens next", true);
     close();
-    try { await videoJob("/manny/api/video/extend", { filename: cur.filename, subfolder: cur.subfolder || "", prompt: pr, seconds: st.seconds, ref: st.ref }, "Continue shot"); }
+    try { await videoJob("/manny/api/video/extend", { filename: cur.filename, subfolder: cur.subfolder || "", prompt: pr, seconds: st.seconds, ref: st.engine === "h3" ? st.ref : "", engine: st.engine }, "Continue shot"); }
     catch (e) { toast(e.message.slice(0, 260), true); }
   };
 }

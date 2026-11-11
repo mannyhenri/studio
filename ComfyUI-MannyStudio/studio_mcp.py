@@ -478,9 +478,9 @@ TOOLS += [
     {"name": "studio_fix_video", "description": "Fix part of a video with LTX-2.5 (the sound is always kept). mode 'picture' re-draws the marked seconds (plus 1 s each side) from the video itself, 'face' tracks the face and re-draws only it. Only that stretch changes; the result is a new file in Videos/Fixed. Give a path, or filename+subfolder from the gallery. Waits (several minutes).",
      "inputSchema": {"type": "object", "properties": {"path": S_, "filename": S_, "subfolder": S_, "start": N_, "end": N_, "mode": {"type": "string", "enum": ["picture", "face"]},
                                                       "prompt": {"type": "string", "description": "what should happen in the marked part (for 'face': describe the person)"},                                                       "denoise": {"type": "number", "description": "how much to change: face 0.25-0.7 (default 0.45), picture 0.4-0.9 (default 0.7)"}, "seed": N_}, "required": ["start", "end", "mode"]}},
-    {"name": "studio_extend_video", "description": "Continue a shot with MiniMax H3 motion context: the clip's last second of motion and sound carries into the new part, which is joined on. Result: a new, longer video in Videos/Extended. Waits.",
+    {"name": "studio_extend_video", "description": "Continue a shot: the clip's last second carries into the new part, which is joined on. engine 'ltx' (LTX-2.5, default, +5 or +7 s, safe on this PC) or 'h3' (MiniMax H3 References with motion context, +5..11 s, optional character ref). Result: a new, longer video in Videos/Extended. Waits.",
      "inputSchema": {"type": "object", "properties": {"path": S_, "filename": S_, "subfolder": S_, "prompt": {"type": "string", "description": "what happens next"},
-                                                      "seconds": {"type": "integer", "enum": [5, 7, 9, 11]}, "ref": {"type": "string", "description": "character picture (local path), optional"}, "seed": N_}, "required": ["prompt"]}},
+                                                      "engine": {"type": "string", "enum": ["ltx", "h3"]}, "seconds": {"type": "integer", "enum": [5, 7, 9, 11]}, "ref": {"type": "string", "description": "character picture (local path), optional"}, "seed": N_}, "required": ["prompt"]}},
     {"name": "studio_keyframe_shot", "description": "One continuous shot through several pictures at chosen times. LTX-2.5, two passes, up to 8 pictures. keys: [{image: local path, at: seconds}], the first at 0. Waits.",
      "inputSchema": {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "object"}}, "prompt": S_,
                                                       "seconds": N_, "aspect": {"type": "string", "enum": ["16:9", "9:16", "1:1", "21:9"]}, "seed": N_}, "required": ["keys", "prompt"]}},
@@ -640,10 +640,10 @@ def call(name, a):
         if a.get("ref"):
             body["ref"] = as_input(a["ref"])
         if name == "studio_fix_video":
-            body.update(start=a["start"], end=a["end"], mode=a["mode"], denoise=a.get("denoise", 0.4))
+            body.update(start=a["start"], end=a["end"], mode=a["mode"], denoise=a.get("denoise"))
             r = http("POST", "/manny/api/video/fix", body)
         else:
-            body.update(seconds=a.get("seconds", 7))
+            body.update(seconds=a.get("seconds", 5), engine=a.get("engine", "ltx"))
             r = http("POST", "/manny/api/video/extend", body)
         res = job_wait(r["id"], 4 * 3600)
         return [{"type": "text", "text": json.dumps(dict(res, path=abs_out(res)), indent=1)}]
