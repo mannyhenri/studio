@@ -2763,6 +2763,7 @@ _queuekeep.setup(globals())
 # ---------------------------------------------------------------- share model files with the GPU machines (a Mac fetches what HF lacks)
 from . import modelshare as _modelshare  # noqa: E402
 _modelshare.setup(globals())
+_remote.LOCAL_MODEL, _remote.LOCAL_SHA = _modelshare.local_model, _modelshare._sha     # a Mac that can't pull gets it pushed
 
 
 try:   # carry on with Civitai downloads that a restart interrupted

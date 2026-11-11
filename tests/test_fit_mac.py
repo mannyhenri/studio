@@ -10,6 +10,7 @@ source "pc", the download is byte-identical, and a cut download resumes. A Mac t
 machines gets the Mac's "refused" reason; a file the PC lacks gets "not on Hugging Face and not on the Studio PC".
 /mac/fetch replies (C3): every status the Mac can send is one Studio handles, and Studio reads only keys the Mac sends.
 Missing-node refusals (C11): Studio's name_packs names the same pack as comfy-mac's WAITING map for every class.
+Push (C15): when the Mac can't pull, Studio's _push sends every pc-only file into comfy-mac's real /mac/models handlers.
 Subfolder spelling (C13): a file the PC lists as "Civitai\\x" and the Mac as "Civitai/x" passes the gate and reaches the
 Mac in its spelling, for every downloaded file and every subfolder name in the PC's live model lists.
 """
@@ -205,7 +206,42 @@ async def main():
     down = mac_fetch.pc_head("http://127.0.0.1:9")      # nothing listens: unreachable
     p = await asyncio.to_thread(mac_fetch.plan_file, "LoraLoaderModelOnly", "lora_name", "x.safetensors", "loras", {}, dirs, 10 ** 13, 0, down)
     statuses.add(p["status"])
-    check(p["status"] == "failed" and "isn't reachable" in p.get("reason", ""), f"C5 PC unreachable -> {p['status']} (asked again later)")
+    check(p["status"] == "unavailable" and p.get("push") is True and "isn't reachable" in p.get("reason", ""),
+          f"C5 PC unreachable -> {p['status']}, push {p.get('push')} (the PC sends it instead)")
+
+    # C15 push: Studio's real _push into comfy-mac's real PUT/HEAD /mac/models handlers, for every pc-only file and
+    # the awkward names; one cut short first, so the resume path (X-Mac-Have, Content-Range) runs too
+    import mac_push
+    pdirs = {f: os.path.join(tmp, "pushed", f) for f in FOLDERS}
+    for d in pdirs.values():
+        os.makedirs(d, exist_ok=True)
+    papp = web.Application()
+    proutes = web.RouteTableDef()
+    mac_push.add_routes(proutes, lambda: pdirs, mac_fetch.Fetcher(os.path.join(tmp, "plocks"), "mac-vega-b"), lambda: 10 ** 13)
+    papp.add_routes(proutes)
+    pr = web.AppRunner(papp)
+    await pr.setup()
+    psite = web.TCPSite(pr, "127.0.0.1", 0)
+    await psite.start()
+    pmac = {"label": "mac-vega-b", "host": "127.0.0.1", "port": psite._server.sockets[0].getsockname()[1]}
+    keep = remote.LOCAL_MODEL
+    remote.LOCAL_MODEL = sys.modules["studio.modelshare"].local_model
+    for folder, name, _l in FILES:
+        want = DATA[(folder, name)]
+        dst = os.path.join(pdirs[folder], *re.split(r"[\\/]", name))
+        if name.startswith("SDXL"):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            open(dst + ".part", "wb").write(want[: len(want) // 4])
+        job = {}
+        try:
+            await remote._push(pmac, job, folder, name)
+            err = ""
+        except Exception as e:
+            err = str(e)
+        got = open(dst, "rb").read() if os.path.isfile(dst) else b""
+        check(got == want and not err, f"C15 push {folder}/{name}{' (resumed)' if name.startswith('SDXL') else ''}: {len(got)}/{len(want)} bytes, identical {got == want} {err}")
+    remote.LOCAL_MODEL = keep
+    await pr.cleanup()
 
     # C3: what the Mac answers is what Studio handles. answer() turns plan "fetch" into the Fetcher's state and
     # "missing" into "downloading"; Studio handles present / downloading / failed / unavailable.

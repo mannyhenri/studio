@@ -49,6 +49,10 @@ FETCH_POLL = 5          # seconds between /mac/fetch asks while a model download
 FETCH_TIMEOUT = 60      # seconds one /mac/fetch ask may take
 FETCH_TRIES = 3         # a download that fails this many times in a row (each ask resumes it) fails the job
 LOCAL_INFO = None       # async () -> this PC's /object_info, set by Studio: says which pack a node the worker lacks comes from
+LOCAL_MODEL = None      # (folder, value) -> this PC's file for a model, or None; set by Studio (modelshare's own rules)
+LOCAL_SHA = None        # path -> a sha256 already known for it, or None
+PUSH_CHUNK = 1 << 20
+_PUSHES = {}            # (worker, folder, value) -> the task pushing it, so jobs needing one file send it once
 
 
 # ---------------------------------------------------------------- remote jobs on disk (survive a restart of this PC's ComfyUI)
@@ -363,7 +367,7 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
             raise GateRefused(w["label"], why + [{"reason": f"it can't download models ({e})"}])
         except Exception as e:      # slow or dropped (an index rebuild, a PC asleep): wait and ask again
             files = [{"value": x["value"], "status": "asking", "reason": f"/mac/fetch didn't answer yet ({type(e).__name__})"} for x in why]
-        bad = [f for f in files if f.get("status") == "unavailable"]
+        bad = [f for f in files if f.get("status") == "unavailable" and not _pushable(f)]
         if bad:
             raise GateRefused(w["label"], _unavailable(bad))
         job = _new_job(w, str(uuid.uuid4()), payload_extra, private, "fetching")
@@ -478,6 +482,64 @@ async def _fetch(w, why):
             return (await r.json(content_type=None)).get("files") or []
 
 
+def _pushable(f):
+    """A file the worker can't pull but this PC has, so it can send it (/mac/fetch said "push": true)."""
+    return bool(f.get("push") and f.get("folder") and LOCAL_MODEL and LOCAL_MODEL(f["folder"], f["value"]))
+
+
+async def _push(w, job, folder, value):
+    """Send this PC's copy of a model to the worker (PUT /mac/models/...), resuming from what it already has.
+    A file several jobs need is sent once: they all wait for the same push."""
+    key = (w["label"], folder, value.replace("\\", "/"))
+    t = _PUSHES.get(key)
+    if not t or t.done():
+        t = _PUSHES[key] = asyncio.ensure_future(_push_file(w, folder, value, LOCAL_MODEL(folder, value), job))
+    await asyncio.shield(t)
+
+
+async def _push_file(w, folder, value, path, job):
+    import urllib.parse
+    url = f"{base(w)}/mac/models/{folder}/{urllib.parse.quote(value.replace(chr(92), '/'), safe='/')}"
+    size = os.path.getsize(path)
+    sha = LOCAL_SHA(path) if LOCAL_SHA else None
+    stuck = 0
+    async with ClientSession() as s:
+        while True:
+            async with s.head(url, timeout=ClientTimeout(total=30)) as r:
+                if r.status == 200:
+                    return
+                have = int(r.headers.get("X-Mac-Have") or 0)
+
+            async def body(start=have):
+                done = start
+                with open(path, "rb") as fh:
+                    fh.seek(start)
+                    while True:
+                        chunk = await asyncio.to_thread(fh.read, PUSH_CHUNK)
+                        if not chunk:
+                            return
+                        done += len(chunk)
+                        unit, div = ("GB", 1e9) if size >= 1e9 else ("MB", 1e6)
+                        job["step"], job["progress"] = f"Sending model {value} to {w['label']}: {done / div:.1f}/{size / div:.1f} {unit}", done / size
+                        yield chunk
+            hd = {"Content-Length": str(size - have)}
+            if have:
+                hd["Content-Range"] = f"bytes {have}-{size - 1}/{size}"
+            if sha:
+                hd["X-Studio-SHA256"] = sha
+            async with s.put(url, data=body(), headers=hd, timeout=ClientTimeout(total=None, sock_read=300)) as r:
+                if r.status == 201:
+                    return
+                if r.status in (202, 416):      # cut short, or out of step: ask what it has and go on from there
+                    stuck = stuck + 1 if r.status == 416 else 0
+                elif r.status == 423:           # it's already pulling or being sent this file
+                    await asyncio.sleep(FETCH_POLL)
+                else:
+                    raise RuntimeError(f"{w['label']} wouldn't take {value}: HTTP {r.status} {(await r.text())[:200]}")
+            if stuck >= 3:
+                raise RuntimeError(f"{w['label']} and this PC disagree on how much of {value} it has")
+
+
 def _unavailable(bad):
     return [{"value": f.get("value"), "reason": f"{f.get('value')}: {f.get('reason') or 'unavailable'}"} for f in bad]
 
@@ -504,9 +566,15 @@ async def _fetch_then_send(w, job, api, payload_extra, dirs, incoming, on_done, 
         while True:
             job["fetch"] = files
             _show_fetch(w, job, files)
-            bad = [f for f in files if f.get("status") == "unavailable"]
+            bad = [f for f in files if f.get("status") == "unavailable" and not _pushable(f)]
             if bad:
                 raise GateRefused(w["label"], _unavailable(bad))
+            push = [f for f in files if f.get("status") == "unavailable"]
+            if push:            # the worker can't pull these (no route to this PC): send them over the way that works
+                for f in push:
+                    await _push(w, job, f["folder"], f["value"])
+                files = await _fetch(w, why)
+                continue
             for f in files:
                 v = f.get("value")
                 tries[v] = tries.get(v, 0) + 1 if f.get("status") == "failed" else 0
