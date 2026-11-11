@@ -23,11 +23,13 @@ LIVE = os.environ.get("LIVE") == "1"
 FETCH = os.environ.get("FETCH") == "1"
 WORKERS = [{"label": "mac-vega-a", "host": "127.0.0.1", "port": 8188}, {"label": "mac-vega-b", "host": "127.0.0.1", "port": 8189}]
 APP = "Studio - Remove background.app.json"
-MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp"]
+MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp", "keyframes", "paint3d", "mcp:keyframes"]
+if os.environ.get("MEMBERS"):      # LIVE=1 MEMBERS=keyframes,paint3d: only those paths
+    MEMBERS = [m for m in MEMBERS if m in os.environ["MEMBERS"].split(",")]
 
 # the mutations used by --mutants: (member, file, original, replacement) — each removes that path's target.
 # Scheduled renders and MCP go through /manny/api/run, so breaking manny_run must break them too.
-VIA_RUN = {"manny_run": {"manny_run", "schedule", "mcp"}}
+VIA_RUN = {"manny_run": {"manny_run", "schedule", "mcp"}, "keyframes": {"keyframes", "mcp:keyframes"}}   # MCP keyframes calls the keyframes route
 MUTANTS = [
     ("manny_run", "__init__.py", 'target = body.get("target") or _remote.LOCAL', "target = _remote.LOCAL"),
     ("finish", "__init__.py", '"Finish: smooth", b.get("target"))', '"Finish: smooth", None)'),
@@ -36,7 +38,10 @@ MUTANTS = [
     ("sound:voice", "sound.py", "pid = await _queue(api, private, label, b.get(\"target\"))",
      "pid = await _queue(api, private, label, b.get(\"target\") if kind != \"voice\" else None)"),
     ("schedule", "schedule.py", 'body["client_id"] = "studio-schedule"', 'body["client_id"] = "studio-schedule"; body.pop("target", None)'),
-    ("mcp", "studio_mcp.py", '"target": a.get("run_on") or "local"', '"target": "local"'),
+    ("mcp", "studio_mcp.py", '"private": private, "target": a.get("run_on") or "local"}', '"private": private, "target": "local"}'),
+    ("keyframes", "projects.py", 'f"Project keyframe {k + 1}", b.get("target"))', 'f"Project keyframe {k + 1}", None)'),
+    ("paint3d", "previs.py", '"3D frame", b.get("target"))', '"3D frame", None)'),
+    ("mcp:keyframes", "studio_mcp.py", '"redo": a.get("redo"), "target": a.get("run_on") or "local"}', '"redo": a.get("redo"), "target": "local"}'),
 ]
 fails = []
 
@@ -77,7 +82,7 @@ def _text(node):
 
 def derive_entry_points():
     """From the code, by ENCLOSING FUNCTION (not line numbers): {(file, function)} of
-    sub   - calls that can hand a job to another machine (_remote.submit, _queue_api),
+    sub   - calls that can hand a job to another machine (_remote.submit, _queue_api, _queue_app; by name or ns[...]),
     run   - callers of /manny/api/run (they re-enter manny_run),
     local - posts straight to this PC's ComfyUI /prompt."""
     import ast
@@ -87,8 +92,8 @@ def derive_entry_points():
         for call, enc in _calls(fn):
             c = call.func
             if (isinstance(c, ast.Attribute) and c.attr == "submit" and isinstance(c.value, ast.Name) and c.value.id == "_remote") \
-                    or (isinstance(c, ast.Name) and c.id == "_queue_api") \
-                    or (isinstance(c, ast.Subscript) and _text(c.slice) == "_queue_api"):
+                    or (isinstance(c, ast.Name) and c.id in ("_queue_api", "_queue_app")) \
+                    or (isinstance(c, ast.Subscript) and _text(c.slice) in ("_queue_api", "_queue_app")):
                 sub.add((f, enc))
             texts = [_text(a) for a in call.args]
             if any("/manny/api/run" in t for t in texts) and (isinstance(c, ast.Attribute) and c.attr == "post" or isinstance(c, ast.Name) and c.id == "http"):
@@ -100,7 +105,8 @@ def derive_entry_points():
 
 # what each derived site is: the members driven below, plus routing internals and the PC-only AI path
 SITES = {
-    "sub": {("__init__.py", "manny_run"): "manny_run", ("__init__.py", "_queue_app"): "finish",
+    "sub": {("__init__.py", "manny_run"): "manny_run", ("__init__.py", "_queue_app"): "finish", ("__init__.py", "_finish"): "finish",
+            ("projects.py", "run"): "keyframes + mcp:keyframes", ("previs.py", "run"): "paint3d",
             ("__init__.py", "_queue_api"): "(routing: Finish, music, voice)", ("sound.py", "_queue"): "sound:music + sound:voice"},
     "run": {("schedule.py", "_fire"): "schedule", ("studio_mcp.py", "call"): "mcp"},
     "local": {("__init__.py", "manny_run"): "(manny_run: this PC)", ("__init__.py", "_queue_api"): "(_queue_api: this PC)",
@@ -108,7 +114,7 @@ SITES = {
               ("videotools.py", "_queue"): "Video fixes / Continue / Keyframe shot: PC-only (no Run on yet)"},
 }
 WEB = os.path.join(os.path.dirname(PKG), "ComfyUI-MannyStudio", "web", "app.js") if os.environ.get("STUDIO_PKG") else os.path.join(PKG, "web", "app.js")
-RENDER_ROUTES = r'"/manny/api/(run|finish|music|voice|schedule)"|"/manny/api/" \+ kind'
+RENDER_ROUTES = r'"/manny/api/(run|finish|music|voice|schedule|previs/style)"|"/manny/api/" \+ kind|`/manny/api/projects/\$\{pr\.id\}/keyframes`'
 
 
 def web_sites(src):
@@ -271,6 +277,29 @@ async def main():
                 st, it = await post(s, "/manny/api/schedule", {"run": {"app": APP, "values": {}, "target": label}, "when": "at",
                                                                "at": time.time() + 3600, "kind": "image", "label": "et"})
                 await post(s, f"/manny/api/schedule/{it['id']}/now", {})
+            elif member in ("keyframes", "mcp:keyframes"):
+                st, pr = await post(s, "/manny/api/projects", {"title": f"et {member} {label}", "idea": "test", "shots": [{"id": "s1", "title": "Shot 1", "action": "a red apple"}]})
+                if member == "keyframes":
+                    await post(s, f"/manny/api/projects/{pr['id']}/keyframes", {"private": False, "shots": [{"id": "s1", "prompt": "a red apple", "ref": ""}], "target": label})
+                else:
+                    os.environ["STUDIO_URL"] = base
+                    sys.path.insert(0, PKG)
+                    import studio_mcp
+                    studio_mcp.BASE = base
+                    try:
+                        said.append(str(await asyncio.to_thread(studio_mcp.call, "studio_project_keyframes", {"id": pr["id"], "run_on": label})))
+                    except Exception as e:
+                        said.append(str(e))
+                for _ in range(1200 if LIVE else 100):
+                    if len(reached) > n:
+                        break
+                    await asyncio.sleep(0.1)
+            elif member == "paint3d":
+                await post(s, "/manny/api/previs/style", {"still": "ref_couture_model.png", "prompt": "a film frame", "model": "flux 3", "target": label})
+                for _ in range(1200 if LIVE else 100):
+                    if len(reached) > n:
+                        break
+                    await asyncio.sleep(0.1)
             elif member == "mcp":
                 os.environ["STUDIO_URL"] = base
                 sys.path.insert(0, PKG)
@@ -322,8 +351,9 @@ async def main():
         jobs = [j for j in remote.JOBS.values()]
         print("live jobs:", sorted((j["worker"], j["status"], (j.get("error") or "")[:60]) for j in jobs))
         landed = [j for j in jobs if j["status"] == "done"]
-        check(len(landed) == 8 and all(j["outputs"] for j in landed),
-              f"LIVE: 8 renders (manny_run, finish, schedule, mcp x 2 workers) done and pulled back: {len(landed)}")
+        want = 2 * len([m for m in MEMBERS if not m.startswith("sound:")])
+        check(len(landed) == want and all(j["outputs"] for j in landed),
+              f"LIVE: {want} renders (every non-sound entry point x 2 workers) done and pulled back: {len(landed)}")
         refused = [j for j in jobs if j["status"] not in ("done",)]
         check(not refused, f"LIVE: no other remote job: {[(j['worker'], j['status']) for j in refused]}")
     await runner.cleanup()
@@ -562,7 +592,7 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
 
 def fetch_mutants():
     """Drop the download on each call site in turn: exactly the entry points through it must fail."""
-    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("_queue_api", {"finish", "sound:music", "sound:voice"})]
+    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("_queue_api", {"finish", "sound:music", "sound:voice", "keyframes", "paint3d", "mcp:keyframes"})]
     bad = 0
     for fn_name, members in sites:
         d = tempfile.mkdtemp(prefix="studio-mutant-")

@@ -2255,7 +2255,7 @@ function stepFrames(b, pr, go, draw) {
       return { id: s.id, prompt: shotText(pr, s, false) + (pr.tone ? `. ${pr.tone} style, film still` : ""), ref: inShot.length === 1 && ref ? inShot[0].face : "" };
     });
     try {
-      const r = await post(`/manny/api/projects/${pr.id}/keyframes`, { private: !!pr.private, values: v, shots: items, prompt_key: L.prompt?.key, ref_key: ref?.media.key, ref_toggle_key: ref?.toggle?.key, seed_keys: app.inputs.filter(i => i.kind === "seed").map(i => i.key) });
+      const r = await post(`/manny/api/projects/${pr.id}/keyframes`, { private: !!pr.private, values: v, shots: items, prompt_key: L.prompt?.key, ref_key: ref?.media.key, ref_toggle_key: ref?.toggle?.key, seed_keys: app.inputs.filter(i => i.kind === "seed").map(i => i.key), target: runTarget() });
       toast(`Making ${items.length} keyframe${items.length > 1 ? "s" : ""}. They render one after another; you can leave this page.`);
       await pollJob(r.id, st => { const e = $("#pks", d); if (e) e.textContent = st; });
       const fresh = (await api("/manny/api/projects" + PQ())).find(x => x.id === pr.id); if (fresh) Object.assign(pr, { shots: fresh.shots });
@@ -2801,7 +2801,7 @@ async function styleFrames(b, s, onStage) {
   const prompt = `Turn this ${s.previs.lit ? "3D render" : "grey 3D blocking render"} into a real cinematic film frame. Keep the exact camera angle, framing, perspective and where every figure stands. ${who ? who.charAt(0).toUpperCase() + who.slice(1) + ". " : ""}${loc ? "The place looks like the second picture: " + (loc.description || loc.name) + ". " : ""}${s.prompt || ""}`.trim();
   const ref = loc && loc.pictures[0] ? loc.pictures[0] : (cast.find(c => c.ch && c.ch.face) || {}).ch?.face || "";
   const one = async (still, label) => {
-    const r = await post("/manny/api/previs/style", { still, ref, prompt, private: !!b.private, model: "flux 3" });
+    const r = await post("/manny/api/previs/style", { still, ref, prompt, private: !!b.private, model: "flux 3", target: runTarget() });
     return (await pollJob(r.id, st => onStage && onStage(label + ": " + st))).value;
   };
   const first = await one(pv.first, "First frame"), last = await one(pv.last, "Last frame");

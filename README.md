@@ -30,7 +30,7 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 **Set up**
 1. On the Mac: start both workers and the LAN gate (`lan_gate.py --allow <this-pc>.local --ports 8188 8189`). ComfyUI has no password, so the gate only lets this PC in.
 2. In Studio, on this PC (or with Incognito unlocked): **Settings → GPU machines**, add `mac-vega-a` · `Mannys-Mac-Pro.local` · `8188` and `mac-vega-b` · `Mannys-Mac-Pro.local` · `8189`. They're kept in `manny_studio/workers.json` (comfy-mac's `mac-workers.json` also works pasted as is).
-3. Under **Generate** a "Run on" menu appears: **This PC**, **Any free GPU**, or one machine. The same choice is used by Finish, Music and Voices. Over MCP, `studio_generate` takes `run_on`.
+3. Under **Generate** a "Run on" menu appears: **This PC**, **Any free GPU**, or one machine. The same choice is used by Finish, Music, Voices, Compare, Storyboard, project keyframes and 3D frame paint. Over MCP, `studio_generate` and `studio_project_keyframes` take `run_on`.
 
 **How a job is sent**
 - Studio first checks the machine *live*: every node must be installed, every model, sampler or scheduler name must be one that machine offers for that exact input, and every required input must be present. Missing anything → the job isn't sent, and you see what's missing (node, input, value). It never renders something different by accident.

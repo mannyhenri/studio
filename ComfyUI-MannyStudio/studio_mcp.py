@@ -522,7 +522,8 @@ TOOLS += [
     {"name": "studio_project_update", "description": "Change a project: title, logline, music, cast (names) or the shots list [{title, action, camera, seconds, characters, dialogue}] (replaces it).",
      "inputSchema": {"type": "object", "properties": {"id": S_, "title": S_, "logline": S_, "music": S_, "cast": {"type": "array", "items": S_}, "shots": {"type": "array", "items": {"type": "object"}}}, "required": ["id"]}},
     {"name": "studio_project_keyframes", "description": "Make a still for each project shot (missing ones, or all with redo) with the Image app; one-character shots use that character's face. Runs in the background unless wait=true.",
-     "inputSchema": {"type": "object", "properties": {"id": S_, "model": S_, "redo": B_, "wait": B_}, "required": ["id"]}},
+     "inputSchema": {"type": "object", "properties": {"id": S_, "model": S_, "redo": B_, "wait": B_,
+                     "run_on": {"type": "string", "description": "Which GPU: \"local\" (this PC, default), \"auto\" or a machine name from studio_status"}}, "required": ["id"]}},
     {"name": "studio_project_to_board", "description": "Send a project's shots (with keyframes as first frames) to its Storyboard board.",
      "inputSchema": {"type": "object", "properties": {"id": S_}, "required": ["id"]}},
 ]
@@ -749,7 +750,7 @@ def call(name, a):
         return [{"type": "text", "text": json.dumps(http("POST", "/manny/api/projects", pr), indent=1)}]
     if name == "studio_project_keyframes":
         pr = _project(a["id"])
-        r = http("POST", f"/manny/api/projects/{pr['id']}/keyframes", {"private": pr.get("private"), "model": a.get("model"), "redo": a.get("redo")})
+        r = http("POST", f"/manny/api/projects/{pr['id']}/keyframes", {"private": pr.get("private"), "model": a.get("model"), "redo": a.get("redo"), "target": a.get("run_on") or "local"})
         if not a.get("wait"):
             return [{"type": "text", "text": f"Making keyframes in the background (job {r['id']}). Check with studio_projects."}]
         job_wait(r["id"], 3600)
