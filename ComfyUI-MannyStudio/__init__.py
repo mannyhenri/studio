@@ -459,6 +459,7 @@ async def manny_queue_move(request):
             continue
         cid = extra.pop("client_id", None)
         extra = {k: v for k, v in extra.items() if not any(x in k.lower() for x in ("api_key", "auth_token"))}
+        extra.setdefault("manny_app", "queue-move")      # a node-editor job too: the worker's stale-job net keys on it
         payload_extra = {"client_id": cid, "extra_data": extra}
         try:
             r = await _remote.submit(worker, json.loads(json.dumps(prompt)), payload_extra, _dirs(), private, INCOMING,

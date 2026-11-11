@@ -24,7 +24,8 @@ FETCH = os.environ.get("FETCH") == "1"
 WORKERS = [{"label": "mac-vega-a", "host": "127.0.0.1", "port": 8188}, {"label": "mac-vega-b", "host": "127.0.0.1", "port": 8189}]
 APP = "Studio - Remove background.app.json"
 MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp", "keyframes", "paint3d", "mcp:keyframes",
-           "video:fix-part", "video:fix-face", "video:extend", "video:extend-h3", "video:keyframes", "mcp:fix-video", "mcp:extend-video", "mcp:keyframe-shot"]
+           "video:fix-part", "video:fix-face", "video:extend", "video:extend-h3", "video:keyframes", "mcp:fix-video", "mcp:extend-video", "mcp:keyframe-shot",
+           "queue:move"]
 if os.environ.get("MEMBERS"):      # LIVE=1 MEMBERS=keyframes,paint3d: only those paths
     MEMBERS = [m for m in MEMBERS if m in os.environ["MEMBERS"].split(",")]
 VIDEO = [m for m in MEMBERS if "video" in m or m == "mcp:keyframe-shot"]
@@ -51,6 +52,7 @@ MUTANTS = [
     ("video:keyframes", "videotools.py", 'target = b.get("target")  # keyframes', 'target = None  # keyframes'),
     ("mcp:video", "studio_mcp.py", 'body = dict(f, prompt=a.get("prompt", ""), seed=a.get("seed"), target=a.get("run_on") or "local")',
      'body = dict(f, prompt=a.get("prompt", ""), seed=a.get("seed"), target="local")'),
+    ("queue:move", "__init__.py", 'worker = _remote.find(_data_dir(), body.get("target") or "")', 'worker = _remote.find(_data_dir(), "")'),
     ("mcp:keyframe-shot", "studio_mcp.py", '"seed": a.get("seed"), "target": a.get("run_on") or "local"}', '"seed": a.get("seed"), "target": "local"}'),
 ]
 fails = []
@@ -118,6 +120,7 @@ SITES = {
     "sub": {("__init__.py", "manny_run"): "manny_run", ("__init__.py", "_queue_app"): "finish", ("__init__.py", "_finish"): "finish",
             ("projects.py", "run"): "keyframes + mcp:keyframes", ("previs.py", "run"): "paint3d",
             ("videotools.py", "_queue"): "video tools (fix part/face, extend, keyframes) + their MCP tools",
+            ("__init__.py", "manny_queue_move"): "queue:move (Send to… a waiting PC job)",
             ("__init__.py", "_queue_api"): "(routing: Finish, music, voice)", ("sound.py", "_queue"): "sound:music + sound:voice"},
     "run": {("schedule.py", "_fire"): "schedule", ("studio_mcp.py", "call"): "mcp"},
     "local": {("__init__.py", "manny_run"): "(manny_run: this PC)", ("__init__.py", "_queue_api"): "(_queue_api: this PC)",
@@ -233,6 +236,7 @@ async def main():
 
     async def spy(w, api, payload_extra, dirs, private=False, incoming=".private_incoming", on_done=None, **kw):
         reached.append({"worker": w["label"], "client_id": payload_extra.get("client_id"), "fetch": kw.get("fetch"), "api": json.loads(json.dumps(api)),
+                        "manny_app": (payload_extra.get("extra_data") or {}).get("manny_app"),
                         "label": (payload_extra.get("extra_data") or {}).get("manny_label"), "at": time.time()})
         if LIVE or FETCH:
             return await real_submit(w, api, payload_extra, dirs, private, incoming, on_done, **kw)
@@ -342,6 +346,12 @@ async def main():
                     if len(reached) > n:
                         break
                     await asyncio.sleep(0.1)
+            elif member == "queue:move":      # Send to…: a job waiting in this PC's queue (queued from the node editor: no marker)
+                _wf, qapi = await studio._build_prompt(APP, {})
+                item = [1, f"pcq-{label}", qapi, {"client_id": "editor-tab"}, []]
+                ps.prompt_queue = types.SimpleNamespace(get_current_queue=lambda: ([], [item]),
+                                                        delete_queue_item=lambda fn: fn(item))
+                await post(s, "/manny/api/queue/move", {"prompt_ids": [item[1]], "target": label})
             elif member == "paint3d":
                 await post(s, "/manny/api/previs/style", {"still": "ref_couture_model.png", "prompt": "a film frame", "model": "flux 3", "target": label})
                 for _ in range(1200 if LIVE else 100):
@@ -372,6 +382,9 @@ async def main():
             except Exception as e:      # a path that blows up hasn't honoured the target either
                 got = [f"error: {str(e)[:120]}"]
             check(got == [w["label"]], f"{member} with target {w['label']}: reached {got}")
+    # every job another machine gets is marked as Studio's (comfy-mac's stale_jobs net keys on extra_data.manny_app)
+    unmarked = sorted({str(r.get("client_id")) for r in reached if not r.get("manny_app")})
+    check(not unmarked, f"every job sent to a card carries extra_data.manny_app ({len(reached)} jobs; unmarked from {unmarked})")
     # what a video tool sends another machine must be readable there: no PC path, no PC-only loader
     for r in reached:
         if r.get("client_id") != "studio-videotools":
@@ -397,11 +410,12 @@ async def main():
     # (H3LoadVideoPath, its text encoder) and frees memory first; a card gets remote_api's form.
     vt = sys.modules["studio.videotools"]
     freed, picked, real_pick, real_free = [], [], remote.pick, vt._free_memory
+    auto_wins = () if LIVE else (remote.LOCAL, WORKERS[0]["label"])     # stub-only: LIVE must not send these for real
 
     async def free_spy():
         freed.append(1)
     vt._free_memory = free_spy
-    for win in (remote.LOCAL, WORKERS[0]["label"]):
+    for win in auto_wins:
         async def fake_pick(workers, api, local_busy, local_ok=True, timeout=15, win=win):
             picked.append({n.get("class_type") for n in api.values()})
             return win, {}
@@ -768,7 +782,7 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
 
 def fetch_mutants():
     """Drop the download on each call site in turn: exactly the entry points through it must fail."""
-    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("_queue_api", {"finish", "sound:music", "sound:voice", "keyframes", "paint3d", "mcp:keyframes", *VIDEO})]
+    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("manny_queue_move", {"queue:move"}), ("_queue_api", {"finish", "sound:music", "sound:voice", "keyframes", "paint3d", "mcp:keyframes", *VIDEO})]
     bad = 0
     for fn_name, members in sites:
         d = tempfile.mkdtemp(prefix="studio-mutant-")

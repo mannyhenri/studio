@@ -74,7 +74,7 @@ async def main():
         for k, line in enumerate(open(fn, encoding="utf-8"), 1):
             if re.search(r"(_remote\.submit|_queue_api\"?\]?)\(", line) and not re.match(r"\s*(async )?def ", line):
                 sites.append(f"{os.path.basename(fn)}:{k}")
-    covered = {"manny_run": "__init__.py", "_queue_api": "__init__.py", "_queue_app": "__init__.py", "sound": "sound.py", "videotools": "videotools.py"}
+    covered = {"manny_run": "__init__.py", "_queue_api": "__init__.py", "_queue_app": "__init__.py", "sound": "sound.py", "videotools": "videotools.py", "queue_move": "__init__.py"}
     check(len(sites) == len(covered), f"remote call sites in the code: {sites} (this test drives {sorted(covered)})")
 
     remote.save_workers(studio._data_dir(), [{"label": "mac", "host": "127.0.0.1", "port": 1}])
@@ -118,6 +118,12 @@ async def main():
             break
         await asyncio.sleep(0.05)
     paths["videotools"] = sent[n:]
+    n = len(sent)     # Send to…: a waiting PC job queued from the node editor (no marker of its own)
+    _wf, qapi = await studio._build_prompt(app, {})
+    item = [1, "pcq-1", qapi, {"client_id": "editor-tab"}, []]
+    srv.PromptServer.instance.prompt_queue = types.SimpleNamespace(get_current_queue=lambda: ([], [item]), delete_queue_item=lambda fn: fn(item))
+    await ROUTES[("POST", "/manny/api/queue/move")](Req({"prompt_ids": ["pcq-1"], "target": "mac"}))
+    paths["queue_move"] = sent[n:]
     for name, ex in paths.items():
         check(len(ex) == 1 and isinstance(ex[0].get("manny_app"), str) and ex[0]["manny_app"],
               f"{name}: extra_data.manny_app = {ex[0].get('manny_app') if ex else None!r}")
