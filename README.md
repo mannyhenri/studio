@@ -22,3 +22,52 @@ Private data (password hash, characters, storyboards, favorites, LoRA notes, Civ
 ## Features
 
 Create (Image, Video and tools: Edit, Inpaint, Upscale, Upscale video, Remove background, Smooth motion) · Gallery with fast cached previews · Compare models · Characters · Storyboard with takes, pick, final-quality re-render, compare/wipe, continue from last frame, finish (1080p, 48/60 fps, sound) · Film editor (trims, crossfades, titles, captions, music bed) · Reel cut to the beat · AI review of a take and AI prompt help (local Qwen3-VL) · LoRA browser for Civitai (your own key) · Incognito private space · Mobile layout.
+
+## Render on other GPUs (the Mac Pro)
+
+Studio can send a render to another computer running ComfyUI. Today that's the Mac Pro's two Radeon Pro Vega II cards, one worker per card (set up in the `comfy-mac` repo). The file comes back to this PC's output folder, so Gallery, Storyboard and Finish work as usual.
+
+**Set up**
+1. On the Mac: start both workers and the LAN gate (`lan_gate.py --allow <this-pc>.local --ports 8188 8189`). ComfyUI has no password, so the gate only lets this PC in.
+2. In Studio, on this PC (or with Incognito unlocked): **Settings → GPU machines**, add `mac-vega-a` · `Mannys-Mac-Pro.local` · `8188` and `mac-vega-b` · `Mannys-Mac-Pro.local` · `8189`. They're kept in `manny_studio/workers.json` (comfy-mac's `mac-workers.json` also works pasted as is).
+3. Under **Generate** a "Run on" menu appears: **This PC**, **Any free GPU**, or one machine. The same choice is used by Finish, Music, Voices, Compare, Storyboard, project keyframes and 3D frame paint. Over MCP, `studio_generate` and `studio_project_keyframes` take `run_on`.
+
+**How a job is sent**
+- Studio first checks the machine *live*: every node must be installed, every model, sampler or scheduler name must be one that machine offers for that exact input, and every required input must be present. Missing anything → the job isn't sent, and you see what's missing (node, input, value). It never renders something different by accident.
+- **A Mac picked by name downloads a missing model first.** When the only thing missing is model files, that Mac fetches them from Hugging Face (into the models folder both cards share), and the job waits in the queue as "Downloading model … on mac-vega-a: 1.2/9.6 GB", then is checked again and renders. A file that isn't on Hugging Face (the PC-only ones below), or a missing node, still fails at once and says why. **Any free GPU** never waits for a download: it picks a machine that can run the job now. Stopping a job while it downloads drops the job, but the download carries on so the model is there next time. If this PC's ComfyUI restarts during a download, the job fails ("send it again"); the download still finishes.
+- Model switches a job doesn't use are dropped before the check. Without that, ComfyUI would ask for every model an app *could* pick. The trimmed job is exactly what ComfyUI would run anyway.
+- **Any free GPU** picks the least busy machine that has everything, and this PC wins ties. A Mac card that has been on one of your jobs for more than 10 min counts as busier. Measured on one Vega II: Remove background 14 s, Smooth motion 27 s, Z-Image 4.5 min, Upscale (SeedVR2 7b) 9 min, Inpaint 13 min, LTX video 44–55 min, Upscale video about 2 h (62 frames to 1080p).
+- **Incognito** jobs never go to another machine on "Any free GPU"; they run here unless you pick a Mac by name. If you do, the job crosses your network over plain HTTP and is wiped from the Mac when it's done.
+- The input files (pictures, videos, sounds) are uploaded with the job, into a folder of their own. The result is copied into this PC's output folder under the next free name (it never replaces a file here). Then the Mac deletes the job's outputs, uploads and history (`/mac/forget`). A failed job is cleaned up the same way.
+- Cancel (✕ in the queue drawer) takes the job out of the Mac's queue or stops it, then cleans up the same way. A Mac that restarts mid-job fails the job ("restarted and lost the job"); one that stops answering for 10 min does too.
+- Jobs on other machines survive a restart of this PC's ComfyUI: they're kept in `manny_studio/remote_jobs.json` and followed again at startup. As a safety net the Mac clears Studio jobs that finished more than 24 h ago, so a result that waits longer than a day for this PC to come back is lost (the job shows as failed).
+
+**What stays on this PC:** AI review and AI prompt help (their result is text, not a file), Topaz in Finish, and the video tools (Fix a part, Fix a face, Continue a shot, Keyframe shot), which splice the clip with ffmpeg here.
+
+**Models on the Mac.** A choice runs on the Mac only once its model files are there. Most come from Hugging Face: the Mac downloads them by itself the first time you pick it by name for a job that needs them (see above). Voices can't run on the Mac (its Chatterbox node isn't installed there). These exist only on this PC, so copy them yourself into `~/code/comfy-mac/ComfyUI/models/<folder>/` on the Mac. Both workers see them at once, no restart needed:
+
+| File | Folder | Unlocks |
+|---|---|---|
+| `anime_desire_illustrious_v3_fp16` | `checkpoints` | Image · Anime Desire |
+| `flux3-image-klein-int8-convrot` | `diffusion_models` | Image and Edit · FLUX 3 Klein (needs `qwen3vl_4b_int8_convrot` from HF too) |
+| `anima-base-v1.0` | `diffusion_models` | Image · Anima (with `qwen_3_06b_base`) |
+| `qwen_3_06b_base` | `text_encoders` | Image · Anima |
+| `p-h3-image_vae_int8_convrot` | `vae` | Image · P-H3 |
+| `moss_image_nsfw_uncensored_lora`, `qwen_image_2.1_nsfw_lora` | `loras` | the Uncensored toggles |
+
+**If Settings shows a Mac "offline"** although its workers run: the Mac's LAN gate only lets in the PC it was started for (`lan-gate.sh` allows `desktop-mggcgsg.local`). On the Mac, `ping <this-pc>.local` must answer; if it doesn't, start the gate with this PC's IP (`GATE_ALLOW=192.168.x.y ./lan-gate.sh`). Windows tries the Mac's IPv6 address first, and the gate listens on both.
+
+Check which choices a machine can run with `POST /manny/api/workers/check {"app": "<app id>", "values": {...}}`.
+
+**Tests** (need the workers running; comfy-mac's venv has aiohttp and simpleeval):
+```sh
+PY=~/code/comfy-mac/.venv/bin/python
+$PY tests/test_prune.py       # every app x every choice: trimmed job == what ComfyUI runs
+$PY tests/test_remote.py      # check == each worker's own validation, real renders, cleanup
+$PY tests/test_run_route.py   # Studio's routes: Run on, Any free GPU, cancel, Finish/Music/Voice paths
+$PY tests/test_revise.py      # no overwrites, shared references, failed/lost/restarted jobs, resume after restart
+$PY tests/test_entrypoints.py # every render entry point reaches the GPU it was asked for (--mutants: each path's target is checked)
+FETCH=1 $PY tests/test_entrypoints.py   # a Mac missing the model: every entry point x {present, downloading, failed, unavailable}
+$PY tests/test_entrypoints.py --fetch-mutants   # drop the download on each call site: exactly its entry points fail
+```
+`RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).
