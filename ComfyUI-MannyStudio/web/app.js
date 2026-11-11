@@ -1494,6 +1494,44 @@ function keyframeDialog() {
   };
 }
 
+/* ---- 3D: try camera moves on one shot (quick grey Blender previews side by side) */
+function tryMovesDialog(sc, shot, after) {
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const pick = new Set(store.get("trymoves", ["push_in", "orbit_left", "crane_up", "truck_right"]));
+  const d = h(`<div class="dialog trym"><div class="row" style="justify-content:space-between"><h2>🎥 Try camera moves · ${esc(shot.name || "Shot")}</h2><button class="icon" data-x>✕</button></div>
+    <p class="hint" style="margin:0">Blender renders this shot once per move (quick grey previews, ~4 s each) so you can compare them. Keep the camera and people where they are on the plan; only the move changes.</p>
+    <div class="chips" id="tmv">${MOVES.filter(x => x[0] !== "static").map(([v, l]) => `<div class="chip" data-v="${v}">${l}</div>`).join("")}</div>
+    <div class="row" style="gap:12px;align-items:center"><label class="hint">Strength <input type="range" id="tma" min="0.5" max="2" step="0.25" value="${store.get("trymovesamt", 1)}"></label><span class="hint" id="tmav"></span></div>
+    <div class="trygrid"></div>
+    <div class="foot"><span class="hint" id="tmst" style="margin-right:auto"></span><button class="ghost" data-x>Close</button><button class="btn primary" data-go>Render previews</button></div></div>`);
+  m.append(d);
+  const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
+  $$("[data-x]", d).forEach(x => x.onclick = close);
+  const drawChips = () => $$("#tmv .chip", d).forEach(c => { c.classList.toggle("on", pick.has(c.dataset.v)); c.onclick = () => { if (pick.has(c.dataset.v)) pick.delete(c.dataset.v); else if (pick.size < 8) pick.add(c.dataset.v); drawChips(); }; });
+  drawChips();
+  const amt = $("#tma", d), av = () => $("#tmav", d).textContent = `×${(+amt.value).toFixed(2)} of each move's usual amount`;
+  amt.oninput = av; av();
+  $("[data-go]", d).onclick = async () => {
+    if (!pick.size) return toast("Pick some moves", true);
+    store.set("trymoves", [...pick]); store.set("trymovesamt", +amt.value);
+    const moves = [...pick].map(v => ({ move: v, amount: +(((MOVES.find(x => x[0] === v) || [0, 0, 1])[2]) * +amt.value).toFixed(2) }));
+    const bt = $("[data-go]", d); bt.disabled = true;
+    try {
+      const r = await post(`/manny/api/scenes/${sc.id}/explore`, { shot: shot.id, moves, seconds: Math.min(+shot.seconds || 4, 4) });
+      const res = await pollJob(r.id, s2 => $("#tmst", d).textContent = s2);
+      $("#tmst", d).textContent = "";
+      const g = $(".trygrid", d); g.innerHTML = "";
+      res.tries.forEach(t => {
+        const lab = (MOVES.find(x => x[0] === t.move) || [0, t.move])[1];
+        const c = h(`<div class="tryc"><video src="${fileUrl(t.video, sc.private)}" muted loop autoplay playsinline></video><div class="row" style="justify-content:space-between"><b>${esc(lab)}</b><button class="btn sm">Use this one</button></div></div>`);
+        $("button", c).onclick = () => { shot.move = t.move; shot.amount = t.amount; saveScene(sc); toast(`${shot.name || "Shot"}: ${lab}`); close(); after && after(); };
+        g.append(c);
+      });
+    } catch (e) { toast(e.message.slice(0, 240), true); }
+    bt.disabled = false;
+  };
+}
+
 /* ---- finish a picked take: upscale, smoother motion, sound */
 function finishDialog(b, s, n, after) {
   const t = s.takes[s.pick]; if (!t || !t.output) return;
@@ -2298,15 +2336,16 @@ async function pageSound(main) {
   const p = h(`<div class="page"><div class="eyebrow">Sound</div><h1>Music &amp; voices</h1>
     <div class="chips" id="stab"><div class="chip" data-v="music">♫ Music</div><div class="chip" data-v="voice">☺ Voice</div></div>
     <div class="panel sform" id="f-music">
+      <label class="lbl">Engine</label><div class="chips" id="m-eng"><div class="chip" data-v="ace" title="Fast: a 1-minute song in ~1 min">ACE-Step 1.5 XL · fast</div><div class="chip" data-v="music3" title="Best quality: full songs up to 5 min, slower">MiniMax Music 3 · best songs, up to 5 min</div></div>
       <label class="lbl">Style</label><textarea id="m-tags" rows="2" placeholder="Genre, mood, instruments, tempo feel. e.g. dark cinematic synthwave, pulsing bass, female vocals"></textarea>
       <label class="tog"><input type="checkbox" id="m-inst"><span><b>Instrumental</b><small>No singing. Turn off to write lyrics.</small></span></label>
       <div id="m-lyrbox"><label class="lbl">Lyrics</label><textarea id="m-lyr" rows="7" placeholder="[Verse 1]\n…\n[Chorus]\n…"></textarea></div>
-      <div class="grid4"><div><label class="lbl">Length</label><select id="m-sec">${[15, 30, 45, 60, 90, 120, 180, 240].map(v => `<option value="${v}">${v < 60 ? v + " s" : (v / 60) + " min"}</option>`).join("")}</select></div>
+      <div class="grid4"><div><label class="lbl">Length</label><select id="m-sec">${[15, 30, 45, 60, 90, 120, 180, 240].map(v => `<option value="${v}">${v < 60 ? v + " s" : (v / 60) + " min"}</option>`).join("")}<option value="300">5 min (Music 3)</option></select></div>
         <div><label class="lbl">BPM</label><input type="number" id="m-bpm" min="40" max="220"></div>
         <div><label class="lbl">Key</label><select id="m-key">${opts.keys.map(k => `<option>${k}</option>`).join("")}</select></div>
         <div><label class="lbl">Time</label><select id="m-ts"><option value="4">4/4</option><option value="3">3/4</option><option value="6">6/8</option><option value="2">2/4</option></select></div></div>
       <div class="row"><input type="text" id="m-name" placeholder="Name (optional)"><button class="btn primary" id="m-go">♫ Make the song</button></div>
-      <p class="hint">ACE-Step 1.5 XL Turbo, on this PC. Saved in Audio › Music.</p></div>
+      <p class="hint" id="m-hint">ACE-Step 1.5 XL Turbo, on this PC. Saved in Audio › Music.</p></div>
     <div class="panel sform hidden" id="f-voice">
       <label class="lbl">What to say</label><textarea id="v-text" rows="5" placeholder="Type the line or the whole speech."></textarea>
       <label class="lbl">Voice to copy (optional)</label><div class="ref audio" id="v-ref" style="aspect-ratio:auto;min-height:70px"><span class="plus">+</span><span class="rl">Drop a clean 5–15 s recording of the voice (wav, mp3). Empty: a default voice.</span><input type="file" hidden accept="audio/*"></div>
@@ -2321,6 +2360,16 @@ async function pageSound(main) {
   $$("#stab .chip", p).forEach(c => c.onclick = () => tab(c.dataset.v)); tab(st.tab);
   $("#m-tags", p).value = st.tags; $("#m-lyr", p).value = st.lyrics; $("#m-sec", p).value = st.seconds; $("#m-bpm", p).value = st.bpm; $("#m-key", p).value = st.key; $("#m-ts", p).value = st.timesig; $("#m-inst", p).checked = st.instrumental;
   const lyr = () => $("#m-lyrbox", p).classList.toggle("hidden", $("#m-inst", p).checked); lyr(); $("#m-inst", p).onchange = lyr;
+  st.engine = st.engine || "ace";
+  const eng = () => {
+    if (st.engine === "music3" && !(opts.engines || {}).music3) st.engine = "ace";
+    $$("#m-eng .chip", p).forEach(c => { c.classList.toggle("on", c.dataset.v === st.engine); c.classList.toggle("dis", c.dataset.v === "music3" && !(opts.engines || {}).music3); });
+    $("#m-hint", p).textContent = st.engine === "music3"
+      ? "MiniMax Music 3, on this PC: complete songs with verses and choruses, up to 5 min. Use [intro] [verse] [chorus] [bridge] [outro] tags in the lyrics. Slower than ACE-Step. Saved in Audio › Music."
+      : "ACE-Step 1.5 XL Turbo, on this PC: fast, up to 4 min. Saved in Audio › Music.";
+  };
+  $$("#m-eng .chip", p).forEach(c => c.onclick = () => { if (c.dataset.v === "music3" && !(opts.engines || {}).music3) return toast("MiniMax Music 3 is still downloading (or ComfyUI needs a restart)", true); st.engine = c.dataset.v; save(); eng(); });
+  eng();
   $("#v-text", p).value = st.text; $("#v-exag", p).value = st.exag; $("#v-cfg", p).value = st.cfgw;
   const ref = $("#v-ref", p), fi = $("input", ref);
   const showRef = () => { if (st.voice) { ref.classList.add("on"); $(".plus", ref).textContent = "♪"; $(".rl", ref).textContent = st.voiceName || st.voice; } };
@@ -2347,7 +2396,7 @@ async function pageSound(main) {
     Object.assign(st, { tags: $("#m-tags", p).value, lyrics: $("#m-lyr", p).value, seconds: +$("#m-sec", p).value, bpm: +$("#m-bpm", p).value || 100, key: $("#m-key", p).value, timesig: $("#m-ts", p).value, instrumental: $("#m-inst", p).checked }); save();
     if (!st.tags.trim()) return toast("Describe the style first", true);
     if (!st.instrumental && !st.lyrics.trim()) return toast("Write lyrics, or tick Instrumental", true);
-    go("music", { tags: st.tags, lyrics: st.instrumental ? "" : st.lyrics, instrumental: st.instrumental, seconds: st.seconds, bpm: st.bpm, key: st.key, timesig: st.timesig, name: $("#m-name", p).value }, $("#m-name", p).value || st.tags.slice(0, 40));
+    go("music", { engine: st.engine, tags: st.tags, lyrics: st.instrumental ? "" : st.lyrics, instrumental: st.instrumental, seconds: st.seconds, bpm: st.bpm, key: st.key, timesig: st.timesig, name: $("#m-name", p).value }, $("#m-name", p).value || st.tags.slice(0, 40));
   };
   $("#v-go", p).onclick = () => {
     Object.assign(st, { text: $("#v-text", p).value, exag: +$("#v-exag", p).value, cfgw: +$("#v-cfg", p).value }); save();
@@ -2692,7 +2741,8 @@ async function sceneEditor(main, id) {
         ${s.camera ? "" : `<div class="row" style="gap:8px"><select class="pmv">${MOVES.map(([v, l]) => `<option value="${v}" ${s.move === v ? "selected" : ""}>${l}</option>`).join("")}</select>
           <label class="hint">amount <input type="range" class="pam" min="0" max="${/orbit|pan/.test(s.move) ? 90 : 4}" step="${/orbit|pan/.test(s.move) ? 5 : 0.1}" value="${s.amount || 0}"></label>
           <label class="hint">lens ${s.cam?.lens || 35} mm <input type="range" class="pln" min="14" max="135" step="1" value="${s.cam?.lens || 35}"></label>
-          <label class="hint">height <input type="range" class="pz" min="0.3" max="6" step="0.1" value="${s.cam?.z ?? 1.6}"></label></div>`}
+          <label class="hint">height <input type="range" class="pz" min="0.3" max="6" step="0.1" value="${s.cam?.z ?? 1.6}"></label>
+          <button class="ghost sm" data-try title="Render this shot with several camera moves and compare them">🎥 Try moves</button></div>`}
         <div class="row" style="gap:8px"><select class="psec">${[5, 8, 10, 15].map(v => `<option ${+s.seconds === v ? "selected" : ""} value="${v}">${v} s</option>`).join("")}</select>
           <select class="peng"><option value="keyframes">Footage: styled keyframes (H3 first + last)</option><option value="motion">Footage: follow the 3D motion (H3)</option><option value="render">Use the Blender render as is</option></select></div>
         <textarea class="ppr" rows="2" placeholder="What happens: action, mood, light, dialogue…">${esc(s.prompt || "")}</textarea>
@@ -2709,6 +2759,7 @@ async function sceneEditor(main, id) {
       const ln = $(".pln", r); if (ln) ln.oninput = e => { s.cam.lens = +e.target.value; e.target.previousSibling.textContent = `lens ${s.cam.lens} mm `; saveScene(sc); drawPlan(); };
       const pz = $(".pz", r); if (pz) pz.oninput = e => { s.cam.z = +e.target.value; saveScene(sc); };
       const v = $("video", r); if (v) { r.onmouseenter = () => v.play().catch(() => { }); r.onmouseleave = () => v.pause(); }
+      const tb = $("[data-try]", r); if (tb) tb.onclick = () => tryMovesDialog(sc, s, () => { drawShots(); drawPlan(); });
       box.append(r);
     });
   }

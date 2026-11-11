@@ -357,6 +357,64 @@ def setup(ns):
         asyncio.ensure_future(_ai_job(job, run))
         return web.json_response({"id": job["id"]})
 
+    @routes.post("/manny/api/scenes/{scid}/explore")
+    async def sc_explore(request):
+        """Try camera moves: renders one shot several times, one per move, as quick grey previews to compare."""
+        scid = request.match_info["scid"]
+        b = await request.json()
+        sc = next((x for x in _load("scenes.json") if x["id"] == scid), None)
+        if not sc:
+            raise web.HTTPNotFound()
+        private = bool(sc.get("private"))
+        if private:
+            _need_private(request)
+        st = next((s for s in _load("sets.json") if s["id"] == sc.get("set")), None)
+        if not st:
+            raise web.HTTPBadRequest(text="This scene has no set")
+        sh = next((x for x in sc.get("shots") or [] if x["id"] == b.get("shot")), None)
+        if not sh or sh.get("camera") or not sh.get("cam"):
+            raise web.HTTPBadRequest(text="Pick a shot with a Studio camera")
+        moves = [m for m in (b.get("moves") or []) if isinstance(m, dict) and m.get("move")][:8]
+        if not moves:
+            raise web.HTTPBadRequest(text="Pick some moves to try")
+        secs = max(2.0, min(float(b.get("seconds") or sh.get("seconds") or 4), 6.0))
+        walks = sh.get("walks") or {}
+        cast = [dict(c, to=walks.get(c["id"])) for c in (sc.get("cast") or []) if c.get("id") not in (sh.get("hide") or [])]
+        shots = [{"id": f"try{k}", "seconds": secs, "cam": sh["cam"], "move": m["move"], "amount": float(m.get("amount") or 1), "cast": cast}
+                 for k, m in enumerate(moves)]
+        fps = 24
+        job = _new_job(private)
+
+        async def run():
+            job["stage"] = "Starting Blender"
+            res = await run_blender({"mode": "render", "look": "grey", "size": b.get("size") or [640, 352], "fps": fps, "shots": shots}, job,
+                                    blend=st["blend"], expect_frames=sum(int(secs * fps) + 1 for _ in shots))
+            ff = H["_ffmpeg"]()
+            name = "".join(ch for ch in sc.get("name", "Scene") if ch.isalnum() or ch in " -_").strip() or "Scene"
+            sub = f"Videos/Previs/{name}/Try moves"
+            out_dir = os.path.join(H["_root"](private), *sub.split("/"))
+            os.makedirs(out_dir, exist_ok=True)
+            stamp = time.strftime("%H%M%S")
+            out = []
+            for r in res.get("shots", []):
+                if r.get("error"):
+                    continue
+                k = int(r["id"][3:])
+                frames = sorted(f for f in os.listdir(r["dir"]) if f.startswith("f_") and f.endswith(".png"))
+                if not frames:
+                    continue
+                mv = moves[k]
+                base = f"{sh.get('name', 'Shot')} {mv['move']} {stamp}"
+                base = "".join(ch for ch in base if ch.isalnum() or ch in " -_.").strip()
+                mp4 = os.path.join(out_dir, base + ".mp4")
+                await H["_ff"]([ff, "-y", "-framerate", str(r["fps"]), "-start_number", str(r.get("start", 1)), "-i", os.path.join(r["dir"], "f_%04d.png"),
+                                "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", mp4])
+                out.append({"move": mv["move"], "amount": mv.get("amount"), "video": {"filename": os.path.basename(mp4), "subfolder": sub}})
+            shutil.rmtree(res["_tmp"], ignore_errors=True)
+            return {"tries": out}
+        asyncio.ensure_future(_ai_job(job, run))
+        return web.json_response({"id": job["id"]})
+
     # ---- turn a 3D still into a film frame with the Edit app
     @routes.post("/manny/api/previs/style")
     async def pv_style(request):
