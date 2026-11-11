@@ -83,18 +83,14 @@ def probe_files(api, oi):
 
 async def worker_accepts(s, w, api, oi, dirs):
     api = json.loads(json.dumps(api))
-    await remote._upload_inputs(s, w, api, oi, dirs)
+    sent = await remote._upload_inputs(s, w, api, oi, dirs)
     async with s.post(remote.base(w) + "/prompt", json={"prompt": api, "client_id": "studio-gate-test"}) as r:
         d = await r.json(content_type=None)
-    if r.status == 200:
-        pid = d["prompt_id"]
-        async with s.post(remote.base(w) + "/queue", json={"delete": [pid]}):
-            pass
-        async with s.post(remote.base(w) + "/interrupt", json={"prompt_id": pid}):
-            pass
-        async with s.post(remote.base(w) + "/history", json={"delete": [pid]}):
-            pass
-        return True, d
+    if r.status == 200:     # queued: take it straight back out (it may already have started), then forget it
+        await remote.cancel(w, d["prompt_id"], inputs=sent)
+        return not d.get("node_errors"), d   # a 200 with node_errors runs only the outputs that validated: a refusal
+    if sent:                # never queued: forget an unknown id just to drop the uploads
+        await remote.forget(s, w, "studio-probe-" + os.urandom(6).hex(), sent)
     return False, d
 
 
@@ -122,9 +118,15 @@ async def app_set(dirs):
     return eligible
 
 
+RENDER = set(os.environ.get("RENDER_APPS", "Studio - Remove background.app.json,Studio - Smooth motion.app.json").split(","))
+
+
 async def render_eligible(eligible, dirs):
-    """Every app the gate passes, rendered for real on that worker and pulled back here."""
+    """The eligible apps in RENDER_APPS, rendered for real on that worker and pulled back here (the gate==worker
+    check above already covers every eligible app; LTX video takes ~15 min a card, so it renders only on request)."""
     for w, name, wf, api in eligible:
+        if name not in RENDER:
+            continue
         r = await remote.submit(w, api, {"client_id": "studio-test", "extra_data": {"manny_app": name}}, dirs)
         job = remote.JOBS[r["prompt_id"]]
         await asyncio.wait_for(job["task"], 1800)
@@ -141,7 +143,7 @@ def img2img(ckpt):
             "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "a red apple", "clip": ["1", 1]}},
             "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 1]}},
             "6": {"class_type": "KSampler", "inputs": {"model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["3", 0],
-                                                       "seed": 1, "steps": 1, "cfg": 5.0, "sampler_name": "euler", "scheduler": "normal", "denoise": 0.5}},
+                                                       "seed": 1, "steps": 4, "cfg": 5.0, "sampler_name": "euler", "scheduler": "normal", "denoise": 0.5}},
             "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["1", 2]}},
             "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0], "filename_prefix": "studio_test/rt"}}}
 
@@ -155,11 +157,12 @@ async def round_trip(dirs):
             api = img2img(ckpt)
             if private:   # what Studio's _privatize does: save under the incoming folder
                 api["8"]["inputs"]["filename_prefix"] = ".private_incoming/studio_test/rt"
-            r = await remote.submit(w, api, {"client_id": "studio-test", "extra_data": {"manny_app": "test"}}, dirs, private)
+            r = await remote.submit(w, api, {"client_id": f"studio-test-{w['label']}-{private}", "extra_data": {"manny_app": "test"}}, dirs, private)
             job = remote.JOBS[r["prompt_id"]]
             await asyncio.wait_for(job["task"], 600)
             tag = f"{w['label']} {'private' if private else 'public'}"
             check(job["status"] == "done", f"{tag}: job {job['status']} {job['error'] or ''}")
+            check(job["step"] == "Step 4/4" and job["progress"] == 1.0, f"{tag}: progress from the worker's /ws: {job['step']}")
             outs = [o["path"] for o in job["outputs"]]
             inside = os.path.join(dirs["output"], ".private_incoming") if private else dirs["output"]
             check(len(outs) == 1 and os.path.getsize(outs[0]) > 0 and outs[0].startswith(inside + os.sep),
@@ -182,6 +185,32 @@ async def refused_submit():
         check(e.why and e.why[0]["input"] == "ckpt_name", f"submit refuses before upload/queue: {e}")
 
 
+async def node_errors_refusal(dirs):
+    """A gate miss must not become a silent half-render: ComfyUI queues the job when ANY output validates and lists
+    the failed nodes in the 200 reply. Gate switched off, one valid output (a copy of the input) + one broken one."""
+    w = WORKERS[0]
+    api = img2img("not-a-model.safetensors")
+    api["9"] = {"class_type": "SaveImage", "inputs": {"images": ["2", 0], "filename_prefix": "studio_test/copy"}}
+    real, real_cancel, cancelled = remote.gate, remote.cancel, []
+
+    async def spy_cancel(w, pid, **k):
+        cancelled.append(pid)
+        return await real_cancel(w, pid, **k)
+    remote.gate, remote.cancel = (lambda *a, **k: []), spy_cancel
+    try:
+        await remote.submit(w, api, {"client_id": "studio-test-ne"}, dirs)
+        check(False, "submit with node_errors in a 200 reply must refuse")
+    except remote.GateRefused as e:
+        check(any(x["node"] == "1" and x["input"] == "ckpt_name" for x in e.why), f"200 + node_errors -> refused: {e}")
+    finally:
+        remote.gate, remote.cancel = real, real_cancel
+    async with aiohttp.ClientSession() as s:
+        async with s.get(remote.base(w) + "/queue") as r:
+            q = await r.json()
+    check(len(cancelled) == 1 and not any(it[1] in cancelled for it in q["queue_running"] + q["queue_pending"]),
+          f"the half-valid job {cancelled} was taken back out of the worker's queue")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="studio-remote-")
     dirs = {k: os.path.join(os.path.realpath(tmp), k) for k in ("input", "output", "temp")}
@@ -193,6 +222,7 @@ def main():
     async def live():
         eligible = await app_set(dirs)
         await refused_submit()
+        await node_errors_refusal(dirs)
         await round_trip(dirs)
         await render_eligible(eligible, dirs)
     asyncio.run(live())

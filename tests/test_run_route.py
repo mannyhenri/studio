@@ -3,7 +3,11 @@
   WORKERS=127.0.0.1:8188,127.0.0.1:8189 ~/code/comfy-mac/.venv/bin/python tests/test_run_route.py
 
 Studio's own ComfyUI is played by the first worker (object_info for conversion). For every app x every worker the
-route must answer like the gate: 409 with the refusal list, or queue on that worker. Unknown targets get 400.
+route must answer like the gate: 409 with the refusal list, or queue on that worker, finish, pull the files back
+and tell the browser that queued it ("executed" + "execution_success" to its client_id). Unknown targets get 400.
+"auto" over every app with this PC busy: eligible apps go to a worker, the rest get 409 naming every machine.
+pick() unit cases: least busy wins, ties go to this PC, offline and ineligible workers are skipped.
+A queued job that is cancelled must leave nothing on the worker (forget deletes its uploaded inputs).
 """
 import asyncio, glob, importlib.util, json, os, shutil, sys, tempfile, types
 
@@ -12,6 +16,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PKG = os.path.join(ROOT, "ComfyUI-MannyStudio")
 WORKERS = [{"label": f"w{p}", "host": h, "port": int(p)} for h, p in
            (x.rsplit(":", 1) for x in os.environ.get("WORKERS", "127.0.0.1:8188,127.0.0.1:8189").split(","))]
+# apps rendered to the end on every worker; other eligible apps are queued and then cancelled (LTX video is ~15 min a card)
+RENDER = set(os.environ.get("RENDER_APPS", "Studio - Remove background.app.json,Studio - Smooth motion.app.json").split(","))
 tmp = os.path.realpath(tempfile.mkdtemp(prefix="studio-route-"))
 for d in ("user/default/workflows", "input", "output", "temp"):
     os.makedirs(os.path.join(tmp, d))
@@ -49,9 +55,12 @@ class _Routes:
         raise AttributeError(m)
 
 
+EVENTS = []
+
+
 class _PS:
     instance = types.SimpleNamespace(routes=_Routes(), app=types.SimpleNamespace(middlewares=[]), port=WORKERS[0]["port"],
-                                     loop=None, prompt_queue=None, send_sync=lambda *a, **k: None)
+                                     loop=None, prompt_queue=None, send_sync=lambda ev, data, sid=None: EVENTS.append((ev, data, sid)))
 
 
 srv = types.ModuleType("server")
@@ -102,26 +111,118 @@ async def main():
                 dst = os.path.join(tmp, "input", i["value"])
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy(os.path.join(probes, "input", "studio_test", src), dst)
+    eligible = {}
     for w in WORKERS:
         oi, sv = await remote.caps(w)
         for app in apps:
             _wf, api = await studio._build_prompt(app, {})
             why = remote.gate(api, oi, sv)
-            r = await H[("POST", "/manny/api/run")](Req({"app": app, "target": w["label"]}))
+            EVENTS.clear()
+            r = await H[("POST", "/manny/api/run")](Req({"app": app, "target": w["label"], "client_id": "browser-1"}))
             d = json.loads(r.text)
             if why:
                 check(r.status == 409 and len(d["refused"]) == len(why) and d["worker"] == w["label"],
                       f"{w['label']} {app}: 409 refused ({len(d.get('refused') or [])})")
-            else:
-                pid = (d.get("queued") or [{}])[0].get("prompt_id")
-                check(r.status == 200 and d["queued"][0]["worker"] == w["label"], f"{w['label']} {app}: queued {pid}")
-                if pid:
-                    await remote.cancel(w, pid)
+                continue
+            eligible.setdefault(app, []).append(w["label"])
+            pid = (d.get("queued") or [{}])[0].get("prompt_id")
+            check(r.status == 200 and d["queued"][0]["worker"] == w["label"], f"{w['label']} {app}: queued {pid}")
+            if not pid:
+                continue
+            job = remote.JOBS[pid]
+            if app not in RENDER:
+                d = json.loads((await H[("POST", "/manny/api/remote_jobs/{pid}/cancel")](types.SimpleNamespace(match_info={"pid": pid}))).text)
+                fg = d.get("forgot") or {}
+                check(job["status"] == "cancelled" and "warning" not in fg and any(x.startswith("input/") for x in fg.get("deleted", [])) == bool(job["inputs"]),
+                      f"{w['label']} {app}: eligible, not rendered here (RENDER_APPS); cancelled, forget {json.dumps(fg)[:200]}")
+                continue
+            await asyncio.wait_for(job["task"], 1800)
+            files = [o["path"] for o in job["outputs"]]
+            ex = [e for e in EVENTS if e[0] == "executed" and e[1]["prompt_id"] == pid]
+            ok = (job["status"] == "done" and files and all(os.path.isfile(f) and f.startswith(os.path.join(tmp, "output") + os.sep) for f in files)
+                  and len(ex) == len(files) and all(e[2] == "browser-1" and os.path.isfile(os.path.join(tmp, "output", e[1]["output"]["images"][0]["subfolder"], e[1]["output"]["images"][0]["filename"])) for e in ex)
+                  and ("execution_success", {"prompt_id": pid, "worker": w["label"]}, "browser-1") in EVENTS
+                  and not (job.get("forgot") or {}).get("warning"))
+            check(ok, f"{w['label']} {app}: rendered, {len(files)} file(s) in this PC's output, browser told ({[e[0] for e in EVENTS]}), forgot {len((job.get('forgot') or {}).get('deleted') or [])} {job['error'] or ''}")
+
+    # cancel: a job still waiting in the worker's queue (the worker is kept busy by a second job ahead of it)
+    if eligible.keys() & RENDER:
+        app = sorted(eligible.keys() & RENDER)[0]
+        w = remote.find(studio._data_dir(), eligible[app][0])
+        a = json.loads((await H[("POST", "/manny/api/run")](Req({"app": app, "target": w["label"], "client_id": "browser-1"}))).text)["queued"][0]["prompt_id"]
+        b = json.loads((await H[("POST", "/manny/api/run")](Req({"app": app, "target": w["label"], "client_id": "browser-1"}))).text)["queued"][0]["prompt_id"]
+        r = await H[("POST", "/manny/api/remote_jobs/{pid}/cancel")](types.SimpleNamespace(match_info={"pid": b}))
+        d = json.loads(r.text)
+        fg = d.get("forgot") or {}
+        check(r.status == 200 and remote.JOBS[b]["status"] == "cancelled" and any(x.startswith("input/") for x in fg.get("deleted", [])) and "warning" not in fg,
+              f"cancel a waiting job on {w['label']}: {remote.JOBS[b]['status']}, forget {json.dumps(fg)[:220]}")
+        await asyncio.wait_for(remote.JOBS[a]["task"], 1800)
+        check(remote.JOBS[a]["status"] == "done", f"the job ahead of it still finished: {remote.JOBS[a]['status']}")
+        lst = json.loads((await H[("GET", "/manny/api/remote_jobs")](Req())).text)
+        check({a, b} <= {j["prompt_id"] for j in lst} and all("task" not in j for j in lst), f"/manny/api/remote_jobs lists them ({len(lst)})")
+
+    # auto, with this PC busy: every app goes to an eligible worker or is refused naming every machine
+    studio._local_busy = lambda: 99
+    for app in apps:
+        r = await H[("POST", "/manny/api/run")](Req({"app": app, "target": "auto", "client_id": "browser-1"}))
+        d = json.loads(r.text)
+        if app in eligible:
+            q = (d.get("queued") or [{}])[0]
+            check(r.status == 200 and q.get("worker") in eligible[app], f"auto {app}: went to {q.get('worker')} (eligible: {eligible[app]})")
+            if q.get("prompt_id"):
+                await remote.cancel(remote.find(studio._data_dir(), q["worker"]), q["prompt_id"])
+        else:
+            check(r.status == 409 and set(d.get("refused_by") or {}) == {"local"} | {w["label"] for w in WORKERS},
+                  f"auto {app}: 409, refused by {sorted(d.get('refused_by') or {})}")
+    studio._local_busy = lambda: 0
+    for app in sorted(eligible):
+        r = await H[("POST", "/manny/api/run")](Req({"app": app, "target": "auto", "client_id": "browser-1"}))
+        q = json.loads(r.text)["queued"][0]
+        check(q["worker"] == "local", f"auto {app} with this PC idle and able: stays local ({q['worker']})")
+        await post_local_cancel(q["prompt_id"])
+    await pick_units()
     r = await H[("POST", "/manny/api/workers/check")](Req({"app": apps[0]}))
     d = json.loads(r.text)
     check(set(d) == {"local"} | {w["label"] for w in WORKERS}, f"workers/check answers per machine: { {k: v.get('ok') for k, v in d.items()} }")
     print(f"\n{len(fails)} failed" if fails else "\nall passed")
     return 1 if fails else 0
+
+
+async def post_local_cancel(pid):
+    """'local' here is worker 1's ComfyUI: take the job straight back out."""
+    import aiohttp
+    async with aiohttp.ClientSession() as s:
+        base = remote.base(WORKERS[0])
+        async with s.post(base + "/queue", json={"delete": [pid]}):
+            pass
+        async with s.post(base + "/interrupt", json={"prompt_id": pid}):
+            pass
+
+
+async def pick_units():
+    real_check, real_info = remote.check, remote.info
+    ws = [{"label": "a"}, {"label": "b"}, {"label": "off"}, {"label": "cant"}]
+    busy = {"a": 3, "b": 1}
+
+    async def fake_check(w, api):
+        if w["label"] == "off":
+            raise OSError("connection refused")
+        return [{"reason": "no model"}] if w["label"] == "cant" else []
+
+    async def fake_info(w):
+        return {"queue_remaining": busy[w["label"]]}
+    remote.check, remote.info = fake_check, fake_info
+    try:
+        lab, notes = await remote.pick(ws, {}, 2)
+        check(lab == "b" and set(notes) == {"off", "cant"}, f"pick: least busy wins (b=1 < local=2 < a=3) -> {lab}, skipped {sorted(notes)}")
+        lab, _ = await remote.pick(ws, {}, 1)
+        check(lab == "local", f"pick: a tie goes to this PC -> {lab}")
+        lab, _ = await remote.pick(ws, {}, 0, local_ok=False)
+        check(lab == "b", f"pick: this PC can't run it -> {lab}")
+        lab, notes = await remote.pick(ws[2:], {}, 0, local_ok=False)
+        check(lab is None and set(notes) == {"off", "cant"}, f"pick: nobody can -> {lab}")
+    finally:
+        remote.check, remote.info = real_check, real_info
 
 
 sys.exit(asyncio.run(main()))

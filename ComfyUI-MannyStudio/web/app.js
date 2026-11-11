@@ -24,8 +24,10 @@ const S = {
   mine: {},                                  // prompt_id -> {app}
   stage: store.get("stage", {}),             // appId -> last result {url, kind}
   running: null, progress: 0, queueRemaining: 0,
+  target: store.get("target", "local"),      // where Create renders: "local", "auto" or a worker label
+  workers: [], remote: [],                   // GPU machines (this PC first) and their jobs
 };
-const saveState = () => { store.set("values", S.values); store.set("randomSeed", S.randomSeed); store.set("count", S.count); store.set("char", S.char); store.set("appIdx", S.appIdx); store.set("stage", S.stage); };
+const saveState = () => { store.set("values", S.values); store.set("randomSeed", S.randomSeed); store.set("count", S.count); store.set("char", S.char); store.set("appIdx", S.appIdx); store.set("stage", S.stage); store.set("target", S.target); };
 
 /* ------------------------------------------------------------ api */
 async function api(path, opts = {}) {
@@ -380,6 +382,11 @@ function renderForm(form, app) {
       <button class="btn primary" id="gen">Generate ${S.count > 1 ? S.count + " " + (app.kind === "video" ? "shots" : "pictures") : ""}</button>
       <button class="btn" id="later" title="Render later: at a set time or when the PC is free">⏱ Later</button>
     </div>`);
+  if (S.workers.length > 1) {   // only once another GPU machine is set up in Settings
+    const sel = h(`<select class="runon" title="Which GPU renders this">${runOptions()}</select>`);
+    sel.onchange = () => { S.target = sel.value; saveState(); };
+    $(".stepper", go).after(sel);
+  }
   $$(".stepper button", go).forEach(b => b.onclick = () => { S.count = Math.max(1, Math.min(8, S.count + +b.dataset.d)); saveState(); renderForm(form, app); });
   $("#gen", go).onclick = () => generate(app);
   $("#later", go).onclick = e => scheduleMenu(app, e.currentTarget);
@@ -619,7 +626,7 @@ function runBody(app) {
   const vfile = fam && (S.variant[mkey(app)] || {})[fam];
   const unet = vfile ? { family: fam, file: vfile } : null;
   const pz = L0(app).model && /anime desire|illustrious/i.test(vals[L0(app).model.key] || "") ? (S.pose || {})[mkey(app)] : null;
-  return { body: { app: app.id, values: vals, count: S.count, client_id: clientId, random_seed_keys: seedKeys, private: priv, loras, checkpoint, unet,
+  return { body: { app: app.id, values: vals, count: S.count, client_id: clientId, random_seed_keys: seedKeys, private: priv, loras, checkpoint, unet, target: runTarget(),
     pose: pz && pz.file ? pz.file : undefined, pose_strength: pz && pz.file ? pz.strength : undefined }, priv, vals };
 }
 /* render later: Studio keeps the job and sends it at a set time, or once the PC has been idle for 2 minutes */
@@ -663,14 +670,16 @@ async function generate(app) {
   try {
     const { body, priv } = runBody(app);
     const res = await post("/manny/api/run", body);
-    res.queued.forEach(q => S.mine[q.prompt_id] = { app: app.id, at: Date.now(), private: priv, hidden: priv && !S.incog });
+    res.queued.forEach(q => S.mine[q.prompt_id] = { app: app.id, at: Date.now(), private: priv, hidden: priv && !S.incog, worker: q.worker });
+    const away = res.queued.filter(q => q.worker && q.worker !== "local");
+    if (away.length) { toast(`Sent to ${[...new Set(away.map(q => q.worker))].join(", ")}`); pollRemote(); }
     if (priv && !S.incog) toast("Saved privately.");
     toast(`Queued ${res.queued.length} ${app.kind === "video" ? "shot" : "picture"}${res.queued.length > 1 ? "s" : ""}`);
     if (window.matchMedia("(max-width: 760px)").matches) { const st = $(".stage"); if (st) st.scrollIntoView({ behavior: "smooth", block: "start" }); }
     pollQueue();
   } catch (e) {
     const d = e.data && e.data.error;
-    const msg = d && d.error ? (d.error.message + (d.node_errors ? " — " + Object.values(d.node_errors).map(n => n.errors.map(x => x.message + (x.details ? ": " + x.details : "")).join("; ")).join(" | ") : "")) : e.message;
+    const msg = typeof d === "string" ? d : d && d.error ? (d.error.message + (d.node_errors ? " — " + Object.values(d.node_errors).map(n => n.errors.map(x => x.message + (x.details ? ": " + x.details : "")).join("; ")).join(" | ") : "")) : e.message;
     toast("Couldn't start: " + msg, true);
   } finally { if (btn) { btn.disabled = false; btn.textContent = "Generate" + (S.count > 1 ? ` ${S.count} ${app.kind === "video" ? "shots" : "pictures"}` : ""); } }
 }
@@ -2608,6 +2617,7 @@ async function pageSettings(main) {
     <div class="chips stabs" id="settabs"><div class="chip" data-t="general">⚙ General</div><div class="chip" data-t="models">◈ Models on this PC</div></div>
     <div data-tab="general">
     <div class="section-head"><h2>Rendering safety</h2></div><div class="panel keybox" id="gdbox"><p class="muted">…</p></div>
+    <div class="section-head"><h2>GPU machines</h2><button class="ghost" id="wkr">Check again</button></div><div class="panel keybox" id="wkbox"><p class="muted">Checking…</p></div>
     <div class="section-head"><h2>Topaz</h2><button class="ghost" id="tzt">Check again</button></div><div class="panel keybox" id="tzbox"><p class="muted">Checking…</p></div>
     <div class="section-head"><h2>Civitai</h2></div><div class="panel keybox"><p class="muted" id="ckst">…</p><div class="row"><input type="password" id="ck2" placeholder="New Civitai API key" autocomplete="off"><button class="btn" id="cks2">Save key</button><button class="ghost danger" id="ckr2">Remove key</button></div></div>
     <div class="section-head"><h2>3D</h2></div><div class="panel keybox"><p class="muted" id="b3d">…</p></div>
@@ -2736,6 +2746,21 @@ async function pageSettings(main) {
     };
   };
   gitDraw();
+  const wkDraw = async () => {
+    const box = $("#wkbox", p); await loadWorkers();
+    const others = S.workers.slice(1);
+    box.innerHTML = `<p class="muted">Other computers running ComfyUI that Studio can send renders to (like the Mac Pro's two GPUs). Pick one under Generate, or “Any free GPU”. A job only goes where every model it needs is installed.</p>
+      ${others.map((w, k) => `<div class="row"><span><b>${esc(w.label)}</b> <small class="muted">${esc(w.host)}:${w.port} · ${w.online ? esc(((w.info || {}).device || {}).name || "online") + ` · ${(w.info || {}).queue_remaining || 0} waiting` : "offline: " + esc((w.error || "").slice(0, 120))}</small></span><button class="ghost danger sm" data-rm="${k}">Remove</button></div>`).join("") || `<p class="muted">None yet.</p>`}
+      <div class="row"><input id="wkl" placeholder="Name (mac-vega-a)"><input id="wkh" placeholder="Host (Mannys-Mac-Pro.local)"><input id="wkp" placeholder="Port" style="max-width:80px"><button class="btn" id="wka">Add</button></div>`;
+    const save = async list => { try { await post("/manny/api/workers", { workers: list.map(({ label, host, port, device }) => ({ label, host, port, device })) }); } catch (e) { toast(e.message, true); } wkDraw(); };
+    $$("[data-rm]", box).forEach(b => b.onclick = () => save(others.filter((_, k) => k !== +b.dataset.rm)));
+    $("#wka", box).onclick = () => {
+      const label = $("#wkl", box).value.trim(), host = $("#wkh", box).value.trim(), port = +$("#wkp", box).value;
+      if (!label || !host || !port || label === "local" || label === "auto" || others.some(w => w.label === label)) return toast("Give it a new name, a host and a port", true);
+      save([...others, { label, host, port }]);
+    };
+  };
+  wkDraw(); $("#wkr", p).onclick = wkDraw;
   api("/manny/api/guard").then(g => {
     const box = $("#gdbox", p), pr = g.prefs;
     box.innerHTML = `<label class="tog"><input type="checkbox" data-k="free_between_models" ${pr.free_between_models ? "checked" : ""}><span><b>Free memory between different models</b><small>When the next job uses other models, ComfyUI unloads the old ones first. The graphics chip shares the PC's memory, so piling models up makes Windows page to disk and freeze.</small></span></label>
@@ -2778,6 +2803,15 @@ function appNameOf(item) { const ex = item[3] || {}; const a = S.apps.find(x => 
 function drawQueueCard() {
   const q = S.queue; if (!q) return;
   const run = q.queue_running[0];
+  const ra = S.remote.filter(remoteActive);
+  if (!run && ra.length) {  // nothing on this PC: show what the other GPUs are doing
+    const r0 = ra.find(j => j.status === "running") || ra[0];
+    $("#q-dot").className = "dot run"; $("#q-title").textContent = "Rendering on " + r0.worker;
+    $("#q-sub").textContent = `${remoteName(r0)} · ${remoteState(r0)}${ra.length > 1 ? " · " + (ra.length - 1) + " more" : ""}`;
+    $("#q-bar").style.width = Math.round(r0.progress * 100) + "%";
+    $("#mq-dot").className = "dot run"; $("#mq-t").textContent = `${Math.round(r0.progress * 100)}% · ${r0.worker}`;
+    return;
+  }
   $("#q-dot").className = "dot" + (run ? " run" : "");
   $("#q-title").textContent = run ? "Rendering" : "Idle";
   const nsch = (S.sched || []).filter(x => x.status === "waiting").length;
@@ -2802,9 +2836,41 @@ function drawDrawer() {
     recent.forEach(x => b.append(h(`<div class="qitem done"><b>${esc(x.label)}</b><small>${x.status === "sent" ? "Started " + new Date(x.sent_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Failed: " + esc((x.error || "").slice(0, 160))}</small></div>`)));
     b.append(h(`<div class="qhead">Queue</div>`));
   }
-  if (!q.queue_running.length && !q.queue_pending.length) b.append(h(`<div class="empty">The queue is empty.</div>`));
+  const rem = S.remote.filter(j => remoteActive(j) || Date.now() / 1000 - (j.finished_at || 0) < 600);
+  if (!q.queue_running.length && !q.queue_pending.length && !rem.length) b.append(h(`<div class="empty">The queue is empty.</div>`));
   q.queue_running.forEach(it => b.append(qItem(it, true)));
   q.queue_pending.slice().sort((a, b) => a[0] - b[0]).forEach(it => b.append(qItem(it, false)));
+  if (rem.length) {
+    b.append(h(`<div class="qhead">Other GPUs</div>`));
+    rem.forEach(j => {
+      const live = remoteActive(j);
+      const el = h(`<div class="qitem ${j.status === "running" ? "run" : ""} ${live ? "" : "done"}"><div class="row"><b>${esc(remoteName(j))}</b>${live ? `<button class="icon" title="Stop">✕</button>` : ""}</div>
+        <small>${esc(j.worker)} · ${esc(remoteState(j))}</small>${j.status === "running" ? `<div class="bar" style="margin-top:8px"><div style="width:${Math.round(j.progress * 100)}%"></div></div>` : ""}</div>`);
+      const x = $("button", el);
+      if (x) x.onclick = async () => { x.disabled = true; try { await post(`/manny/api/remote_jobs/${j.prompt_id}/cancel`, {}); toast("Stopped on " + j.worker); } catch (e) { toast(e.message, true); } pollRemote(); };
+      b.append(el);
+    });
+  }
+}
+/* ------------------------------------------------------------ other GPU machines (remote workers) */
+const remoteActive = j => ["queued", "running", "downloading"].includes(j.status);
+function remoteName(j) { const a = S.apps.find(x => x.id === j.app); return a ? appShort(a) : (j.label || "Job"); }
+function remoteState(j) {
+  return { queued: "Waiting", running: j.step ? `${Math.round(j.progress * 100)}% · ${j.step}` : "Rendering", downloading: "Copying to this PC",
+           done: "Done", failed: "Failed: " + (j.error || "").slice(0, 140), cancelled: "Stopped" }[j.status] || j.status;
+}
+function runTarget() { return S.workers.length > 1 && (S.target === "auto" || S.workers.some(w => w.label === S.target)) ? S.target : "local"; }
+function runOptions() {
+  const t = runTarget();
+  return [["local", "This PC"], ["auto", "Any free GPU"], ...S.workers.slice(1).map(w => [w.label, w.label + (w.online ? "" : " (offline)")])]
+    .map(([v, l]) => `<option value="${esc(v)}" ${v === t ? "selected" : ""}>${esc(l)}</option>`).join("");
+}
+async function loadWorkers() { try { S.workers = await api("/manny/api/workers"); } catch { S.workers = []; } }
+async function pollRemote() {
+  if (S.workers.length < 2 && !S.remote.some(remoteActive)) return;
+  try { S.remote = await api("/manny/api/remote_jobs"); } catch { return; }
+  drawQueueCard();
+  if (!$("#drawer").classList.contains("hidden")) drawDrawer();
 }
 function qItem(it, running) {
   const el = h(`<div class="qitem ${running ? "run" : ""}"><div class="row"><b>${esc(appNameOf(it))}</b><button class="icon" title="${running ? "Stop" : "Remove"}">✕</button></div>
@@ -2963,6 +3029,7 @@ const bump = () => { clearTimeout(idleT); idleT = setTimeout(async () => { if (S
   migrateLocalValues();
   await loadChars();
   connect(); pollQueue(); sysStats(); setInterval(sysStats, 15000); setInterval(pollQueue, 5000); sysMon(); setInterval(sysMon, 3000);
+  loadWorkers().then(pollRemote); setInterval(pollRemote, 3000); setInterval(loadWorkers, 60000);
   setInterval(serverProgress, 3000);
   loadSchedule(); setInterval(loadSchedule, 30000);
   route();

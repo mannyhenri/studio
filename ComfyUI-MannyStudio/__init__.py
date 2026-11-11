@@ -19,7 +19,7 @@ import folder_paths
 from server import PromptServer
 
 from .mconv.workflow_to_api import convert_ui_to_api
-from .appwf import combo_options as _combo_options, apply_values as _apply_values, fix_custom_combos as _fix_custom_combos
+from .appwf import combo_options as _combo_options, apply_values as _apply_values, fix_custom_combos as _fix_custom_combos, prune_switches as _prune_switches
 from . import auth
 from . import remote as _remote
 
@@ -201,7 +201,7 @@ async def _build_prompt(app_id, values):
     except Exception:
         oi = await _get_object_info(force=True)
         api = convert_ui_to_api(wf, oi)
-    return wf, _fix_custom_combos(api, wf)
+    return wf, _prune_switches(_fix_custom_combos(api, wf), oi)
 
 
 # ---------------------------------------------------------------- pages
@@ -273,9 +273,9 @@ async def manny_run(request):
     client_id = body.get("client_id") or uuid.uuid4().hex
     seed_keys = body.get("random_seed_keys") or []
     private = bool(body.get("private"))  # writing privately needs no unlock; viewing does
-    target = body.get("target") or _remote.LOCAL
+    target = body.get("target") or _remote.LOCAL    # "local", "auto" or a worker label
     worker = None
-    if target != _remote.LOCAL:
+    if target not in (_remote.LOCAL, _remote.AUTO):
         try:
             worker = _remote.find(_data_dir(), target)
         except KeyError as e:
@@ -304,10 +304,18 @@ async def manny_run(request):
                 "client_id": client_id,
                 "extra_data": {"extra_pnginfo": {"workflow": wf}, "manny_app": app_id},
             }
+            if target == _remote.AUTO:
+                why_local = _remote.gate(api, await _get_object_info())
+                label, notes = await _remote.pick(_remote.load_workers(_data_dir()), api, _local_busy(), not why_local)
+                if label is None:
+                    notes[_remote.LOCAL] = why_local
+                    return web.json_response({"error": "No machine can run this: " + "; ".join(
+                        f"{k}: {(v[0] or {}).get('reason', '')}" for k, v in notes.items() if v), "refused_by": notes, "queued": results}, status=409)
+                worker = None if label == _remote.LOCAL else _remote.find(_data_dir(), label)
             if worker:
                 try:
-                    results.append(dict(await _remote.submit(worker, api, {k: v for k, v in payload.items() if k != "prompt"}, _dirs(), private, INCOMING),
-                                        seed=[vals.get(k) for k in seed_keys]))
+                    results.append(dict(await _remote.submit(worker, api, {k: v for k, v in payload.items() if k != "prompt"}, _dirs(), private, INCOMING,
+                                                             on_done=_remote_done), seed=[vals.get(k) for k in seed_keys]))
                 except _remote.GateRefused as e:
                     return web.json_response({"error": str(e), "refused": e.why, "worker": e.label, "queued": results}, status=409)
                 except Exception as e:
@@ -317,9 +325,17 @@ async def manny_run(request):
                 data = await r.json()
                 if r.status != 200:
                     return web.json_response({"error": data, "queued": results}, status=400)
-                results.append({"prompt_id": data.get("prompt_id"), "number": data.get("number"), "seed": [vals.get(k) for k in seed_keys]})
-                if private:
-                    _pending_private.add(data.get("prompt_id"))
+            if data.get("node_errors"):     # queued for the outputs that validated: the picture would be missing
+                async with s.post(f"http://127.0.0.1:{_port()}/queue", json={"delete": [data.get("prompt_id")]}):
+                    pass
+                async with s.post(f"http://127.0.0.1:{_port()}/interrupt", json={"prompt_id": data.get("prompt_id")}):
+                    pass
+                return web.json_response({"error": {"error": {"message": "Part of this can't run on this PC"}, "node_errors": data["node_errors"]},
+                                          "queued": results}, status=400)
+            results.append({"prompt_id": data.get("prompt_id"), "number": data.get("number"), "seed": [vals.get(k) for k in seed_keys],
+                            "worker": _remote.LOCAL})
+            if private:
+                _pending_private.add(data.get("prompt_id"))
     return web.json_response({"queued": results})
 
 
@@ -365,9 +381,46 @@ async def manny_workers_check(request):
     return web.json_response(out)
 
 
+def _local_busy():
+    try:
+        return PromptServer.instance.prompt_queue.get_tasks_remaining()
+    except Exception:
+        return 0
+
+
+def _remote_done(job):
+    """Tell the browser that queued it, the same way ComfyUI does for a local job, so Create/Gallery/Storyboard
+    pick the pulled-back file up unchanged."""
+    sid = job.get("client_id")
+    try:
+        if job["status"] == "done":
+            for k, o in enumerate(job["outputs"]):
+                f = {"filename": o["filename"], "subfolder": o["subfolder"], "type": "output"}
+                PromptServer.instance.send_sync("executed", {"prompt_id": job["prompt_id"], "node": f"remote{k}", "display_node": f"remote{k}",
+                                                            "output": {"images": [f]}, "worker": job["worker"]}, sid)
+            PromptServer.instance.send_sync("execution_success", {"prompt_id": job["prompt_id"], "worker": job["worker"]}, sid)
+        elif job["status"] == "failed":
+            PromptServer.instance.send_sync("execution_error", {"prompt_id": job["prompt_id"], "exception_message": job["error"] or "failed",
+                                                               "worker": job["worker"]}, sid)
+    except Exception as e:
+        print("[Studio] remote job event:", e)
+
+
 @routes.get("/manny/api/remote_jobs")
 async def manny_remote_jobs(request):
-    return web.json_response(sorted((_remote.job_view(j) for j in _remote.JOBS.values()), key=lambda j: -j["queued_at"]))
+    return web.json_response(_remote.jobs())
+
+
+@routes.post("/manny/api/remote_jobs/{pid}/cancel")
+async def manny_remote_cancel(request):
+    job = _remote.JOBS.get(request.match_info["pid"])
+    if not job:
+        return web.json_response({"error": "unknown job"}, status=404)
+    try:
+        fg = await _remote.cancel(_remote.find(_data_dir(), job["worker"]), job["prompt_id"])
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=502)
+    return web.json_response({"cancelled": job["prompt_id"], "forgot": fg})
 
 
 @routes.post("/manny/api/preview_prompt")

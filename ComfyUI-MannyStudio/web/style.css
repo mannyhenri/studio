@@ -145,6 +145,7 @@ details.adv .fsec{margin-top:14px}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .go{position:sticky;bottom:0;margin:0 -20px -20px;padding:16px 20px;background:linear-gradient(0deg,var(--panel) 75%,transparent);border-radius:0 0 18px 18px;display:flex;gap:10px;align-items:center}
 .go .btn.primary{flex:1;justify-content:center;padding:15px;font-size:19px}
+.go .runon{max-width:150px;height:48px;border-radius:11px}
 .stepper{display:flex;align-items:center;background:var(--bg2);border:1px solid var(--line);border-radius:11px}
 .stepper button{background:none;border:0;width:34px;height:46px;font-size:18px;color:var(--muted)}
 .stepper span{min-width:22px;text-align:center;font:700 18px var(--head)}
