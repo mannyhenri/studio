@@ -46,8 +46,13 @@ LOST_AFTER = 600        # a worker unreachable this long while it has our job: t
 LONG_JOB = 600          # "auto": a worker running one of our jobs for longer than this counts one busier
 LOST_MISSES = 3         # polls in a row with the job in neither /history nor /queue: the worker restarted
 FETCH_POLL = 5          # seconds between /mac/fetch asks while a model downloads
+FETCH_TIMEOUT = 60      # seconds one /mac/fetch ask may take
 FETCH_TRIES = 3         # a download that fails this many times in a row (each ask resumes it) fails the job
 LOCAL_INFO = None       # async () -> this PC's /object_info, set by Studio: says which pack a node the worker lacks comes from
+LOCAL_MODEL = None      # (folder, value) -> this PC's file for a model, or None; set by Studio (modelshare's own rules)
+LOCAL_SHA = None        # path -> a sha256 already known for it, or None
+PUSH_CHUNK = 1 << 20
+_PUSHES = {}            # (worker, folder, value) -> the task pushing it, so jobs needing one file send it once
 
 
 # ---------------------------------------------------------------- remote jobs on disk (survive a restart of this PC's ComfyUI)
@@ -246,9 +251,36 @@ def gate(api, object_info, self_validated=None):
             c = combo(spec)
             if not c or is_file_input(spec):
                 continue
-            if val not in c[0]:
+            if val not in c[0] and _spelled(val, c[0]) is None:
                 why.append({"node": nid, "class_type": ct, "input": name, "value": val, "reason": f"{ct}.{name} has no “{val}”"})
     return why
+
+
+def _spelled(val, options):
+    """val as options spell it when only the folder separator differs ("Civitai\\x" on the Windows PC is "Civitai/x"
+    on a Mac); None if no spelling of it is there."""
+    for alt in (val.replace("\\", "/"), val.replace("/", "\\")):
+        if alt != val and alt in options:
+            return alt
+    return None
+
+
+def respell(api, object_info, self_validated=None):
+    """Rewrite every COMBO value to the worker's own spelling of it (its ComfyUI validates exact names)."""
+    sv = SELF_VALIDATED if self_validated is None else self_validated
+    for node in api.values():
+        ct = node.get("class_type")
+        skip = sv.get(ct) or []
+        for name, val in list((node.get("inputs") or {}).items()):
+            if not isinstance(val, str) or "*" in skip or name in skip:
+                continue
+            spec = _spec(object_info.get(ct), name)
+            c = combo(spec)
+            if c and not is_file_input(spec) and val not in c[0]:
+                alt = _spelled(val, c[0])
+                if alt is not None:
+                    node["inputs"][name] = alt
+    return api
 
 
 async def check(w, api):
@@ -331,9 +363,11 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
     if why and fetch and fetchable(why):
         try:
             files = await _fetch(w, why)
-        except Exception as e:      # a worker without /mac/fetch: refuse as before, saying why
+        except NoFetch as e:        # a worker without /mac/fetch: refuse as before, saying why
             raise GateRefused(w["label"], why + [{"reason": f"it can't download models ({e})"}])
-        bad = [f for f in files if f.get("status") == "unavailable"]
+        except Exception as e:      # slow or dropped (an index rebuild, a PC asleep): wait and ask again
+            files = [{"value": x["value"], "status": "asking", "reason": f"/mac/fetch didn't answer yet ({type(e).__name__})"} for x in why]
+        bad = [f for f in files if f.get("status") == "unavailable" and not _pushable(f)]
         if bad:
             raise GateRefused(w["label"], _unavailable(bad))
         job = _new_job(w, str(uuid.uuid4()), payload_extra, private, "fetching")
@@ -363,6 +397,7 @@ def _new_job(w, pid, payload_extra, private, status):
 
 async def _send(w, api, payload_extra, dirs, oi, sv, pid=None):
     """Tag, upload the inputs, POST /prompt (under pid when given). Returns (reply, uploaded inputs, open /ws)."""
+    respell(api, oi, sv)
     # ComfyUI caches output nodes too: an identical job would "finish" pointing at files /mac/forget already
     # deleted. A per-job key on each output node changes only its cache key (ComfyUI never passes an unknown
     # literal input to the node), so the save runs again while everything upstream may still come from cache.
@@ -421,6 +456,10 @@ async def name_packs(why):
 
 
 # ---------------------------------------------------------------- missing models: the worker downloads them
+class NoFetch(RuntimeError):
+    """The worker has no /mac/fetch (an older worker): it can't download models."""
+
+
 def fetchable(why):
     """True when every refusal is a COMBO value (a file the worker's folder lacks), so /mac/fetch may get it."""
     return bool(why) and all(x.get("class_type") and x.get("input") and isinstance(x.get("value"), str) for x in why)
@@ -435,10 +474,70 @@ async def _fetch(w, why):
             seen.add(k)
             files.append({"class_type": k[0], "input": k[1], "value": k[2]})
     async with ClientSession() as s:
-        async with s.post(base(w) + "/mac/fetch", json={"files": files}, timeout=ClientTimeout(total=60)) as r:
+        async with s.post(base(w) + "/mac/fetch", json={"files": files}, timeout=ClientTimeout(total=FETCH_TIMEOUT)) as r:
+            if r.status in (404, 405):
+                raise NoFetch(f"/mac/fetch HTTP {r.status}")
             if r.status != 200:
                 raise RuntimeError(f"/mac/fetch HTTP {r.status}")
             return (await r.json(content_type=None)).get("files") or []
+
+
+def _pushable(f):
+    """A file the worker can't pull but this PC has, so it can send it (/mac/fetch said "push": true)."""
+    return bool(f.get("push") and f.get("folder") and LOCAL_MODEL and LOCAL_MODEL(f["folder"], f["value"]))
+
+
+async def _push(w, job, folder, value):
+    """Send this PC's copy of a model to the worker (PUT /mac/models/...), resuming from what it already has.
+    A file several jobs need is sent once: they all wait for the same push."""
+    key = (w["label"], folder, value.replace("\\", "/"))
+    t = _PUSHES.get(key)
+    if not t or t.done():
+        t = _PUSHES[key] = asyncio.ensure_future(_push_file(w, folder, value, LOCAL_MODEL(folder, value), job))
+    await asyncio.shield(t)
+
+
+async def _push_file(w, folder, value, path, job):
+    import urllib.parse
+    url = f"{base(w)}/mac/models/{folder}/{urllib.parse.quote(value.replace(chr(92), '/'), safe='/')}"
+    size = os.path.getsize(path)
+    sha = LOCAL_SHA(path) if LOCAL_SHA else None
+    stuck = 0
+    async with ClientSession() as s:
+        while True:
+            async with s.head(url, timeout=ClientTimeout(total=30)) as r:
+                if r.status == 200:
+                    return
+                have = int(r.headers.get("X-Mac-Have") or 0)
+
+            async def body(start=have):
+                done = start
+                with open(path, "rb") as fh:
+                    fh.seek(start)
+                    while True:
+                        chunk = await asyncio.to_thread(fh.read, PUSH_CHUNK)
+                        if not chunk:
+                            return
+                        done += len(chunk)
+                        unit, div = ("GB", 1e9) if size >= 1e9 else ("MB", 1e6)
+                        job["step"], job["progress"] = f"Sending model {value} to {w['label']}: {done / div:.1f}/{size / div:.1f} {unit}", done / size
+                        yield chunk
+            hd = {"Content-Length": str(size - have)}
+            if have:
+                hd["Content-Range"] = f"bytes {have}-{size - 1}/{size}"
+            if sha:
+                hd["X-Studio-SHA256"] = sha
+            async with s.put(url, data=body(), headers=hd, timeout=ClientTimeout(total=None, sock_read=300)) as r:
+                if r.status == 201:
+                    return
+                if r.status in (202, 416):      # cut short, or out of step: ask what it has and go on from there
+                    stuck = stuck + 1 if r.status == 416 else 0
+                elif r.status == 423:           # it's already pulling or being sent this file
+                    await asyncio.sleep(FETCH_POLL)
+                else:
+                    raise RuntimeError(f"{w['label']} wouldn't take {value}: HTTP {r.status} {(await r.text())[:200]}")
+            if stuck >= 3:
+                raise RuntimeError(f"{w['label']} and this PC disagree on how much of {value} it has")
 
 
 def _unavailable(bad):
@@ -467,9 +566,15 @@ async def _fetch_then_send(w, job, api, payload_extra, dirs, incoming, on_done, 
         while True:
             job["fetch"] = files
             _show_fetch(w, job, files)
-            bad = [f for f in files if f.get("status") == "unavailable"]
+            bad = [f for f in files if f.get("status") == "unavailable" and not _pushable(f)]
             if bad:
                 raise GateRefused(w["label"], _unavailable(bad))
+            push = [f for f in files if f.get("status") == "unavailable"]
+            if push:            # the worker can't pull these (no route to this PC): send them over the way that works
+                for f in push:
+                    await _push(w, job, f["folder"], f["value"])
+                files = await _fetch(w, why)
+                continue
             for f in files:
                 v = f.get("value")
                 tries[v] = tries.get(v, 0) + 1 if f.get("status") == "failed" else 0

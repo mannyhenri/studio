@@ -59,7 +59,7 @@ Each video dialog has its own **Run on** menu (the same remembered choice as nex
 | `p-h3-image_vae_int8_convrot` | `vae` | Image · P-H3 |
 | `moss_image_nsfw_uncensored_lora`, `qwen_image_2.1_nsfw_lora` | `loras` | the Uncensored toggles |
 
-**This PC shares its model files with the Macs.** Studio serves its model folders over the LAN so a Mac can download a file that isn't on Hugging Face (Civitai LoRAs and checkpoints, the PC-only files above): when the Mac's `/mac/fetch` can't find a model on HF, it downloads it from here instead.
+**This PC shares its model files with the Macs.** Studio serves its model folders over the LAN so a Mac can download a file that isn't on Hugging Face (Civitai LoRAs and checkpoints, the PC-only files above): when the Mac's `/mac/fetch` can't find a model on HF, it downloads it from here instead. If the Mac can't reach this PC (macOS blocks its background workers from opening LAN connections until Local Network is allowed: "No route to host"), **this PC sends the file to the Mac itself** over the connection jobs already use (`PUT /mac/models/…`, resumable, sha256 checked when known). The queue shows "Sending model … to mac-vega-a: x/y GB", then the job renders. A file several jobs need is sent once. Nothing needs to be allowed on the Mac for this.
 - `GET`/`HEAD /manny/api/models/file/<folder>/<name>`: the file, exactly as ComfyUI lists it (`loras/style/x.safetensors`; `/` or `\` both work). Range requests resume a cut download (206). `X-Studio-SHA256` is sent only when a `<file>.sha256` sits next to the file; nothing is hashed on request.
 - `GET /manny/api/models/index?folder=<folder>`: `{"files": [{"name", "size", "mtime"}]}`.
 - Who can reach it: this PC, and the GPU machines in **Settings → GPU machines** (each host's addresses, looked up again every minute). Any other device on the network gets 403, with or without Incognito unlocked; there's no password or token. Only model folders are served (found through ComfyUI's own folder list, never `custom_nodes`), `..` and absolute names are refused, and nothing in the Incognito space is ever served even if a model path points there.
@@ -79,6 +79,7 @@ $PY tests/test_revise.py      # no overwrites, shared references, failed/lost/re
 $PY tests/test_entrypoints.py # every render entry point reaches the GPU it was asked for (--mutants: each path's target is checked)
 FETCH=1 $PY tests/test_entrypoints.py   # a Mac missing the model: every entry point x {present, downloading, failed, unavailable}
 $PY tests/test_entrypoints.py --fetch-mutants   # drop the download on each call site: exactly its entry points fail
+$PY tests/test_fit_mac.py       # comfy-mac's real fetch code against Studio's real model-share server (needs ~/code/comfy-mac)
 $PY tests/test_model_share.py # model sharing: every folder x file, Range, index, 403 for others, no escapes (no workers needed)
 ```
 `RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).
