@@ -543,7 +543,10 @@ SCENARIOS = {
     "downloading": ["downloading", "downloading", "present"],
     "failed": ["failed", "downloading", "present"],
     "unavailable": ["unavailable"],
+    "slow": ["present"],            # the first ask hangs past Studio's timeout (an HF index rebuild, a PC asleep)
+    "noroute": ["present"],         # a worker without /mac/fetch at all: 404
 }
+REFUSED = {"unavailable": UNAVAILABLE, "noroute": "can't download models"}   # what the caller must be told
 
 
 async def fake_macs(remote, labels, real_oi, sv):
@@ -587,6 +590,11 @@ async def fake_macs(remote, labels, real_oi, sv):
             return web.json_response({"label": label, "self_validated": sv, "queue_remaining": 0})
 
         async def fetch(q):
+            if st["scenario"] == "noroute":
+                return web.Response(status=404, text="404: Not Found")
+            if st["scenario"] == "slow" and not st["calls"].get("_slow"):
+                st["calls"]["_slow"] = 1
+                await asyncio.sleep(remote.FETCH_TIMEOUT * 4)
             body = await q.json()
             st["fetches"].append((label, [f.get("value") for f in body.get("files") or []]))
             out = []
@@ -679,6 +687,7 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
     remote.save_workers(studio._data_dir(), fakes)
     remote._caps.clear()
     remote.FETCH_POLL = 0.05
+    remote.FETCH_TIMEOUT = 0.5
 
     async def settle(n_jobs, timeout=60):
         t0 = time.time()
@@ -724,22 +733,22 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
                         pack = mod.split(".", 1)[1].split(".")[0]
                         check(f"copy ComfyUI/custom_nodes/{pack}" in text, f"{tag} the refusal says to copy {pack} for {c}")
                 continue
-            check(bool(fetches) and all(lab == w["label"] for lab, _ in fetches), f"{tag} asked {w['label']}'s /mac/fetch ({len(fetches)} calls)")
+            check(scen == "noroute" or (bool(fetches) and all(lab == w["label"] for lab, _ in fetches)), f"{tag} asked {w['label']}'s /mac/fetch ({len(fetches)} calls)")
             check(all(not p["refused_then"] for p in posts), f"{tag} no /prompt while the gate still refused: {[p['refused_then'][:1] for p in posts if p['refused_then']]}")
-            if scen == "unavailable":
+            if scen in REFUSED:
                 text = " ".join(said[n_said:]) + json.dumps([{k2: v for k2, v in j.items() if k2 in ("error", "stage")} for j in studio._jobs.values()], default=str) \
                     + json.dumps([j.get("error") for j in remote.JOBS.values()], default=str)
                 async with aiohttp.ClientSession() as s:
                     async with s.get(base + "/manny/api/schedule") as r:
                         text += await r.text()
                 check(not posts, f"{tag} nothing queued on the Mac ({len(posts)})")
-                check(UNAVAILABLE in text, f"{tag} the Mac's reason reaches the caller")
+                check(REFUSED[scen] in text, f"{tag} the reason reaches the caller ({REFUSED[scen]!r})")
             else:
                 done = [j for j in jobs if j["status"] == "done" and j["outputs"]]
                 check(len(posts) == 1 and len(jobs) == 1 and posts[0]["prompt_id"] == jobs[0]["prompt_id"] and posts[0]["worker"] == w["label"],
                       f"{tag} queued once on {w['label']} under the id it got at once: posts {[(p['worker'], p['prompt_id']) for p in posts]} jobs {[j['prompt_id'] for j in jobs]}")
                 check(len(done) == 1, f"{tag} rendered and came back: {[(j['status'], j.get('error')) for j in jobs]}")
-                want = {"present": 1, "downloading": 3, "failed": 3}[scen]
+                want = {"present": 1, "downloading": 3, "failed": 3, "slow": 1}[scen]
                 check(len(fetches) >= want, f"{tag} kept asking until present ({len(fetches)} /mac/fetch calls, >= {want})")
 
     # "Any free GPU" never downloads: it takes a machine that can run it now (here: this PC)

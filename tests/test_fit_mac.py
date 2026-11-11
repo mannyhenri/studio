@@ -10,6 +10,8 @@ source "pc", the download is byte-identical, and a cut download resumes. A Mac t
 machines gets the Mac's "refused" reason; a file the PC lacks gets "not on Hugging Face and not on the Studio PC".
 /mac/fetch replies (C3): every status the Mac can send is one Studio handles, and Studio reads only keys the Mac sends.
 Missing-node refusals (C11): Studio's name_packs names the same pack as comfy-mac's WAITING map for every class.
+Subfolder spelling (C13): a file the PC lists as "Civitai\\x" and the Mac as "Civitai/x" passes the gate and reaches the
+Mac in its spelling, for every downloaded file and every subfolder name in the PC's live model lists.
 """
 import ast, asyncio, importlib.util, json, os, re, socket, sys, tempfile, time, types
 
@@ -138,6 +140,58 @@ async def main():
         again = await asyncio.to_thread(mac_fetch.plan_file, ct, inp, name, folder, {}, dirs, 10 ** 13, 0, head)
         statuses.add(again["status"])
         check(again["status"] == "present", f"C9 once downloaded, the Mac answers present: {again['status']}")
+
+    # C13: after the download, a job naming the file the way the Windows PC lists it ("\\") passes the gate against the
+    # Mac's own listing ("/") and reaches the Mac in the Mac's spelling (ComfyUI there validates exact names too)
+    mac_lists = {f: sorted(os.path.relpath(os.path.join(dp, n), dirs[f]) for dp, _d, ns in os.walk(dirs[f]) for n in ns if not n.endswith(".part"))
+                 for f in FOLDERS}
+    pc_lists = {f: fp.get_filename_list(f) for f in FOLDERS}
+    posted = []
+    wapp = web.Application()
+
+    async def w_oi(q):
+        return web.json_response(mac_oi)
+
+    async def w_prompt(q):
+        b = await q.json()
+        posted.append(b["prompt"])
+        return web.json_response({"error": "recorded"}, status=400)
+    wapp.router.add_get("/object_info", w_oi)
+    wapp.router.add_get("/mac/info", lambda q: web.json_response({"self_validated": {}}))
+    wapp.router.add_post("/prompt", w_prompt)
+    wr = web.AppRunner(wapp)
+    await wr.setup()
+    wsite = web.TCPSite(wr, "127.0.0.1", 0)
+    await wsite.start()
+    fake_mac = {"label": "fit-mac", "host": "127.0.0.1", "port": wsite._server.sockets[0].getsockname()[1]}
+    for folder, name, (ct, inp) in FILES:
+        pc_name = next(n for n in pc_lists[folder] if n.replace("\\", "/") == name.replace("\\", "/"))
+        mac_name = next(n for n in mac_lists[folder] if n == name.replace("\\", "/"))
+        mac_oi = {ct: {"input": {"required": {inp: [mac_lists[folder], {}]}}}}
+        api = {"1": {"class_type": ct, "inputs": {inp: pc_name}}}
+        why = remote.gate(api, mac_oi, {})
+        n = len(posted)
+        remote._caps.pop("fit-mac", None)
+        try:
+            await remote.submit(fake_mac, json.loads(json.dumps(api)), {"client_id": "fit"}, studio._dirs())
+        except Exception:
+            pass        # the fake worker answers 400 once it has recorded the prompt
+        sent = posted[n]["1"]["inputs"][inp] if len(posted) > n else None
+        check(not why and sent == mac_name, f"C13 {folder}/{pc_name!r}: gate {[x['reason'] for x in why] or 'ok'}, the Mac gets {sent!r} (lists {mac_name!r})")
+    # and every subfolder name in the PC's live model lists, against the same names spelled the Mac's way
+    live = {}
+    try:
+        import urllib.request
+        for ct, inp in (("LoraLoader", "lora_name"), ("CheckpointLoaderSimple", "ckpt_name"), ("UNETLoader", "unet_name"), ("VAELoader", "vae_name")):
+            spec = json.load(urllib.request.urlopen(f"{os.environ.get('PC_URL', 'http://desktop-mggcgsg.local:8188')}/object_info/{ct}", timeout=30))[ct]["input"]["required"][inp]
+            live[(ct, inp)] = [o for o in remote.combo(spec)[0] if "\\" in o]
+    except Exception as e:
+        print(f"NOTE the PC's ComfyUI isn't reachable ({e}): live subfolder names not checked")
+    for (ct, inp), names in live.items():
+        mac_oi = {ct: {"input": {"required": {inp: [[x.replace("\\", "/") for x in names], {}]}}}}
+        bad = [x for x in names if remote.gate({"1": {"class_type": ct, "inputs": {inp: x}}}, mac_oi, {})]
+        check(not bad, f"C13 every {ct}.{inp} subfolder name on the PC ({len(names)}) passes against the Mac's spelling: {bad[:3]}")
+    await wr.cleanup()
 
     # a file the PC doesn't have, and a Mac that isn't one of Studio's GPU machines
     p = await asyncio.to_thread(mac_fetch.plan_file, "LoraLoaderModelOnly", "lora_name", "nowhere.safetensors", "loras", {}, dirs, 10 ** 13, 0, head)
