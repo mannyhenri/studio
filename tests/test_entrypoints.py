@@ -24,7 +24,7 @@ FETCH = os.environ.get("FETCH") == "1"
 WORKERS = [{"label": "mac-vega-a", "host": "127.0.0.1", "port": 8188}, {"label": "mac-vega-b", "host": "127.0.0.1", "port": 8189}]
 APP = "Studio - Remove background.app.json"
 MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp", "keyframes", "paint3d", "mcp:keyframes",
-           "video:fix-part", "video:fix-face", "video:extend", "video:keyframes", "mcp:fix-video", "mcp:extend-video", "mcp:keyframe-shot"]
+           "video:fix-part", "video:fix-face", "video:extend", "video:extend-h3", "video:keyframes", "mcp:fix-video", "mcp:extend-video", "mcp:keyframe-shot"]
 if os.environ.get("MEMBERS"):      # LIVE=1 MEMBERS=keyframes,paint3d: only those paths
     MEMBERS = [m for m in MEMBERS if m in os.environ["MEMBERS"].split(",")]
 VIDEO = [m for m in MEMBERS if "video" in m or m == "mcp:keyframe-shot"]
@@ -32,7 +32,7 @@ VIDEO = [m for m in MEMBERS if "video" in m or m == "mcp:keyframe-shot"]
 # the mutations used by --mutants: (member, file, original, replacement) — each removes that path's target.
 # Scheduled renders and MCP go through /manny/api/run, so breaking manny_run must break them too.
 VIA_RUN = {"manny_run": {"manny_run", "schedule", "mcp"}, "keyframes": {"keyframes", "mcp:keyframes"},    # MCP keyframes calls the keyframes route
-           "video:fix": {"video:fix-part", "video:fix-face", "mcp:fix-video"}, "video:extend": {"video:extend", "mcp:extend-video"},
+           "video:fix": {"video:fix-part", "video:fix-face", "mcp:fix-video"}, "video:extend": {"video:extend", "video:extend-h3", "mcp:extend-video"},
            "video:keyframes": {"video:keyframes", "mcp:keyframe-shot"}, "mcp:video": {"mcp:fix-video", "mcp:extend-video"}}
 MUTANTS = [
     ("manny_run", "__init__.py", 'target = body.get("target") or _remote.LOCAL', "target = _remote.LOCAL"),
@@ -318,8 +318,9 @@ async def main():
                     await post(s, "/manny/api/video/fix", dict(clip, start=0.2, end=1.0, mode="picture", prompt="rain", target=label))
                 elif member == "video:fix-face":
                     await post(s, "/manny/api/video/fix", dict(clip, start=0.2, end=1.0, mode="face", target=label))
-                elif member == "video:extend":
-                    await post(s, "/manny/api/video/extend", dict(clip, prompt="he walks on", seconds=5, target=label))
+                elif member in ("video:extend", "video:extend-h3"):      # LTX is the default engine; H3 on request
+                    await post(s, "/manny/api/video/extend", dict(clip, prompt="he walks on", seconds=5, target=label,
+                                                                  **({"engine": "h3"} if member.endswith("h3") else {})))
                 elif member == "video:keyframes":
                     await post(s, "/manny/api/video/keyframes", {"keys": [{"image": "ref_couture_model.png", "at": 0}, {"image": "ref_couture_model.png", "at": 3}],
                                                                  "prompt": "a slow push in", "seconds": 5, "target": label})
@@ -405,7 +406,7 @@ async def main():
             picked.append({n.get("class_type") for n in api.values()})
             return win, {}
         remote.pick = fake_pick
-        for member in ("video:fix-part", "video:fix-face", "video:extend", "video:keyframes"):
+        for member in ("video:fix-part", "video:fix-face", "video:extend", "video:extend-h3", "video:keyframes"):
             n, lp, nf, npk = len(reached), len(local_posts), len(freed), len(picked)
             await drive(member, "auto")
             for _ in range(100):
