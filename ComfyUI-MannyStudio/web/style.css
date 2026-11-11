@@ -621,3 +621,19 @@ details.fold .lorasec .lblrow{justify-content:flex-end}
 .toolrow.hidden{display:none}
 .selecting .tile .badge.v{margin-left:30px}
 .gup{margin:10px 0 12px}.gup p{margin:6px 0}.gup .ok{color:#5fd38d}.gup .warn{color:#ff8a65}.gup .row{margin-top:8px;gap:8px}
+
+/* video tools */
+.vfix video{width:100%;max-height:44vh;border-radius:12px;background:#000}
+.vrange{display:flex;flex-direction:column;gap:8px}
+.vbar{position:relative;height:18px;border-radius:9px;background:rgba(255,255,255,.08);cursor:pointer}
+.vsel{position:absolute;top:0;bottom:0;background:linear-gradient(90deg,#ff6a2b,#ff9a3c);border-radius:9px;opacity:.85}
+.vhead{position:absolute;top:-3px;bottom:-3px;width:2px;background:#fff;box-shadow:0 0 4px #000}
+.vmarks{gap:8px;flex-wrap:wrap;align-items:center}.vtimes{flex:1;text-align:center;font-variant-numeric:tabular-nums;color:var(--muted);font-size:13px}
+.vref{gap:14px;align-items:center}
+.dialog .ref{width:110px;height:110px;flex:none}
+.kfbtn{align-self:flex-start;margin-bottom:6px}
+.kfkeys{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px}
+.kfk{position:relative;width:118px;display:flex;flex-direction:column;gap:6px}
+.kfk img{width:118px;height:80px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
+.kfk .kft{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)}.kfk .kft input{width:56px;padding:4px 6px}
+.kfk .icon{position:absolute;top:4px;right:4px;width:24px;height:24px;font-size:12px;background:rgba(0,0,0,.6)}

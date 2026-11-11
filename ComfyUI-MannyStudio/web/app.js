@@ -145,6 +145,7 @@ function route() {
   const [, page = "home", arg] = location.hash.split("/");
   $$("#nav a, #bnav a").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   const main = $("#main"); main.innerHTML = "";
+  const md = $("#modal"); if (md && !md.classList.contains("hidden") && !md.querySelector(".lbox,.lb")) { md.classList.add("hidden"); md.innerHTML = ""; }
   (pages[page] || pageHome)(main, arg);
   main.scrollTop = 0; window.scrollTo(0, 0);
 }
@@ -238,6 +239,11 @@ function renderForm(form, app) {
   form.innerHTML = "";
   const set = (key, val) => { v[key] = val; saveState(); };
 
+  if (app.kind === "video" && !isFixer(app)) {
+    const kb = h(`<button class="ghost kfbtn">✦ Keyframe shot · several pictures → one shot</button>`);
+    kb.onclick = () => keyframeDialog();
+    form.append(kb);
+  }
   // character + prompt
   const sec = h(`<div class="fsec prompt-box"></div>`);
   if (S.chars.length) {
@@ -854,7 +860,9 @@ function lightbox(it, list) {
        <button class="btn" data-to="image:image">▣ Use as reference</button>` : `
        <button class="btn" data-to="smooth motion:video">≋ Smooth motion</button>
        <button class="btn" data-to="upscale video:video">⤢ Upscale to 1080p</button>
-       <button class="btn hidden" data-tz>✦ Topaz Video</button>`}
+       <button class="btn hidden" data-tz>✦ Topaz Video</button>
+       <button class="btn" data-vfix>🩹 Fix a part / a face</button>
+       <button class="btn" data-vext>⏭ Continue this shot</button>`}
      </div>
      <button class="ghost" data-board>＋ Add to storyboard${cur.kind === "image" ? " (as first frame)" : ""}</button>
      <div class="row"><a class="ghost" href="${url}" download="${esc(cur.filename)}">Download</a><button class="ghost danger" data-trash>Move to trash</button></div>
@@ -891,6 +899,9 @@ function lightbox(it, list) {
       close(); openApp(k); toast("Added to " + appShort(S.apps[k]));
     });
     $("[data-x]", side).onclick = close;
+    const vfb = $("[data-vfix]", side), veb = $("[data-vext]", side);
+    if (vfb) vfb.onclick = () => { const v = $("video", box); videoFixDialog(cur, meta && meta.prompt, v ? v.currentTime : 0); };
+    if (veb) veb.onclick = () => videoExtendDialog(cur, meta && meta.prompt);
     const tzb = $("[data-tz]", side);
     if (tzb) topaz().then(t => {
       const kind = cur.kind === "video" ? "video" : "image";
@@ -1334,6 +1345,150 @@ async function topazDialog(cur) {
       const r = await post("/manny/api/topaz/" + kind, { filename: cur.filename, subfolder: cur.subfolder || "", private: !!cur.private, size: st.size === "keep" ? "" : st.size, fps: st.fps, model: st.model });
       tzJobs.push({ id: r.id, label: cur.filename, stage: "Starting" }); close(); toast("Upscaling with Topaz…"); tzPoll();
     } catch (e) { toast("Couldn't start: " + e.message.slice(0, 200), true); }
+  };
+}
+
+/* ---- video tools: fix a part (H3 retake), fix a face (H3 face refine), continue a shot (H3 motion context) */
+function fmtT(t) { t = Math.max(0, +t || 0); return Math.floor(t / 60) + ":" + (t % 60).toFixed(1).padStart(4, "0"); }
+async function videoJob(path, body, label, after) {
+  const r = await post(path, body);
+  toast(label + " started. It shows in the queue; the result opens when it's done.");
+  const j = await pollJob(r.id);
+  toast(label + " done: " + j.filename);
+  if (after) after(j);
+  const items = await loadGallery(true); const it = items.find(x => x.filename === j.filename);
+  if (it) lightbox(it, [it]);
+}
+function videoFixDialog(cur, prompt, at) {
+  if (cur.private) return toast("Video fixes don't work on Incognito videos yet", true);
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const url = itemUrl(cur);
+  const st = { start: Math.max(0, (at || 0) - 1), end: (at || 0) + 1, mode: "picture", ref: "", denoise: 0.4 };
+  const d = h(`<div class="dialog vfix"><div class="row" style="justify-content:space-between"><h2>🩹 Fix a part of this video</h2><button class="icon" data-x>✕</button></div>
+    <video src="${url}" controls playsinline preload="auto"></video>
+    <div class="vrange"><div class="vbar"><div class="vsel"></div><div class="vhead"></div></div>
+      <div class="row vmarks"><button class="btn sm" data-a>⇤ Start here</button><span class="vtimes"></span><button class="btn sm" data-b>End here ⇥</button><button class="ghost sm" data-play>▶ Play the marked part</button></div></div>
+    <div><label class="lbl">What to fix</label><div class="chips" id="vmode">
+      <div class="chip" data-v="picture" title="Re-draw the picture in the marked seconds; the sound stays as it is">Picture only (keep the sound)</div>
+      <div class="chip" data-v="redo" title="Re-do picture and sound in the marked seconds">Picture + sound</div>
+      <div class="chip" data-v="face" title="Find the face and re-draw only it, frame by frame, with a light touch">Fix the face</div></div></div>
+    <div><label class="lbl" id="vplbl">What should happen in the marked part</label><textarea id="vprompt" rows="3"></textarea></div>
+    <div class="row vref"><div class="ref" id="vrefbox" title="A clear picture of the person's face (optional, helps keep them the same)"><span class="plus">+</span><span class="rl">Face picture<br><small>optional</small></span><input type="file" accept="image/*" hidden></div>
+      <div class="vden hidden" style="flex:1"><label class="lbl">How much to change the face <b id="vdenv"></b></label><input type="range" min="0.2" max="0.7" step="0.05" id="vden"></div></div>
+    <p class="hint" id="vhint" style="margin:0"></p>
+    <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Fix it</button></div></div>`);
+  m.append(d);
+  const v = $("video", d), sel = $(".vsel", d), head = $(".vhead", d);
+  const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
+  $$("[data-x]", d).forEach(x => x.onclick = close);
+  $("#vprompt", d).value = prompt || "";
+  const draw = () => {
+    const D = v.duration || 1; st.end = Math.min(st.end, D); if (st.end - st.start < 0.3) st.end = Math.min(D, st.start + 0.3);
+    sel.style.left = (st.start / D * 100) + "%"; sel.style.width = ((st.end - st.start) / D * 100) + "%";
+    $(".vtimes", d).textContent = `${fmtT(st.start)} → ${fmtT(st.end)}  (${(st.end - st.start).toFixed(1)} s)`;
+    const face = st.mode === "face";
+    $$("#vmode .chip", d).forEach(c => c.classList.toggle("on", c.dataset.v === st.mode));
+    $(".vden", d).classList.toggle("hidden", !face);
+    $("#vden", d).value = st.denoise; $("#vdenv", d).textContent = st.denoise.toFixed(2);
+    $("#vplbl", d).textContent = face ? "Describe the person (helps the face come out right)" : "What should happen in the marked part";
+    $("#vhint", d).textContent = face
+      ? "Tracks the biggest face in the marked part and re-draws only the face, then blends it back. Lower = closer to the original, higher = more re-drawn. ~1–3 min per second of video on this PC."
+      : "Only the marked seconds are re-made; 2 s on each side are used so it blends in, and everything else stays exactly as it was. ~2–4 min per second on this PC.";
+  };
+  v.onloadedmetadata = () => { if (st.end > v.duration) { st.end = v.duration; st.start = Math.max(0, st.end - 2); } v.currentTime = st.start; draw(); };
+  v.ontimeupdate = () => { head.style.left = (v.currentTime / (v.duration || 1) * 100) + "%"; if (v.dataset.loop && v.currentTime >= st.end) { v.pause(); delete v.dataset.loop; } };
+  $(".vbar", d).onclick = e => { const r = e.currentTarget.getBoundingClientRect(); v.currentTime = (e.clientX - r.left) / r.width * (v.duration || 0); };
+  $("[data-a]", d).onclick = () => { st.start = v.currentTime; if (st.end <= st.start + 0.3) st.end = Math.min(v.duration, st.start + 2); draw(); };
+  $("[data-b]", d).onclick = () => { st.end = v.currentTime; if (st.start >= st.end - 0.3) st.start = Math.max(0, st.end - 2); draw(); };
+  $("[data-play]", d).onclick = () => { v.currentTime = st.start; v.dataset.loop = "1"; v.play(); };
+  $$("#vmode .chip", d).forEach(c => c.onclick = () => { st.mode = c.dataset.v; draw(); });
+  $("#vden", d).oninput = e => { st.denoise = +e.target.value; $("#vdenv", d).textContent = st.denoise.toFixed(2); };
+  const rb = $("#vrefbox", d), rf = $("input", rb);
+  rb.onclick = () => rf.click();
+  rf.onchange = async () => { if (!rf.files[0]) return; try { st.ref = await upload(rf.files[0]); rb.classList.add("on"); rb.innerHTML = `<img src="${inputUrl(st.ref)}"><span class="rl">Face picture</span>`; } catch (e) { toast(e.message, true); } };
+  $("[data-go]", d).onclick = async () => {
+    const body = { filename: cur.filename, subfolder: cur.subfolder || "", start: +st.start.toFixed(2), end: +st.end.toFixed(2), mode: st.mode,
+      prompt: $("#vprompt", d).value.trim(), ref: st.ref, denoise: st.denoise };
+    if (st.mode !== "face" && !body.prompt) return toast("Say what should happen in the marked part", true);
+    close();
+    try { await videoJob("/manny/api/video/fix", body, st.mode === "face" ? "Face fix" : "Fix"); } catch (e) { toast(e.message.slice(0, 260), true); }
+  };
+}
+function videoExtendDialog(cur, prompt) {
+  if (cur.private) return toast("Continuing Incognito videos isn't supported yet", true);
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const st = { seconds: 7, ref: "" };
+  const d = h(`<div class="dialog"><div class="row" style="justify-content:space-between"><h2>⏭ Continue this shot</h2><button class="icon" data-x>✕</button></div>
+    <p class="hint" style="margin:0">MiniMax H3 reads the last second of motion and sound and keeps going, then the new part is joined on. The result is a new, longer video; the original stays.</p>
+    <div><label class="lbl">What happens next</label><textarea id="xprompt" rows="4" placeholder="She keeps walking toward the camera, then stops and looks over her shoulder…"></textarea></div>
+    <div><label class="lbl">How much longer</label><div class="chips" id="xsec">${[5, 7, 9, 11].map(x => `<div class="chip" data-v="${x}">+${x} s</div>`).join("")}</div></div>
+    <div class="row"><div class="ref" id="xref" title="Optional: a picture of the character, to keep them the same"><span class="plus">+</span><span class="rl">Character picture<br><small>optional</small></span><input type="file" accept="image/*" hidden></div>
+      <p class="hint" style="flex:1;margin:0">Without a picture, the clip's last frame is used to keep the look. ~10–25 min on this PC.</p></div>
+    <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Continue</button></div></div>`);
+  m.append(d);
+  const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
+  $$("[data-x]", d).forEach(x => x.onclick = close);
+  $("#xprompt", d).value = prompt || "";
+  const chips = () => $$("#xsec .chip", d).forEach(c => { c.classList.toggle("on", +c.dataset.v === st.seconds); c.onclick = () => { st.seconds = +c.dataset.v; chips(); }; });
+  chips();
+  const rb = $("#xref", d), rf = $("input", rb);
+  rb.onclick = () => rf.click();
+  rf.onchange = async () => { if (!rf.files[0]) return; try { st.ref = await upload(rf.files[0]); rb.classList.add("on"); rb.innerHTML = `<img src="${inputUrl(st.ref)}"><span class="rl">Character</span>`; } catch (e) { toast(e.message, true); } };
+  $("[data-go]", d).onclick = async () => {
+    const pr = $("#xprompt", d).value.trim(); if (!pr) return toast("Say what happens next", true);
+    close();
+    try { await videoJob("/manny/api/video/extend", { filename: cur.filename, subfolder: cur.subfolder || "", prompt: pr, seconds: st.seconds, ref: st.ref }, "Continue shot"); }
+    catch (e) { toast(e.message.slice(0, 260), true); }
+  };
+}
+
+/* ---- keyframe shot: pictures pinned at chosen seconds, LTX-2.5 (two passes) or MiniMax H3 */
+function keyframeDialog() {
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const st = store.get("kf", { engine: "ltx", seconds: 8, aspect: "16:9", keys: [], prompt: "" });
+  const AS = { "16:9": [1280, 704], "9:16": [704, 1280], "1:1": [960, 960], "21:9": [1344, 576] };
+  const d = h(`<div class="dialog kfd"><div class="row" style="justify-content:space-between"><h2>✦ Keyframe shot</h2><button class="icon" data-x>✕</button></div>
+    <p class="hint" style="margin:0">Give 2 or more pictures and when each should appear. The model moves between them in one continuous shot. Pictures that could plausibly be the same scene give a smooth move; very different ones give a cut.</p>
+    <div><label class="lbl">Engine</label><div class="chips" id="kfe"><div class="chip" data-v="ltx">LTX-2.5 (up to 8 pictures, sharp 2-pass)</div><div class="chip" data-v="h3">MiniMax H3 (up to 6, with sound)</div></div></div>
+    <div><label class="lbl">Pictures and when they appear</label><div class="kfkeys"></div><button class="ghost" data-add>＋ Add a picture</button><input type="file" accept="image/*" multiple hidden></div>
+    <div><label class="lbl">The shot</label><textarea id="kfp" rows="4" placeholder="Photoreal music video, a woman walks down an endless mirrored corridor, slow dolly forward…"></textarea></div>
+    <div class="row" style="gap:18px;flex-wrap:wrap"><div><label class="lbl">Length</label><div class="chips" id="kfs">${[5, 8, 10, 12, 15].map(x => `<div class="chip" data-v="${x}">${x} s</div>`).join("")}</div></div>
+      <div><label class="lbl">Shape</label><div class="chips" id="kfa">${Object.keys(AS).map(x => `<div class="chip" data-v="${x}">${x}</div>`).join("")}</div></div></div>
+    <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Render the shot</button></div></div>`);
+  m.append(d);
+  const close = () => { store.set("kf", st); m.classList.add("hidden"); m.innerHTML = ""; };
+  $$("[data-x]", d).forEach(x => x.onclick = close);
+  $("#kfp", d).value = st.prompt || ""; $("#kfp", d).oninput = e => st.prompt = e.target.value;
+  const chips = (id, key, num) => $$(`#${id} .chip`, d).forEach(c => { c.classList.toggle("on", String(st[key]) === c.dataset.v); c.onclick = () => { st[key] = num ? +c.dataset.v : c.dataset.v; chips(id, key, num); draw(); }; });
+  const draw = () => {
+    const box = $(".kfkeys", d); box.innerHTML = "";
+    st.keys.sort((a, b) => a.at - b.at);
+    st.keys.forEach((k, n) => {
+      const el = h(`<div class="kfk"><img src="${inputUrl(k.image)}"><div class="kft"><label>${n === 0 ? "Start" : "at"}</label><input type="number" min="0" max="${st.seconds}" step="0.5" value="${n === 0 ? 0 : k.at}" ${n === 0 ? "disabled" : ""}><span>s</span></div><button class="icon" title="Remove">✕</button></div>`);
+      $("input", el).onchange = e => { k.at = Math.max(0.5, Math.min(st.seconds, +e.target.value || 0)); draw(); };
+      $("button", el).onclick = () => { st.keys.splice(n, 1); draw(); };
+      box.append(el);
+    });
+    const max = st.engine === "h3" ? 6 : 8;
+    $("[data-add]", d).classList.toggle("hidden", st.keys.length >= max);
+  };
+  const fi = $("input[type=file]", d);
+  $("[data-add]", d).onclick = () => fi.click();
+  fi.onchange = async () => {
+    for (const f of [...fi.files]) {
+      try { const val = await upload(f); const last = st.keys.length ? Math.max(...st.keys.map(k => k.at)) : -1; st.keys.push({ image: val, at: last < 0 ? 0 : Math.min(st.seconds, last + Math.max(1, st.seconds / 4)) }); }
+      catch (e) { toast(e.message, true); }
+    }
+    fi.value = ""; draw();
+  };
+  chips("kfe", "engine"); chips("kfs", "seconds", true); chips("kfa", "aspect"); draw();
+  $("[data-go]", d).onclick = async () => {
+    if (st.keys.length < 2) return toast("Add at least two pictures", true);
+    if (!(st.prompt || "").trim()) return toast("Describe the shot", true);
+    const [w, hh] = AS[st.aspect] || AS["16:9"];
+    const body = { engine: st.engine, keys: st.keys.map((k, n) => ({ image: k.image, at: n === 0 ? 0 : k.at })), prompt: st.prompt.trim(), seconds: st.seconds, width: w, height: hh };
+    close();
+    try { await videoJob("/manny/api/video/keyframes", body, "Keyframe shot"); } catch (e) { toast(e.message.slice(0, 260), true); }
   };
 }
 

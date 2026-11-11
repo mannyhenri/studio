@@ -466,6 +466,16 @@ TOOLS += [
      "inputSchema": {"type": "object", "properties": {"text": S_, "voice": {"type": "string", "description": "5-15 s recording to copy (path)"}, "emotion": N_, "name": S_, "private": B_}, "required": ["text"]}},
     {"name": "studio_upscale_video", "description": "Upscale a video and/or raise its frame rate with Topaz Video (on this PC). Give a path, or filename+subfolder from the gallery.",
      "inputSchema": {"type": "object", "properties": {"path": S_, "filename": S_, "subfolder": S_, "size": {"type": "string", "enum": ["1080", "1440", "4k", ""]}, "fps": {"type": "string", "enum": ["keep", "48", "60"]}, "private": B_}}},
+    {"name": "studio_fix_video", "description": "Fix part of a video. mode 'picture' re-draws the marked seconds and keeps the sound, 'redo' re-makes picture and sound, 'sound' keeps the picture, 'face' re-details the face in the marked seconds (give a face picture as ref for identity). Only the marked part changes; the result is a new file in Videos/Fixed. Give a path, or filename+subfolder from the gallery. Waits (several minutes per second of video).",
+     "inputSchema": {"type": "object", "properties": {"path": S_, "filename": S_, "subfolder": S_, "start": N_, "end": N_, "mode": {"type": "string", "enum": ["picture", "redo", "sound", "face"]},
+                                                      "prompt": {"type": "string", "description": "what should happen in the marked part (for 'face': describe the person)"}, "ref": {"type": "string", "description": "face/character picture (local path)"},
+                                                      "denoise": {"type": "number", "description": "face only: 0.2 (light) - 0.7 (strong), default 0.4"}, "seed": N_}, "required": ["start", "end", "mode"]}},
+    {"name": "studio_extend_video", "description": "Continue a shot with MiniMax H3 motion context: the clip's last second of motion and sound carries into the new part, which is joined on. Result: a new, longer video in Videos/Extended. Waits.",
+     "inputSchema": {"type": "object", "properties": {"path": S_, "filename": S_, "subfolder": S_, "prompt": {"type": "string", "description": "what happens next"},
+                                                      "seconds": {"type": "integer", "enum": [5, 7, 9, 11]}, "ref": {"type": "string", "description": "character picture (local path), optional"}, "seed": N_}, "required": ["prompt"]}},
+    {"name": "studio_keyframe_shot", "description": "One continuous shot through several pictures at chosen times. engine 'ltx' (LTX-2.5, two passes, up to 8 pictures) or 'h3' (MiniMax H3 with sound, up to 6). keys: [{image: local path, at: seconds}], the first at 0. Waits.",
+     "inputSchema": {"type": "object", "properties": {"engine": {"type": "string", "enum": ["ltx", "h3"]}, "keys": {"type": "array", "items": {"type": "object"}}, "prompt": S_,
+                                                      "seconds": N_, "aspect": {"type": "string", "enum": ["16:9", "9:16", "1:1", "21:9"]}, "seed": N_}, "required": ["keys", "prompt"]}},
     {"name": "studio_poses", "description": "Pose packs on this PC (stick-figure pictures for the 'pose' option of studio_generate), and whether the pose ControlNets are installed.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "studio_models", "description": "What's installed: LoRAs (with the model they're for) and finetunes ('styles') of each model.",
@@ -610,6 +620,32 @@ def call(name, a):
             f = {"filename": info["filename"], "subfolder": info["subfolder"]}
         r = http("POST", "/manny/api/topaz/video", dict(f, size=a.get("size", "1080"), fps=a.get("fps", "keep"), private=a.get("private")))
         res = job_wait(r["id"], 3600)
+        return [{"type": "text", "text": json.dumps(dict(res, path=abs_out(res)), indent=1)}]
+    if name in ("studio_fix_video", "studio_extend_video"):
+        f = {"filename": a.get("filename"), "subfolder": a.get("subfolder", "")}
+        if a.get("path"):
+            info = http("POST", "/manny/api/import", {"path": a["path"]})
+            f = {"filename": info["filename"], "subfolder": info["subfolder"]}
+        if not f["filename"]:
+            raise ValueError("Give path, or filename + subfolder")
+        body = dict(f, prompt=a.get("prompt", ""), seed=a.get("seed"))
+        if a.get("ref"):
+            body["ref"] = as_input(a["ref"])
+        if name == "studio_fix_video":
+            body.update(start=a["start"], end=a["end"], mode=a["mode"], denoise=a.get("denoise", 0.4))
+            r = http("POST", "/manny/api/video/fix", body)
+        else:
+            body.update(seconds=a.get("seconds", 7))
+            r = http("POST", "/manny/api/video/extend", body)
+        res = job_wait(r["id"], 4 * 3600)
+        return [{"type": "text", "text": json.dumps(dict(res, path=abs_out(res)), indent=1)}]
+    if name == "studio_keyframe_shot":
+        sizes = {"16:9": (1280, 704), "9:16": (704, 1280), "1:1": (960, 960), "21:9": (1344, 576)}
+        w, h = sizes.get(a.get("aspect") or "16:9")
+        keys = [{"image": as_input(k["image"]), "at": float(k.get("at") or 0)} for k in a["keys"]]
+        r = http("POST", "/manny/api/video/keyframes", {"engine": a.get("engine", "ltx"), "keys": keys, "prompt": a["prompt"],
+                                                       "seconds": a.get("seconds") or max(5, max(k["at"] for k in keys)), "width": w, "height": h, "seed": a.get("seed")})
+        res = job_wait(r["id"], 4 * 3600)
         return [{"type": "text", "text": json.dumps(dict(res, path=abs_out(res)), indent=1)}]
     if name == "studio_poses":
         d = http("GET", "/manny/api/poses")
