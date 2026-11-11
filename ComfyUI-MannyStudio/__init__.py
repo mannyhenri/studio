@@ -23,7 +23,7 @@ from . import auth
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-VERSION = "1.18.0"
+VERSION = "1.19.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -2553,6 +2553,10 @@ _pipeline.setup(globals())
 # ---------------------------------------------------------------- poses (OpenPose ControlNet for checkpoints)
 from . import poses as _poses  # noqa: E402
 _poses.setup(globals())
+
+# ---------------------------------------------------------------- video tools: fix a part, fix a face, continue, keyframes
+from . import videotools as _videotools  # noqa: E402
+_videotools.setup(globals())
 
 
 try:   # carry on with Civitai downloads that a restart interrupted
