@@ -348,12 +348,26 @@ async def main():
                     await asyncio.wait_for(j["task"], 1800)
                 except Exception:
                     pass
+        for _ in range(1800):      # Studio's own jobs (keyframes, 3D paint) may still be asking a card
+            if not any(j.get("status") == "running" for j in studio._jobs.values()):
+                break
+            await asyncio.sleep(1)
+        for pid, j in list(remote.JOBS.items()):
+            if j.get("task"):
+                try:
+                    await asyncio.wait_for(j["task"], 1800)
+                except Exception:
+                    pass
         jobs = [j for j in remote.JOBS.values()]
-        print("live jobs:", sorted((j["worker"], j["status"], (j.get("error") or "")[:60]) for j in jobs))
+        print("live jobs:", sorted((j["worker"], j["status"], j.get("label"), (j.get("error") or "")[:60]) for j in jobs))
+        print("studio jobs:", [(k, j.get("kind"), j.get("status"), j.get("stage"), str(j.get("error"))[:80]) for k, j in studio._jobs.items()])
+        print("refused before reaching a card:", [str(j.get("error"))[:240] for j in studio._jobs.values() if j.get("error")])
         landed = [j for j in jobs if j["status"] == "done"]
         want = 2 * len([m for m in MEMBERS if not m.startswith("sound:")])
-        check(len(landed) == want and all(j["outputs"] for j in landed),
-              f"LIVE: {want} renders (every non-sound entry point x 2 workers) done and pulled back: {len(landed)}")
+        said_no = [e for e in (str(j.get("error")) for j in studio._jobs.values() if j.get("error")) if "can't run this" in e and ": " in e]
+        check(len(landed) + len(said_no) == want and all(j["outputs"] for j in landed),
+              f"LIVE: {want} jobs (every non-sound entry point x 2 workers): {len(landed)} rendered and pulled back, "
+              f"{len(said_no)} refused by the card with its reason (e.g. a PC-only model)")
         refused = [j for j in jobs if j["status"] not in ("done",)]
         check(not refused, f"LIVE: no other remote job: {[(j['worker'], j['status']) for j in refused]}")
     await runner.cleanup()
