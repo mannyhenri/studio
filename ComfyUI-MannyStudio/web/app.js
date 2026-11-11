@@ -674,7 +674,9 @@ async function generate(app) {
     const res = await post("/manny/api/run", body);
     res.queued.forEach(q => S.mine[q.prompt_id] = { app: app.id, at: Date.now(), private: priv, hidden: priv && !S.incog, worker: q.worker });
     const away = res.queued.filter(q => q.worker && q.worker !== "local");
-    if (away.length) { toast(`Sent to ${[...new Set(away.map(q => q.worker))].join(", ")}`); pollRemote(); }
+    const fetching = away.filter(q => q.fetching && q.fetching.length);
+    if (fetching.length) { toast(`${fetching[0].worker} is downloading ${fetching[0].fetching.join(", ")} first; it renders once that's there`); pollRemote(); }
+    else if (away.length) { toast(`Sent to ${[...new Set(away.map(q => q.worker))].join(", ")}`); pollRemote(); }
     if (priv && !S.incog) toast("Saved privately.");
     toast(`Queued ${res.queued.length} ${app.kind === "video" ? "shot" : "picture"}${res.queued.length > 1 ? "s" : ""}`);
     if (window.matchMedia("(max-width: 760px)").matches) { const st = $(".stage"); if (st) st.scrollIntoView({ behavior: "smooth", block: "start" }); }
@@ -2957,7 +2959,7 @@ function drawQueueCard() {
   const ra = S.remote.filter(remoteActive);
   if (!run && ra.length) {  // nothing on this PC: show what the other GPUs are doing
     const r0 = ra.find(j => j.status === "running") || ra[0];
-    $("#q-dot").className = "dot run"; $("#q-title").textContent = "Rendering on " + r0.worker;
+    $("#q-dot").className = "dot run"; $("#q-title").textContent = (r0.status === "fetching" ? "Downloading on " : "Rendering on ") + r0.worker;
     $("#q-sub").textContent = `${remoteName(r0)} · ${remoteState(r0)}${ra.length > 1 ? " · " + (ra.length - 1) + " more" : ""}`;
     $("#q-bar").style.width = Math.round(r0.progress * 100) + "%";
     $("#mq-dot").className = "dot run"; $("#mq-t").textContent = `${Math.round(r0.progress * 100)}% · ${r0.worker}`;
@@ -2996,19 +2998,19 @@ function drawDrawer() {
     rem.forEach(j => {
       const live = remoteActive(j);
       const el = h(`<div class="qitem ${j.status === "running" ? "run" : ""} ${live ? "" : "done"}"><div class="row"><b>${esc(remoteName(j))}</b>${live && j.status !== "cancelling" ? `<button class="icon" title="Stop">✕</button>` : ""}</div>
-        <small>${esc(j.worker)} · ${esc(remoteState(j))}</small>${j.status === "running" ? `<div class="bar" style="margin-top:8px"><div style="width:${Math.round(j.progress * 100)}%"></div></div>` : ""}</div>`);
+        <small>${esc(j.worker)} · ${esc(remoteState(j))}</small>${["running", "fetching"].includes(j.status) ? `<div class="bar" style="margin-top:8px"><div style="width:${Math.round(j.progress * 100)}%"></div></div>` : ""}</div>`);
       const x = $("button", el);
-      if (x) x.onclick = async () => { x.disabled = true; try { await post(`/manny/api/remote_jobs/${j.prompt_id}/cancel`, {}); toast("Stopped on " + j.worker); } catch (e) { toast(e.message, true); } pollRemote(); };
+      if (x) x.onclick = async () => { x.disabled = true; try { await post(`/manny/api/remote_jobs/${j.prompt_id}/cancel`, {}); toast(j.status === "fetching" ? `Stopped. The model keeps downloading on ${j.worker}, so it's there next time` : "Stopped on " + j.worker); } catch (e) { toast(e.message, true); } pollRemote(); };
       b.append(el);
     });
   }
 }
 /* ------------------------------------------------------------ other GPU machines (remote workers) */
-const remoteActive = j => ["queued", "running", "downloading", "cancelling"].includes(j.status);
+const remoteActive = j => ["fetching", "queued", "running", "downloading", "cancelling"].includes(j.status);
 function remoteName(j) { const a = S.apps.find(x => x.id === j.app); return a ? appShort(a) : (j.label || "Job"); }
 function remoteState(j) {
-  return { queued: "Waiting", running: j.step ? `${Math.round(j.progress * 100)}% · ${j.step}` : "Rendering", downloading: "Copying to this PC",
-           cancelling: "Stopping…", done: "Done", failed: "Failed: " + (j.error || "").slice(0, 140), cancelled: "Stopped" }[j.status] || j.status;
+  return { fetching: j.step || "Downloading the model", queued: "Waiting", running: j.step ? `${Math.round(j.progress * 100)}% · ${j.step}` : "Rendering", downloading: "Copying to this PC",
+           cancelling: "Stopping…", done: "Done", failed: "Failed: " + (j.error || "").slice(0, 140), cancelled: "Stopped" + (j.note ? " · " + j.note : "") }[j.status] || j.status;
 }
 function runTarget() { return S.workers.length > 1 && (S.target === "auto" || S.workers.some(w => w.label === S.target)) ? S.target : "local"; }
 function runOptions() {

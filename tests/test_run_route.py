@@ -72,6 +72,14 @@ sys.modules["studio"] = studio
 spec.loader.exec_module(studio)
 H = _PS.instance.routes.h
 remote = sys.modules["studio.remote"]
+
+
+async def _no_downloads(w, why):
+    """This test talks to the real Mac workers: a named target that lacks a model must not start a real download
+    (test_entrypoints FETCH=1 covers downloads against fake workers). The Mac answers "unavailable" here."""
+    seen = {x["value"]: x for x in why}
+    return [{"value": v, "status": "unavailable", "reason": "downloads are off in this test"} for v in seen]
+remote._fetch = _no_downloads
 fails = []
 
 
@@ -121,7 +129,8 @@ async def main():
             r = await H[("POST", "/manny/api/run")](Req({"app": app, "target": w["label"], "client_id": "browser-1"}))
             d = json.loads(r.text)
             if why:
-                check(r.status == 409 and len(d["refused"]) == len(why) and d["worker"] == w["label"],
+                want = len({x["value"] for x in why}) if remote.fetchable(why) else len(why)    # a download refusal is one per file
+                check(r.status == 409 and len(d["refused"]) == want and d["worker"] == w["label"],
                       f"{w['label']} {app}: 409 refused ({len(d.get('refused') or [])})")
                 continue
             eligible.setdefault(app, []).append(w["label"])

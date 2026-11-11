@@ -10,6 +10,9 @@ for both workers. AI review / AI prompt help post straight to this PC's ComfyUI:
   LIVE=1 ~/code/comfy-mac/.venv/bin/python tests/test_entrypoints.py       real jobs on both Mac workers
   ~/code/comfy-mac/.venv/bin/python tests/test_entrypoints.py --mutants    drop the target on each path in
                                                                            turn: exactly that path must fail
+  FETCH=1 ~/code/comfy-mac/.venv/bin/python tests/test_entrypoints.py      a Mac missing the model: every entry point
+                                                                           x {present, downloading, failed, unavailable}
+  ~/code/comfy-mac/.venv/bin/python tests/test_entrypoints.py --fetch-mutants   drop the download on each path in turn
 Needs the workers' /object_info (127.0.0.1:8188 and :8189) to convert apps, and ffmpeg for Finish.
 """
 import asyncio, glob, importlib.util, json, os, re, shutil, subprocess, sys, tempfile, time, types
@@ -17,6 +20,7 @@ import asyncio, glob, importlib.util, json, os, re, shutil, subprocess, sys, tem
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PKG = os.environ.get("STUDIO_PKG") or os.path.join(ROOT, "ComfyUI-MannyStudio")
 LIVE = os.environ.get("LIVE") == "1"
+FETCH = os.environ.get("FETCH") == "1"
 WORKERS = [{"label": "mac-vega-a", "host": "127.0.0.1", "port": 8188}, {"label": "mac-vega-b", "host": "127.0.0.1", "port": 8189}]
 APP = "Studio - Remove background.app.json"
 MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp"]
@@ -203,11 +207,11 @@ async def main():
     # routing instrumented: record the worker every job reaches; LIVE also really sends it
     reached, real_submit = [], remote.submit
 
-    async def spy(w, api, payload_extra, dirs, private=False, incoming=".private_incoming", on_done=None):
-        reached.append({"worker": w["label"], "client_id": payload_extra.get("client_id"),
+    async def spy(w, api, payload_extra, dirs, private=False, incoming=".private_incoming", on_done=None, **kw):
+        reached.append({"worker": w["label"], "client_id": payload_extra.get("client_id"), "fetch": kw.get("fetch"),
                         "label": (payload_extra.get("extra_data") or {}).get("manny_label"), "at": time.time()})
-        if LIVE:
-            return await real_submit(w, api, payload_extra, dirs, private, incoming, on_done)
+        if LIVE or FETCH:
+            return await real_submit(w, api, payload_extra, dirs, private, incoming, on_done, **kw)
         pid = f"stub{len(reached)}"
         remote.JOBS[pid] = {"prompt_id": pid, "worker": w["label"], "status": "failed", "error": "stub", "outputs": [],
                             "queued_at": time.time(), "task": asyncio.ensure_future(asyncio.sleep(0))}
@@ -230,9 +234,12 @@ async def main():
 
     import aiohttp
 
+    said = []      # every reply an entry point gave (FETCH: where a refusal's reason must show)
+
     async def post(s, path, body):
         async with s.post(base + path, json=body) as r:
             txt = await r.text()
+            said.append(txt)
             try:
                 return r.status, json.loads(txt)
             except ValueError:
@@ -269,10 +276,18 @@ async def main():
                 sys.path.insert(0, PKG)
                 import studio_mcp
                 studio_mcp.BASE = base
-                await asyncio.to_thread(studio_mcp.call, "studio_generate",
-                                        {"app": "Remove background", "images": ["ref_couture_model.png"], "run_on": label, "wait": False})
+                try:
+                    said.append(str(await asyncio.to_thread(studio_mcp.call, "studio_generate",
+                                                            {"app": "Remove background", "images": ["ref_couture_model.png"], "run_on": label, "wait": False})))
+                except Exception as e:
+                    said.append(str(e))
         return [r["worker"] for r in reached[n:]]
 
+    if FETCH:
+        await fetch_matrix(studio, remote, drive, reached, said, local_posts, base)
+        await runner.cleanup()
+        print(f"\n{len(fails)} failed" if fails else "\nall passed")
+        return 1 if fails else 0
     for member in MEMBERS:
         for w in WORKERS:
             try:
@@ -314,6 +329,262 @@ async def main():
     await runner.cleanup()
     print(f"\n{len(fails)} failed" if fails else "\nall passed")
     return 1 if fails else 0
+
+
+# ---------------------------------------------------------------- FETCH: a Mac card that lacks the model
+MODEL = re.compile(r"\.(safetensors|sft|ckpt|pt|pth|bin|gguf|onnx)$", re.I)
+UNAVAILABLE = "not on Hugging Face: copy it from the PC into models/loras/"
+# what the Mac's /mac/fetch answers for a file on each call, per scenario (the last answer repeats)
+SCENARIOS = {
+    "present": ["present"],
+    "downloading": ["downloading", "downloading", "present"],
+    "failed": ["failed", "downloading", "present"],
+    "unavailable": ["unavailable"],
+}
+
+
+async def fake_macs(remote, labels, real_oi, sv):
+    """Two fake comfy-mac workers sharing one models folder (as the real ones do). Every model file is missing at
+    first; /mac/fetch plays the current scenario, and a file becomes listed once it answers "present". /prompt
+    records whether the gate still refused at that moment (it must never)."""
+    from aiohttp import web
+    st = {"hidden": set(), "landed": {}, "scenario": "present", "calls": {}, "posts": [], "fetches": [], "history": {}}
+
+    def oi_now():
+        out = json.loads(json.dumps(real_oi))
+        for ct, node in out.items():
+            for part in ("required", "optional"):
+                for name, spec in ((node.get("input") or {}).get(part) or {}).items():
+                    c = remote.combo(spec)
+                    if c and not remote.is_file_input(spec):
+                        keep = [o for o in c[0] if o not in st["hidden"]]
+                        keep += [v for v in st["landed"].get((ct, name), ()) if v not in keep]    # downloaded into this folder
+                        if isinstance(spec[0], list):
+                            spec[0] = keep
+                        else:
+                            spec[1]["options"] = keep
+        return out
+    for node in real_oi.values():       # hide every model file
+        for part in ("required", "optional"):
+            for name, spec in ((node.get("input") or {}).get(part) or {}).items():
+                c = remote.combo(spec)
+                if c and not remote.is_file_input(spec):
+                    st["hidden"].update(o for o in c[0] if isinstance(o, str) and MODEL.search(o))
+    st["all_hidden"] = set(st["hidden"])
+    png = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests", "probes.py"), "rb").read()[:64]
+
+    def app_for(label):
+        app = web.Application()
+        r = app.router
+
+        async def object_info(q):
+            return web.json_response(oi_now())
+
+        async def info(q):
+            return web.json_response({"label": label, "self_validated": sv, "queue_remaining": 0})
+
+        async def fetch(q):
+            body = await q.json()
+            st["fetches"].append((label, [f.get("value") for f in body.get("files") or []]))
+            out = []
+            for f in body.get("files") or []:
+                v = f.get("value")
+                n = st["calls"][v] = st["calls"].get(v, 0) + 1
+                script = SCENARIOS[st["scenario"]]
+                status = script[min(n, len(script)) - 1]
+                if not MODEL.search(v or ""):
+                    status = "unavailable"      # not a model file
+                e = {"value": v, "status": status}
+                if status == "present":
+                    st["hidden"].discard(v)
+                    st["landed"].setdefault((f.get("class_type"), f.get("input")), set()).add(v)
+                elif status == "downloading":
+                    e.update(by=label, done=n * 100_000_000, size=400_000_000)
+                elif status == "failed":
+                    e["reason"] = "connection reset"
+                else:
+                    e["reason"] = UNAVAILABLE
+                out.append(e)
+            return web.json_response({"files": out})
+
+        async def upload(q):
+            d = await q.post()
+            return web.json_response({"name": d["image"].filename, "subfolder": d.get("subfolder", ""), "type": "input"})
+
+        async def prompt(q):
+            body = await q.json()
+            pid = body.get("prompt_id")
+            why = remote.gate(body["prompt"], oi_now(), sv)
+            st["posts"].append({"worker": label, "prompt_id": pid, "refused_then": why})
+            if why:
+                return web.json_response({"error": "invalid prompt", "node_errors": {}}, status=400)
+            st["history"][pid] = {"status": {"completed": True, "status_str": "success"},
+                                  "outputs": {"9": {"images": [{"filename": "fetched_00001_.png", "subfolder": "", "type": "output"}]}}}
+            return web.json_response({"prompt_id": pid, "number": 1, "node_errors": {}})
+
+        async def history(q):
+            pid = q.match_info["pid"]
+            return web.json_response({pid: st["history"][pid]} if pid in st["history"] else {})
+
+        async def ok(q):
+            return web.json_response({})
+        r.add_get("/object_info", object_info)
+        r.add_get("/mac/info", info)
+        r.add_post("/mac/fetch", fetch)
+        r.add_post("/upload/image", upload)
+        r.add_post("/prompt", prompt)
+        r.add_get("/history/{pid}", history)
+        r.add_get("/queue", lambda q: web.json_response({"queue_running": [], "queue_pending": []}))
+        r.add_get("/view", lambda q: web.Response(body=png))
+        r.add_post("/mac/forget", lambda q: web.json_response({"deleted": []}))
+        for path in ("/queue", "/interrupt", "/history"):
+            r.add_post(path, ok)
+        return app
+    workers, runners = [], []
+    for label in labels:
+        run = web.AppRunner(app_for(label))
+        await run.setup()
+        site = web.TCPSite(run, "127.0.0.1", 0)
+        await site.start()
+        runners.append(run)
+        workers.append({"label": label, "host": "127.0.0.1", "port": site._server.sockets[0].getsockname()[1]})
+    return st, workers, runners
+
+
+async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
+    """Every entry point x every /mac/fetch answer, on a Mac card picked by name: the job either lands on that
+    card after the download, under the id it was given at once, or fails with the Mac's reason. Never a /prompt
+    while the gate still refuses. "Any free GPU" never downloads. Cancel while downloading drops the job."""
+    import aiohttp
+    async with aiohttp.ClientSession() as s:
+        async with s.get(remote.base(WORKERS[1]) + "/object_info") as r:
+            real_oi = await r.json()
+        async with s.get(remote.base(WORKERS[1]) + "/mac/info") as r:
+            sv = (await r.json()).get("self_validated")
+    st, fakes, runners = await fake_macs(remote, [w["label"] for w in WORKERS], real_oi, sv)
+    remote.save_workers(studio._data_dir(), fakes)
+    remote._caps.clear()
+    remote.FETCH_POLL = 0.05
+
+    async def settle(n_jobs, timeout=60):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            live = [j for j in list(remote.JOBS.values())[n_jobs:] if j["status"] in remote.ACTIVE]
+            busy = [j for j in studio._jobs.values() if j.get("status") == "running"]
+            if not live and not busy:
+                return
+            await asyncio.sleep(0.1)
+
+    k = 0
+    for member in MEMBERS:
+        for scen in SCENARIOS:
+            w = fakes[k % 2]
+            k += 1
+            st["scenario"], st["calls"], st["hidden"], st["landed"] = scen, {}, set(st["all_hidden"]), {}
+            remote._caps.clear()
+            n_reach, n_post, n_fetch, n_said, n_jobs = len(reached), len(st["posts"]), len(st["fetches"]), len(said), len(remote.JOBS)
+            old_sj = set(studio._jobs)
+            try:
+                got = await drive(member, w["label"])
+            except Exception as e:
+                got = [f"error: {str(e)[:120]}"]
+            await settle(n_jobs)
+            jobs = list(remote.JOBS.values())[n_jobs:]
+            posts, fetches = st["posts"][n_post:], st["fetches"][n_fetch:]
+            tag = f"{member} on {w['label']}, Mac answers {scen}:"
+            if os.environ.get("DEBUG"):
+                print("  DEBUG", tag, [str(x)[:300] for x in said[n_said:]], fetches, [(j["status"], j.get("error")) for j in jobs],
+                      [(j.get("kind"), j.get("status"), str(j.get("error"))[:300]) for j in list(studio._jobs.values())[-1:]])
+            check(got == [w["label"]] and all(r.get("fetch") is True for r in reached[n_reach:]),
+                  f"{tag} reached {got} asking to download {[r.get('fetch') for r in reached[n_reach:]]}")
+            # a node the Mac doesn't have at all: no download can help, so it's refused at once with that reason
+            missing = sorted({ct for ct in re.findall(r"node (\w+) is not installed", " ".join(said[n_said:]) + json.dumps(
+                [j.get("error") for k2, j in studio._jobs.items() if k2 not in old_sj], default=str)) if ct not in real_oi})
+            if missing:
+                print(f"NOTE {member} can't run on the Mac at all: {missing} not installed there")
+                check(not fetches and not posts, f"{tag} refused at once, no download, nothing queued ({len(fetches)} fetch, {len(posts)} posts)")
+                continue
+            check(bool(fetches) and all(lab == w["label"] for lab, _ in fetches), f"{tag} asked {w['label']}'s /mac/fetch ({len(fetches)} calls)")
+            check(all(not p["refused_then"] for p in posts), f"{tag} no /prompt while the gate still refused: {[p['refused_then'][:1] for p in posts if p['refused_then']]}")
+            if scen == "unavailable":
+                text = " ".join(said[n_said:]) + json.dumps([{k2: v for k2, v in j.items() if k2 in ("error", "stage")} for j in studio._jobs.values()], default=str) \
+                    + json.dumps([j.get("error") for j in remote.JOBS.values()], default=str)
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(base + "/manny/api/schedule") as r:
+                        text += await r.text()
+                check(not posts, f"{tag} nothing queued on the Mac ({len(posts)})")
+                check(UNAVAILABLE in text, f"{tag} the Mac's reason reaches the caller")
+            else:
+                done = [j for j in jobs if j["status"] == "done" and j["outputs"]]
+                check(len(posts) == 1 and len(jobs) == 1 and posts[0]["prompt_id"] == jobs[0]["prompt_id"] and posts[0]["worker"] == w["label"],
+                      f"{tag} queued once on {w['label']} under the id it got at once: posts {[(p['worker'], p['prompt_id']) for p in posts]} jobs {[j['prompt_id'] for j in jobs]}")
+                check(len(done) == 1, f"{tag} rendered and came back: {[(j['status'], j.get('error')) for j in jobs]}")
+                want = {"present": 1, "downloading": 3, "failed": 3}[scen]
+                check(len(fetches) >= want, f"{tag} kept asking until present ({len(fetches)} /mac/fetch calls, >= {want})")
+
+    # "Any free GPU" never downloads: it takes a machine that can run it now (here: this PC)
+    st["scenario"], st["calls"], st["hidden"], st["landed"] = "present", {}, set(st["all_hidden"]), {}
+    remote._caps.clear()
+    n_reach, n_fetch, lp = len(reached), len(st["fetches"]), len(local_posts)
+    await drive("manny_run", "auto")
+    check(len(reached) == n_reach and len(st["fetches"]) == n_fetch and len(local_posts) > lp,
+          f"auto: ran on this PC, no download asked ({len(st['fetches']) - n_fetch} /mac/fetch, {len(reached) - n_reach} remote)")
+
+    # cancel while downloading: the job is dropped, never queued; the UI is told the download carries on
+    SCENARIOS["forever"] = ["downloading"]
+    st["scenario"], st["calls"], st["hidden"], st["landed"] = "forever", {}, set(st["all_hidden"]), {}
+    remote._caps.clear()
+    n_post, n_jobs = len(st["posts"]), len(remote.JOBS)
+    await drive("manny_run", fakes[0]["label"])
+    j = (list(remote.JOBS.values())[n_jobs:] or [{}])[0]
+    for _ in range(50):
+        if j.get("status") == "fetching" and j.get("step"):
+            break
+        await asyncio.sleep(0.05)
+    check(j.get("status") == "fetching" and "Downloading" in (j.get("step") or ""), f"while downloading: {j.get('status')} · {j.get('step')}")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(base + f"/manny/api/remote_jobs/{j.get('prompt_id')}/cancel", json={}) as r:
+            await r.read()
+    await asyncio.sleep(0.5)
+    check(j.get("status") == "cancelled" and "keeps downloading" in (j.get("note") or "") and len(st["posts"]) == n_post,
+          f"cancel while downloading: {j.get('status')}, note {j.get('note')!r}, posts {len(st['posts']) - n_post}")
+
+    # a Studio restart while the Mac downloads: the job can't be rebuilt, so it fails and says why
+    remote.JOBS.clear()
+    open(remote.state_file(), "w").write(json.dumps([{"prompt_id": "f1", "worker": fakes[0]["label"], "status": "fetching", "queued_at": time.time(),
+                                                       "inputs": [], "outputs": [], "private": False}]))
+    remote.resume(studio._dirs(), on_done=None)
+    r = remote.JOBS.get("f1") or {}
+    check(r.get("status") == "failed" and "download" in (r.get("error") or ""), f"restart while downloading: {r.get('status')} · {r.get('error')}")
+    for run in runners:
+        await run.cleanup()
+
+
+def fetch_mutants():
+    """Drop the download on each call site in turn: exactly the entry points through it must fail."""
+    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("_queue_api", {"finish", "sound:music", "sound:voice"})]
+    bad = 0
+    for fn_name, members in sites:
+        d = tempfile.mkdtemp(prefix="studio-mutant-")
+        pkg = os.path.join(d, "ComfyUI-MannyStudio")
+        shutil.copytree(os.path.join(ROOT, "ComfyUI-MannyStudio"), pkg)
+        p = os.path.join(pkg, "__init__.py")
+        src = open(p, encoding="utf-8").read()
+        m = re.search(rf"\n(async )?def {fn_name}\(.*?(?=\n(async )?def )", src, re.S)
+        body = m.group(0) if m else ""
+        if body.count("fetch=") != 1:
+            print(f"FAIL fetch mutant {fn_name}: no single fetch= in it; update fetch_mutants")
+            bad += 1
+            continue
+        open(p, "w", encoding="utf-8").write(src.replace(body, re.sub(r"fetch=[^,)]*", "fetch=False", body)))
+        out = subprocess.run([sys.executable, os.path.abspath(__file__)], env=dict(os.environ, STUDIO_PKG=pkg, FETCH="1", LIVE="0"),
+                             capture_output=True, text=True, timeout=900).stdout
+        failed = {mm for mm in MEMBERS if re.search(rf"^FAIL {re.escape(mm)} on ", out, re.M)}
+        ok = failed == members
+        bad += not ok
+        print(f"{'PASS' if ok else 'FAIL'} fetch mutant {fn_name} (download dropped): failing paths {sorted(failed)}")
+    print(f"\n{bad} mutants not caught" if bad else "\nall mutants caught")
+    return 1 if bad else 0
 
 
 def web_mutants():
@@ -369,4 +640,4 @@ def mutants():
 
 
 if __name__ == "__main__":
-    sys.exit(mutants() if "--mutants" in sys.argv else asyncio.run(main()))
+    sys.exit(mutants() if "--mutants" in sys.argv else fetch_mutants() if "--fetch-mutants" in sys.argv else asyncio.run(main()))

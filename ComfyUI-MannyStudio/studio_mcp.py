@@ -575,6 +575,9 @@ def call(name, a):
         pids = [q["prompt_id"] for q in r.get("queued", [])]
         where = sorted({q.get("worker") or "local" for q in r.get("queued", [])})
         head = f"Queued {len(pids)} on {short(app['id'])} ({', '.join(where)}): {pids}" + ("\nNotes: " + "; ".join(notes) if notes else "")
+        dl = sorted({f"{v} on {q['worker']}" for q in r.get("queued", []) for v in q.get("fetching") or []})
+        if dl:
+            head += "\nDownloading first (it renders once the model is there; a big model can take a while): " + ", ".join(dl)
         if not a.get("wait", app["kind"] == "image"):
             return [{"type": "text", "text": head + "\nUse studio_wait with these ids to get the files."}]
         return result_content(wait_prompts(pids, float(a.get("timeout") or 300)), head)

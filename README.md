@@ -34,6 +34,7 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 
 **How a job is sent**
 - Studio first checks the machine *live*: every node must be installed, every model, sampler or scheduler name must be one that machine offers for that exact input, and every required input must be present. Missing anything → the job isn't sent, and you see what's missing (node, input, value). It never renders something different by accident.
+- **A Mac picked by name downloads a missing model first.** When the only thing missing is model files, that Mac fetches them from Hugging Face (into the models folder both cards share), and the job waits in the queue as "Downloading model … on mac-vega-a: 1.2/9.6 GB", then is checked again and renders. A file that isn't on Hugging Face (the PC-only ones below), or a missing node, still fails at once and says why. **Any free GPU** never waits for a download: it picks a machine that can run the job now. Stopping a job while it downloads drops the job, but the download carries on so the model is there next time. If this PC's ComfyUI restarts during a download, the job fails ("send it again"); the download still finishes.
 - Model switches a job doesn't use are dropped before the check. Without that, ComfyUI would ask for every model an app *could* pick. The trimmed job is exactly what ComfyUI would run anyway.
 - **Any free GPU** picks the least busy machine that has everything, and this PC wins ties. A Mac card that has been on one of your jobs for more than 10 min counts as busier. Measured on one Vega II: Remove background 14 s, Smooth motion 27 s, Z-Image 4.5 min, Upscale (SeedVR2 7b) 9 min, Inpaint 13 min, LTX video 44–55 min, Upscale video about 2 h (62 frames to 1080p).
 - **Incognito** jobs never go to another machine on "Any free GPU"; they run here unless you pick a Mac by name. If you do, the job crosses your network over plain HTTP and is wiped from the Mac when it's done.
@@ -43,7 +44,7 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 
 **What stays on this PC:** AI review and AI prompt help (their result is text, not a file), Topaz in Finish, and the video tools (Fix a part, Fix a face, Continue a shot, Keyframe shot), which splice the clip with ffmpeg here.
 
-**Models on the Mac.** A choice runs on the Mac only once its model files are there. Most come from Hugging Face (the comfy-mac repo fetches them). These exist only on this PC, so copy them yourself into `~/code/comfy-mac/ComfyUI/models/<folder>/` on the Mac. Both workers see them at once, no restart needed:
+**Models on the Mac.** A choice runs on the Mac only once its model files are there. Most come from Hugging Face: the Mac downloads them by itself the first time you pick it by name for a job that needs them (see above). Voices can't run on the Mac (its Chatterbox node isn't installed there). These exist only on this PC, so copy them yourself into `~/code/comfy-mac/ComfyUI/models/<folder>/` on the Mac. Both workers see them at once, no restart needed:
 
 | File | Folder | Unlocks |
 |---|---|---|
@@ -65,5 +66,8 @@ $PY tests/test_prune.py       # every app x every choice: trimmed job == what Co
 $PY tests/test_remote.py      # check == each worker's own validation, real renders, cleanup
 $PY tests/test_run_route.py   # Studio's routes: Run on, Any free GPU, cancel, Finish/Music/Voice paths
 $PY tests/test_revise.py      # no overwrites, shared references, failed/lost/restarted jobs, resume after restart
+$PY tests/test_entrypoints.py # every render entry point reaches the GPU it was asked for (--mutants: each path's target is checked)
+FETCH=1 $PY tests/test_entrypoints.py   # a Mac missing the model: every entry point x {present, downloading, failed, unavailable}
+$PY tests/test_entrypoints.py --fetch-mutants   # drop the download on each call site: exactly its entry points fail
 ```
 `RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).

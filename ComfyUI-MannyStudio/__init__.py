@@ -312,8 +312,9 @@ async def manny_run(request):
                         f"{k}: {(v[0] or {}).get('reason', '')}" for k, v in e.refused_by.items() if v), "refused_by": e.refused_by, "queued": results}, status=409)
             if worker:
                 try:
+                    # a Mac picked by name downloads a missing model first; "auto" only picks a machine that has it
                     results.append(dict(await _remote.submit(worker, api, {k: v for k, v in payload.items() if k != "prompt"}, _dirs(), private, INCOMING,
-                                                             on_done=_remote_done), seed=[vals.get(k) for k in seed_keys]))
+                                                             on_done=_remote_done, fetch=target != _remote.AUTO), seed=[vals.get(k) for k in seed_keys]))
                 except _remote.GateRefused as e:
                     return web.json_response({"error": str(e), "refused": e.why, "worker": e.label, "queued": results}, status=409)
                 except Exception as e:
@@ -1014,7 +1015,7 @@ async def _queue_api(api, extra, private, target=None, client_id="studio"):
     worker = await _choose(api, target, private)
     if worker:
         return (await _remote.submit(worker, api, {"client_id": client_id, "extra_data": extra}, _dirs(), private, INCOMING,
-                                     on_done=_remote_done))["prompt_id"]
+                                     on_done=_remote_done, fetch=target != _remote.AUTO))["prompt_id"]
     async with ClientSession() as s:
         async with s.post(f"http://127.0.0.1:{_port()}/prompt", json={"prompt": api, "client_id": client_id, "extra_data": extra}) as r:
             data = await r.json()

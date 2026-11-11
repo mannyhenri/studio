@@ -80,7 +80,7 @@ async def main():
     remote.save_workers(studio._data_dir(), [{"label": "mac", "host": "127.0.0.1", "port": 1}])
     sent = []
 
-    async def fake_submit(w, api, payload_extra, dirs, private=False, incoming=None, on_done=None):
+    async def fake_submit(w, api, payload_extra, dirs, private=False, incoming=None, on_done=None, **kw):
         sent.append(payload_extra.get("extra_data") or {})
         pid = f"m{len(sent)}"
         remote.JOBS[pid] = {"prompt_id": pid, "worker": w["label"], "status": "done", "outputs": [], "queued_at": 0,

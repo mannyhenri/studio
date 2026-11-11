@@ -11,6 +11,11 @@ needs its template's min children). Like ComfyUI's own validation, inputs a node
 /mac/info lists them as "self_validated" {class: [input, ...] or ["*"]}; a worker without /mac/info (and this PC)
 uses SELF_VALIDATED. File inputs (image/video/audio upload COMBOs) are always skipped: Studio uploads those.
 
+A worker picked BY NAME that lacks only model files (every refusal is a COMBO value) is asked to download them
+(comfy-mac's POST /mac/fetch); the job gets its prompt_id at once, waits as "fetching", then is gated again and
+queued under that same id (ComfyUI takes a client prompt_id). "auto" never downloads: it picks a machine that can run
+the job now.
+
 A remote job: upload inputs -> POST /prompt on the worker -> poll /history -> download every output through /view
 into this PC's output folder (private jobs into the incoming folder the sweeper moves) -> POST /mac/forget so
 nothing stays on the worker. No ComfyUI imports here: the paths come in as arguments.
@@ -20,6 +25,7 @@ import json
 import os
 import re
 import time
+import uuid
 
 from aiohttp import ClientSession, ClientTimeout, FormData
 
@@ -39,11 +45,13 @@ KEEP_DONE = 3600        # finished jobs stay listed this long
 LOST_AFTER = 600        # a worker unreachable this long while it has our job: the job is failed
 LONG_JOB = 600          # "auto": a worker running one of our jobs for longer than this counts one busier
 LOST_MISSES = 3         # polls in a row with the job in neither /history nor /queue: the worker restarted
+FETCH_POLL = 5          # seconds between /mac/fetch asks while a model downloads
+FETCH_TRIES = 3         # a download that fails this many times in a row (each ask resumes it) fails the job
 
 
 # ---------------------------------------------------------------- remote jobs on disk (survive a restart of this PC's ComfyUI)
 _STATE = {"dir": None}
-ACTIVE = ("queued", "running", "downloading", "cancelling")
+ACTIVE = ("fetching", "queued", "running", "downloading", "cancelling")
 
 
 def configure(data_dir):
@@ -88,6 +96,10 @@ def resume(dirs, incoming=".private_incoming", on_done=None):
         w = workers.get(job.get("worker"))
         if not w:
             job.update(status="failed", error=f"{job.get('worker')} is no longer set up", finished_at=time.time())
+            continue
+        if job["status"] == "fetching":     # the prompt isn't kept on disk, so it can't be sent once the model lands
+            job.update(status="failed", finished_at=time.time(),
+                       error=f"Studio restarted while {w['label']} was downloading a model; send it again (the download carries on)")
             continue
         if job["status"] == "cancelling":
             job["task"] = asyncio.ensure_future(_quiet(cancel(w, job["prompt_id"])))
@@ -306,13 +318,50 @@ async def _upload_inputs(s, w, api, object_info, dirs, tag):
     return sent
 
 
-async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_incoming", on_done=None):
+async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_incoming", on_done=None, fetch=False):
     """Queue api on worker w. dirs = {"input", "output", "temp"} of this PC. Returns {"prompt_id", "worker"}.
-    Raises RuntimeError with the gate reasons when the worker can't run it."""
+    Raises GateRefused with the gate reasons when the worker can't run it. fetch (a worker picked by name): when
+    only model files are missing, the worker downloads them and the job is queued once they're there ("fetching")."""
     oi, sv = await caps(w)
     why = gate(api, oi, sv)
+    if why and fetch and fetchable(why):
+        oi, sv = await caps(w, force=True)      # it may have landed since the cached list
+        why = gate(api, oi, sv)
+    if why and fetch and fetchable(why):
+        try:
+            files = await _fetch(w, why)
+        except Exception as e:      # a worker without /mac/fetch: refuse as before, saying why
+            raise GateRefused(w["label"], why + [{"reason": f"it can't download models ({e})"}])
+        bad = [f for f in files if f.get("status") == "unavailable"]
+        if bad:
+            raise GateRefused(w["label"], _unavailable(bad))
+        job = _new_job(w, str(uuid.uuid4()), payload_extra, private, "fetching")
+        job["fetch"] = files
+        _show_fetch(w, job, files)
+        job["task"] = asyncio.ensure_future(_fetch_then_send(w, job, api, payload_extra, dirs, incoming, on_done, files, why))
+        _persist()
+        return {"prompt_id": job["prompt_id"], "number": None, "worker": w["label"], "fetching": [f.get("value") for f in files]}
     if why:
         raise GateRefused(w["label"], why)
+    data, sent, opened = await _send(w, api, payload_extra, dirs, oi, sv)
+    job = _new_job(w, data["prompt_id"], payload_extra, private, "queued")
+    job["inputs"] = sent
+    job["task"] = asyncio.ensure_future(_follow(w, job, dirs, incoming, on_done, opened=opened))
+    _persist()
+    return {"prompt_id": job["prompt_id"], "number": data.get("number"), "worker": w["label"]}
+
+
+def _new_job(w, pid, payload_extra, private, status):
+    ex = payload_extra.get("extra_data") or {}
+    job = {"prompt_id": pid, "worker": w["label"], "status": status, "private": private, "inputs": [], "outputs": [], "error": None,
+           "queued_at": time.time(), "app": ex.get("manny_app"), "label": ex.get("manny_label"), "client_id": payload_extra.get("client_id"),
+           "progress": 0.0, "step": None}
+    JOBS[pid] = job
+    return job
+
+
+async def _send(w, api, payload_extra, dirs, oi, sv, pid=None):
+    """Tag, upload the inputs, POST /prompt (under pid when given). Returns (reply, uploaded inputs, open /ws)."""
     # ComfyUI caches output nodes too: an identical job would "finish" pointing at files /mac/forget already
     # deleted. A per-job key on each output node changes only its cache key (ComfyUI never passes an unknown
     # literal input to the node), so the save runs again while everything upstream may still come from cache.
@@ -327,7 +376,7 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
             sent = await _upload_inputs(s, w, api, oi, dirs, tag)
         finally:
             JOBS_UPLOADING[w["label"]] -= 1
-        body = dict(payload_extra, prompt=api)
+        body = dict(payload_extra, prompt=api, **({"prompt_id": pid} if pid else {}))
         opened = await _open_ws(w, payload_extra["client_id"]) if payload_extra.get("client_id") else None
         try:
             async with s.post(base(w) + "/prompt", json=body, timeout=ClientTimeout(total=120)) as r:
@@ -339,23 +388,109 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
                 await opened[1].close()
                 await opened[0].close()
             raise
-    pid = data["prompt_id"]
     if data.get("node_errors"):
         if opened:
             await opened[1].close()
             await opened[0].close()
         # ComfyUI queues a job when ANY output validates and lists the failed nodes in the same 200 reply: that
         # job would "succeed" without the picture. Take it back out and refuse, like the gate would have.
-        await cancel(w, pid, inputs=sent)
+        await cancel(w, data["prompt_id"], inputs=sent)
         raise GateRefused(w["label"], node_errors_why(data["node_errors"]))
-    ex = payload_extra.get("extra_data") or {}
-    job = {"prompt_id": pid, "worker": w["label"], "status": "queued", "private": private, "inputs": sent, "outputs": [], "error": None,
-           "queued_at": time.time(), "app": ex.get("manny_app"), "label": ex.get("manny_label"), "client_id": payload_extra.get("client_id"),
-           "progress": 0.0, "step": None}
-    JOBS[pid] = job
-    job["task"] = asyncio.ensure_future(_follow(w, job, dirs, incoming, on_done, opened=opened))
-    _persist()
-    return {"prompt_id": pid, "number": data.get("number"), "worker": w["label"]}
+    return data, sent, opened
+
+
+# ---------------------------------------------------------------- missing models: the worker downloads them
+def fetchable(why):
+    """True when every refusal is a COMBO value (a file the worker's folder lacks), so /mac/fetch may get it."""
+    return bool(why) and all(x.get("class_type") and x.get("input") and isinstance(x.get("value"), str) for x in why)
+
+
+async def _fetch(w, why):
+    """POST /mac/fetch with the gate's refusals (one per file); its answer per file, in order."""
+    files, seen = [], set()
+    for x in why:
+        k = (x["class_type"], x["input"], x["value"])
+        if k not in seen:
+            seen.add(k)
+            files.append({"class_type": k[0], "input": k[1], "value": k[2]})
+    async with ClientSession() as s:
+        async with s.post(base(w) + "/mac/fetch", json={"files": files}, timeout=ClientTimeout(total=60)) as r:
+            if r.status != 200:
+                raise RuntimeError(f"/mac/fetch HTTP {r.status}")
+            return (await r.json(content_type=None)).get("files") or []
+
+
+def _unavailable(bad):
+    return [{"value": f.get("value"), "reason": f"{f.get('value')}: {f.get('reason') or 'unavailable'}"} for f in bad]
+
+
+def _show_fetch(w, job, files):
+    """The queue line while waiting: 'Downloading model x on mac-vega-a: 1.2/9.6 GB'."""
+    left = [f for f in files if f.get("status") != "present"] or files
+    f = left[0] if left else {}
+    size = sum(x.get("size") or 0 for x in left)
+    done = sum(x.get("done") or 0 for x in left)
+    unit, div = ("GB", 1e9) if size >= 1e9 else ("MB", 1e6)
+    more = f" (+{len(left) - 1} more)" if len(left) > 1 else ""
+    job["step"] = f"Downloading model {f.get('value')}{more} on {w['label']}" + (f": {done / div:.1f}/{size / div:.1f} {unit}" if size else "")
+    job["progress"] = done / size if size else 0.0
+    notes = [x["note"] for x in files if x.get("note")]
+    if notes:
+        job["note"] = "; ".join(notes)
+
+
+async def _fetch_then_send(w, job, api, payload_extra, dirs, incoming, on_done, files, why):
+    """Wait for the worker's downloads, gate again, then queue under job's prompt_id and follow it like any job."""
+    tries, stale, seen = {}, 0, time.time()
+    try:
+        while True:
+            job["fetch"] = files
+            _show_fetch(w, job, files)
+            bad = [f for f in files if f.get("status") == "unavailable"]
+            if bad:
+                raise GateRefused(w["label"], _unavailable(bad))
+            for f in files:
+                v = f.get("value")
+                tries[v] = tries.get(v, 0) + 1 if f.get("status") == "failed" else 0
+                if tries[v] >= FETCH_TRIES:
+                    raise RuntimeError(f"{w['label']} couldn't download {v}: {f.get('reason') or 'failed'}")
+            if files and all(f.get("status") == "present" for f in files):
+                oi, sv = await caps(w, force=True)
+                why = gate(api, oi, sv)
+                if not why:
+                    break
+                if not fetchable(why):
+                    raise GateRefused(w["label"], why)
+                stale += 1      # "present" but not listed yet, or another file is still missing: ask again
+                if stale >= FETCH_TRIES:
+                    raise GateRefused(w["label"], why)
+            await asyncio.sleep(FETCH_POLL)
+            try:
+                files = await _fetch(w, why)
+                seen = time.time()
+            except Exception as e:
+                if time.time() - seen > LOST_AFTER:
+                    raise RuntimeError(f"Lost contact with {w['label']} for {LOST_AFTER // 60} min while it downloaded ({e})")
+        job.update(status="queued", step=None, progress=0.0)
+        _persist()
+        data, sent, opened = await _send(w, api, payload_extra, dirs, oi, sv, pid=job["prompt_id"])
+        job["inputs"] = sent
+        _persist()
+    except asyncio.CancelledError:
+        if job["status"] != "cancelling":
+            job.update(status="cancelled", finished_at=time.time())
+            _persist()
+        raise
+    except Exception as e:
+        job.update(status="failed", error=str(e), finished_at=time.time())
+        _persist()
+        if on_done:
+            try:
+                on_done(job)
+            except Exception as oe:
+                print("[Studio] remote on_done:", oe)
+        return
+    await _follow(w, job, dirs, incoming, on_done, opened=opened)
 
 
 def node_errors_why(node_errors):
@@ -564,6 +699,8 @@ async def cancel(w, pid, settle=20, inputs=None):
     """Drop a remote job wherever it is (out of the worker's queue, or interrupted while running), then have the
     worker forget it and the inputs we uploaded. Returns the forget reply."""
     job = JOBS.get(pid)
+    if job and job["status"] == "fetching":
+        job["note"] = f"The model keeps downloading on {w['label']}, so it's there next time"
     if job:
         job["status"] = "cancelling"    # "cancelled" once the worker has dropped it and forgotten its files
         _persist()
