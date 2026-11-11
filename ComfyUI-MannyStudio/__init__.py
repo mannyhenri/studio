@@ -25,7 +25,7 @@ from . import remote as _remote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-VERSION = "1.19.0"
+VERSION = "1.21.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -136,6 +136,14 @@ def _safe_app_path(rel):
 
 
 
+# H3 options that load the first/last-frame model (FL2VA): it was loading both times this PC froze. Hidden and refused.
+RETIRED_OPTIONS = ("MiniMax H3 First frame", "MiniMax H3 First + last")
+
+
+def _retired(v):
+    return isinstance(v, str) and v.startswith(RETIRED_OPTIONS)
+
+
 def _describe_app(rel):
     with open(_safe_app_path(rel), encoding="utf-8") as f:
         wf = json.load(f)
@@ -158,7 +166,9 @@ def _describe_app(rel):
         wv = node.get("widgets_values") or []
         item = {"key": f"{nid}:{wname}", "node": nid, "widget": wname, "label": label, "nodeType": t, "title": node.get("title") or t}
         if t == "CustomCombo":
-            item.update(kind="choice", options=_combo_options(node), value=wv[0] if wv else None)
+            opts = [o for o in _combo_options(node) if not _retired(o)]
+            val = wv[0] if wv else None
+            item.update(kind="choice", options=opts, value=opts[0] if _retired(val) and opts else val)
         elif t == "PrimitiveBoolean":
             item.update(kind="toggle", value=bool(wv[0]) if wv else False)
         elif t == "PrimitiveInt":
@@ -286,6 +296,9 @@ async def manny_run(request):
             vals = dict(values)
             for k in seed_keys:
                 vals[k] = random.randint(1, 2**31 - 1)
+            if any(_retired(v) for v in vals.values()):
+                return web.json_response({"error": "MiniMax H3 First frame / First + last frame are switched off on this PC (the model they load "
+                                                   "was loading both times the PC froze). Use MiniMax H3 References or LTX-2.5.", "queued": results}, status=400)
             wf, api = await _build_prompt(app_id, vals)
             if body.get("loras"):
                 _inject_loras(api, body["loras"])
@@ -2681,6 +2694,10 @@ _poses.setup(globals())
 # ---------------------------------------------------------------- video tools: fix a part, fix a face, continue, keyframes
 from . import videotools as _videotools  # noqa: E402
 _videotools.setup(globals())
+
+# ---------------------------------------------------------------- keep the queue across shutdowns
+from . import queuekeep as _queuekeep  # noqa: E402
+_queuekeep.setup(globals())
 
 
 try:   # carry on with Civitai downloads that a restart interrupted
