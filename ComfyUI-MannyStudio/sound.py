@@ -76,7 +76,8 @@ def setup(ns):
     async def _queue(api, private, label, target=None):
         if private:
             ns["_privatize"](api)
-        return await ns["_queue_api"](api, {"manny_label": label}, private, target, "studio-sound")
+        # manny_app marks it as a Studio job everywhere it runs (comfy-mac clears lost Studio jobs by it)
+        return await ns["_queue_api"](api, {"manny_app": "sound:" + label.lower(), "manny_label": label}, private, target, "studio-sound")
 
     def _start(kind, build):
         async def handler(request):
