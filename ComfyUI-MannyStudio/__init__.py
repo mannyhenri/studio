@@ -25,7 +25,7 @@ from . import remote as _remote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-VERSION = "1.22.0"
+VERSION = "1.23.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -424,6 +424,63 @@ def _remote_done(job):
 @routes.get("/manny/api/remote_jobs")
 async def manny_remote_jobs(request):
     return web.json_response(_remote.jobs())
+
+
+# Studio tools that wait for their own render on this PC (they splice, join or post-process it): not movable
+_PC_ONLY_CLIENTS = ("studio-videotools", "studio-sound", "studio-ai")
+
+
+@routes.post("/manny/api/queue/move")
+async def manny_queue_move(request):
+    """Move waiting jobs from this PC's queue to a GPU worker. Body: {"prompt_ids": [...], "target": label}.
+    The worker downloads missing models it can find (Hugging Face); a job it can't run stays on this PC."""
+    body = await request.json()
+    try:
+        worker = _remote.find(_data_dir(), body.get("target") or "")
+    except KeyError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    q = PromptServer.instance.prompt_queue
+    get = getattr(q, "get_current_queue_volatile", None) or q.get_current_queue
+    _running, pending = get()
+    by_id = {t[1]: t for t in pending}
+    moved, kept = [], []
+    for pid in body.get("prompt_ids") or []:
+        t = by_id.get(pid)
+        if not t:
+            kept.append({"prompt_id": pid, "reason": "it isn't waiting any more (already rendering or done)"})
+            continue
+        prompt, extra = t[2], dict(t[3] or {})
+        if extra.get("client_id") in _PC_ONLY_CLIENTS:
+            kept.append({"prompt_id": pid, "reason": "a Studio tool (video fix, music…) is waiting for this one on this PC"})
+            continue
+        private = _queuekeep._is_private(pid, prompt)
+        if private and not (auth.is_local(request) or auth.unlocked(request)):
+            kept.append({"prompt_id": pid, "reason": "Incognito job: unlock Incognito first"})
+            continue
+        cid = extra.pop("client_id", None)
+        extra = {k: v for k, v in extra.items() if not any(x in k.lower() for x in ("api_key", "auth_token"))}
+        payload_extra = {"client_id": cid, "extra_data": extra}
+        try:
+            r = await _remote.submit(worker, json.loads(json.dumps(prompt)), payload_extra, _dirs(), private, INCOMING,
+                                     on_done=_remote_done, fetch=True)
+        except _remote.GateRefused as e:
+            kept.append({"prompt_id": pid, "reason": "; ".join(x.get("reason", "") for x in e.why) or str(e)})
+            continue
+        except Exception as e:
+            kept.append({"prompt_id": pid, "reason": str(e)[:300]})
+            continue
+        # take it off this PC's queue; if it started here in the meantime, take it back off the worker
+        gone = q.delete_queue_item(lambda a, _p=pid: a[1] == _p)
+        if not gone:
+            try:
+                await _remote.cancel(worker, r["prompt_id"])
+            except Exception:
+                pass
+            kept.append({"prompt_id": pid, "reason": "it started rendering here before it could move"})
+            continue
+        _pending_private.discard(pid)
+        moved.append({"from": pid, "to": r["prompt_id"], "worker": worker["label"], "fetching": r.get("fetching")})
+    return web.json_response({"moved": moved, "kept": kept})
 
 
 @routes.post("/manny/api/remote_jobs/{pid}/cancel")

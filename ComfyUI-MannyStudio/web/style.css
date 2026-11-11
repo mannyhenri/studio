@@ -491,6 +491,15 @@ pre.cfg{background:var(--bg2);border:1px solid var(--line);border-radius:10px;pa
 .mbar{height:5px;background:var(--bg2);border-radius:3px;overflow:hidden}.mbar i{display:block;height:100%;width:0;background:#3ddc97;border-radius:3px;transition:width .6s}
 .mbar i.warm{background:#ffb86b}.mbar i.hot{background:#ff4d6d}
 @media (max-width:760px){.mon{display:none}}
+.mmach{margin-top:4px;padding-top:7px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.mmh{font:700 10px var(--head);letter-spacing:.12em;color:var(--dim)}
+.mmr{display:grid;grid-template-columns:8px auto 1fr;align-items:center;gap:7px;font-size:11px;min-width:0}
+.mmr i{width:7px;height:7px;border-radius:50%;background:var(--dim);opacity:.6}
+.mmr.busy i{background:#3ddc97;opacity:1;box-shadow:0 0 6px #3ddc97;animation:mmpulse 1.6s ease-in-out infinite}
+.mmr.off i{background:#ff4d6d;opacity:1}
+.mmr span{font-weight:600;color:var(--text);white-space:nowrap}
+.mmr b{font-weight:500;color:var(--muted);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+@keyframes mmpulse{50%{opacity:.45}}
 
 /* Topaz activity card */
 .tzcard{position:fixed;right:16px;bottom:16px;z-index:60;display:flex;flex-direction:column;gap:8px;max-width:340px}
@@ -643,3 +652,6 @@ details.fold .lorasec .lblrow{justify-content:flex-end}
 .trygrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
 .tryc{display:flex;flex-direction:column;gap:6px}.tryc video{width:100%;border-radius:10px;background:#000;aspect-ratio:16/9;object-fit:cover}
 #m-eng .chip.dis{opacity:.45}
+/* move a waiting job to another GPU */
+.qitem select.qmove{margin-left:auto;margin-right:6px;max-width:150px;font-size:11px;padding:3px 6px;border-radius:8px;background:var(--bg2);color:var(--text);border:1px solid var(--line)}
+.qitem.qmoveall{border-style:dashed}

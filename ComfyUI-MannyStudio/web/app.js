@@ -3049,6 +3049,12 @@ function drawDrawer() {
   const rem = S.remote.filter(j => remoteActive(j) || Date.now() / 1000 - (j.finished_at || 0) < 600);
   if (!q.queue_running.length && !q.queue_pending.length && !rem.length) b.append(h(`<div class="empty">The queue is empty.</div>`));
   q.queue_running.forEach(it => b.append(qItem(it, true)));
+  const movable = q.queue_pending.filter(it => !["studio-videotools", "studio-sound", "studio-ai"].includes((it[3] || {}).client_id));
+  if (movable.length > 1 && macWorkers().length) {
+    const bar = h(`<div class="qitem qmoveall"><div class="row"><b>Send all ${movable.length} waiting jobs</b><select class="qmove">${moveOptions(true)}</select></div><small>Each Mac downloads a model it's missing when it can find it online; a job it can't run stays here.</small></div>`);
+    const sel = $("select", bar); sel.onchange = () => { if (sel.value) { sel.disabled = true; moveJobs(movable.sort((a, b) => a[0] - b[0]).map(it => it[1]), sel.value); } };
+    b.append(bar);
+  }
   q.queue_pending.slice().sort((a, b) => a[0] - b[0]).forEach(it => b.append(qItem(it, false)));
   if (rem.length) {
     b.append(h(`<div class="qhead">Other GPUs</div>`));
@@ -3105,9 +3111,36 @@ async function pollRemote() {
   drawQueueCard();
   if (!$("#drawer").classList.contains("hidden")) drawDrawer();
 }
+/* move waiting jobs from this PC to a Mac GPU ("split" = share them out between the online Macs) */
+const macWorkers = () => S.workers.slice(1).filter(w => w.online);
+function moveOptions(withSplit) {
+  const ms = macWorkers();
+  return `<option value="">Send to…</option>` + (withSplit && ms.length > 1 ? `<option value="__split">All Macs (shared out)</option>` : "") +
+    ms.map(w => `<option value="${esc(w.label)}">${esc(prettyWorker(w.label))}</option>`).join("");
+}
+async function moveJobs(ids, target) {
+  const ms = macWorkers().map(w => w.label);
+  const groups = {};
+  ids.forEach((id, i) => { const t = target === "__split" ? ms[i % ms.length] : target; (groups[t] = groups[t] || []).push(id); });
+  let moved = 0, dl = 0; const kept = [];
+  toast(`Sending ${ids.length} job${ids.length > 1 ? "s" : ""}…`);
+  for (const [t, list] of Object.entries(groups)) {
+    try {
+      const r = await post("/manny/api/queue/move", { prompt_ids: list, target: t });
+      r.moved.forEach(m => { if (S.mine[m.from]) { S.mine[m.to] = S.mine[m.from]; delete S.mine[m.from]; } moved++; if (m.fetching && m.fetching.length) dl++; });
+      kept.push(...r.kept);
+    } catch (e) { kept.push({ reason: e.message }); }
+  }
+  if (moved) toast(`Moved ${moved} to the Mac` + (dl ? ` · ${dl} will download a model first` : ""));
+  if (kept.length) toast(`${kept.length} stayed on this PC: ` + [...new Set(kept.map(k => k.reason))].join(" · ").slice(0, 300), true);
+  setTimeout(() => { pollQueue(); pollRemote(); }, 600);
+}
 function qItem(it, running) {
-  const el = h(`<div class="qitem ${running ? "run" : ""}"><div class="row"><b>${esc(appNameOf(it))}</b><button class="icon" title="${running ? "Stop" : "Remove"}">✕</button></div>
+  const canMove = !running && macWorkers().length && !["studio-videotools", "studio-sound", "studio-ai"].includes((it[3] || {}).client_id);
+  const el = h(`<div class="qitem ${running ? "run" : ""}"><div class="row"><b>${esc(appNameOf(it))}</b>${canMove ? `<select class="qmove" title="Render this on another GPU">${moveOptions(false)}</select>` : ""}<button class="icon" title="${running ? "Stop" : "Remove"}">✕</button></div>
      <small>${running ? "Rendering · " + Math.round(S.progress * 100) + "%" : "Waiting · #" + it[0]}</small>${running ? `<div class="bar" style="margin-top:8px"><div style="width:${Math.round(S.progress * 100)}%"></div></div>` : ""}</div>`);
+  const mv = $(".qmove", el);
+  if (mv) mv.onchange = () => { if (mv.value) { mv.disabled = true; moveJobs([it[1]], mv.value); } };
   $("button", el).onclick = async () => {
     if (running) await post("/interrupt", { prompt_id: it[1] }); else await post("/queue", { delete: [it[1]] });
     setTimeout(pollQueue, 300);
@@ -3196,6 +3229,40 @@ async function sysMon() {
       sl.textContent = `Slow step: ${Math.round(j.idle_s / 60)} min on step ${j.step || "?"}/${j.max || "?"}, GPU still working`;
     } else if (sl) sl.remove();
     $("#mon").title = (m.awake ? "Keeping the PC awake while renders run · " : "") + (j && j.max ? `Step ${j.step}/${j.max} · ` : "") + "GPU load from Windows" + (m.gpu_engine ? " (" + m.gpu_engine + " engine)" : "") + " · VRAM is the shared graphics memory ComfyUI can use";
+  } catch { }
+}
+/* which machines are rendering: this PC and the GPU workers (Mac Vegas), under the resource bars */
+const prettyWorker = l => l === "local" ? "This PC" : String(l).replace(/^mac-vega-(\w+)$/i, (_, x) => "Mac · Vega " + x.toUpperCase());
+async function machinesMon() {
+  const mon = $("#mon");
+  if (document.hidden || !mon || getComputedStyle(mon).display === "none") return;
+  try {
+    const [ws, rj, q, m] = await Promise.all([api("/manny/api/workers"), api("/manny/api/remote_jobs"), api("/queue"), api("/manny/api/sysmon")]);
+    let box = $("#m-mach");
+    if (ws.length < 2) { if (box) box.remove(); return; }       // only this PC: nothing to add
+    if (!box) { box = h(`<div id="m-mach" class="mmach"><div class="mmh">MACHINES</div><div class="mml"></div></div>`); mon.append(box); }
+    const rows = ws.map(w => {
+      let state = "idle", txt = "Idle";
+      if (w.label === "local") {
+        const n = (q.queue_running || []).length + (q.queue_pending || []).length;
+        const j = m.job;
+        if (n) { state = "busy"; txt = (j && j.max ? `Rendering · step ${j.step}/${j.max}` : "Rendering") + (n > 1 ? ` · ${n - 1} waiting` : ""); }
+      } else if (!w.online) { state = "off"; txt = "Offline"; }
+      else {
+        const mine = rj.filter(x => x.worker === w.label && ["fetching", "queued", "running", "downloading", "cancelling"].includes(x.status));
+        const run = mine.find(x => x.status === "running"), fet = mine.find(x => x.status === "fetching"), dl = mine.find(x => x.status === "downloading");
+        const n = (w.info && w.info.queue_remaining) || 0;
+        if (run) { state = "busy"; txt = "Rendering for Studio" + (run.step ? " · " + run.step.replace(/^Step /, "step ") : ""); }
+        else if (fet) { state = "busy"; txt = (fet.step || "Downloading a model").replace(/^Downloading model .*? on [^:]+:?/, "Downloading model") ; }
+        else if (dl) { state = "busy"; txt = "Sending the result back"; }
+        else if (n) { state = "busy"; txt = `Busy · ${n} job${n > 1 ? "s" : ""} (not from Studio)`; }
+        if (n && (run || fet) && n > 1) txt += ` · ${n - 1} waiting`;
+        else if (mine.length && !run && !fet && !dl) { state = "busy"; txt = `Waiting · ${n} ahead`; }
+      }
+      const dev = w.label === "local" ? "" : ((w.info && w.info.device && w.info.device.name) || "");
+      return `<div class="mmr ${state}" title="${esc(w.label + (dev ? " · " + dev : "") + (w.error ? " · " + w.error : ""))}"><i></i><span>${esc(prettyWorker(w.label))}</span><b>${esc(txt)}</b></div>`;
+    }).join("");
+    $(".mml", box).innerHTML = rows;
   } catch { }
 }
 async function sysStats() {
@@ -3297,7 +3364,7 @@ async function checkUnfinished() {
   try { const a = await api("/manny/api/private/status"); S.pw = a; setIncog(a.unlocked && store.get("incog", true), true); } catch { }
   migrateLocalValues();
   await loadChars();
-  connect(); pollQueue(); sysStats(); setInterval(sysStats, 15000); setInterval(pollQueue, 5000); sysMon(); setInterval(sysMon, 3000);
+  connect(); pollQueue(); sysStats(); setInterval(sysStats, 15000); setInterval(pollQueue, 5000); sysMon(); setInterval(sysMon, 3000); machinesMon(); setInterval(machinesMon, 8000);
   loadWorkers().then(pollRemote); setInterval(pollRemote, 3000); setInterval(loadWorkers, 60000);
   setInterval(serverProgress, 3000);
   loadSchedule(); setInterval(loadSchedule, 30000);
