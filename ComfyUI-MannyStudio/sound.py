@@ -22,7 +22,49 @@ def _clean(s, fallback):
     return s or fallback
 
 
+M3 = {"unet": "minimax_music3_dit_fp16.safetensors", "te": "minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+      "vae": "minimax_music3_dav.safetensors"}
+
+
+def music3_prompt(b):
+    """MiniMax Music 3: full songs up to ~5 min. Caption = Global Metadata / Vocal Details / Arrangement; lyrics with [verse] [chorus] tags."""
+    seconds = max(10.0, min(300.0, float(b.get("seconds") or 120)))
+    seed = int(b.get("seed")) if str(b.get("seed", "")).strip().lstrip("-").isdigit() else random.randint(0, 2**31)
+    lyrics = (b.get("lyrics") or "").strip()
+    instrumental = bool(b.get("instrumental")) or not lyrics
+    key = b.get("key") if b.get("key") in KEYS else ""
+    bpm = int(b.get("bpm") or 0)
+    tags = (b.get("tags") or "cinematic, emotional, strings").strip()
+    if tags.lower().startswith("global metadata"):
+        caption = tags                      # already written in Music 3's own format
+    else:
+        meta = tags.rstrip(". ") + "." + (f" {bpm} BPM." if bpm else "") + (f" {key}." if key else "")
+        vocal = (b.get("vocals") or "").strip() or ("No vocals, instrumental only." if instrumental else "Clear, expressive lead vocal, upfront in the mix.")
+        caption = f"Global Metadata: {meta}\n\nVocal Details: {vocal}"
+        if (b.get("arrangement") or "").strip():
+            caption += "\n\nArrangement: " + b["arrangement"].strip()
+    if instrumental:
+        lyrics = "[Instrumental]"
+    name = _clean(b.get("name"), "Song")
+    api = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": M3["unet"], "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": M3["te"], "type": "minimax", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": M3["vae"]}},
+        "4": {"class_type": "MiniMaxMusic3TextEncode", "inputs": {"clip": ["2", 0], "caption": caption, "lyrics": lyrics, "seed": seed,
+                                                                  "max_duration": seconds, "cfg_scale": 1.7, "top_k": 50}},
+        "5": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["4", 0]}},
+        "6": {"class_type": "EmptyMiniMaxMusic3LatentAudio", "inputs": {"seconds": ["4", 1], "batch_size": 1}},
+        "7": {"class_type": "KSampler", "inputs": {"model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0],
+                                                   "seed": seed, "steps": 30, "cfg": 1.7, "sampler_name": "euler", "scheduler": "simple", "denoise": 1}},
+        "8": {"class_type": "VAEDecodeAudioTiled", "inputs": {"samples": ["7", 0], "vae": ["3", 0], "tile_size": 1536, "overlap": 64}},
+        "9": {"class_type": "SaveAudioMP3", "inputs": {"audio": ["8", 0], "filename_prefix": f"Audio/Music/{name}", "quality": "V0"}},
+    }
+    return api, seed
+
+
 def music_prompt(b):
+    if b.get("engine") == "music3":
+        return music3_prompt(b)
     seconds = max(5.0, min(240.0, float(b.get("seconds") or 60)))
     seed = int(b.get("seed")) if str(b.get("seed", "")).strip().lstrip("-").isdigit() else random.randint(0, 2**31)
     lyrics = (b.get("lyrics") or "").strip()
@@ -138,4 +180,7 @@ def setup(ns):
 
     @routes.get("/manny/api/sound/options")
     async def sound_options(request):
-        return web.json_response({"keys": KEYS, "languages": LANGS})
+        import folder_paths
+        have = all(n in set(x.replace("\\", "/").split("/")[-1] for x in (folder_paths.get_filename_list(f) or []))
+                   for f, n in (("diffusion_models", M3["unet"]), ("text_encoders", M3["te"]), ("vae", M3["vae"])))
+        return web.json_response({"keys": KEYS, "languages": LANGS, "engines": {"ace": True, "music3": have}})

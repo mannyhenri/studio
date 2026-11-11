@@ -49,7 +49,7 @@ def probe(path):
                 "audio": bool(c.streams.audio)}
 
 
-def h3_size(w, h, mp=0.55):
+def h3_size(w, h, mp=0.45):
     """A /32 canvas with the source's shape, about mp megapixels (H3 likes ~0.5-0.75)."""
     ar = w / float(h)
     W = (mp * 1e6 * ar) ** 0.5
@@ -109,10 +109,33 @@ def splice_with_new_sound(orig, new, at, take_from, take_to, dest):
           "-c:v", "libx264", "-crf", "15", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", dest])
 
 
+H3_TE_GGUF = "MiniMax-H3-encoder-Q4_K_M.gguf"
+
+
+def _gguf_te():
+    """The GGUF build of H3's text encoder, when the GGUF node pack is loaded and the file is in place."""
+    try:
+        import nodes
+        import folder_paths
+        if "CLIPLoaderGGUF" not in nodes.NODE_CLASS_MAPPINGS:
+            return None
+        names = folder_paths.get_filename_list("text_encoders") or []
+        for n in names:
+            if n.replace("\\", "/").split("/")[-1] == H3_TE_GGUF and os.path.getsize(folder_paths.get_full_path("text_encoders", n)) > 19e9:
+                return n
+    except Exception:
+        pass
+    return None
+
+
 def _h3_loaders(api, unet, lora):
     api["m"] = {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}}
     api["lo"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["m", 0], "lora_name": lora, "strength_model": 1.0}}
-    api["te"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": H3_TE, "type": "minimax", "device": "default"}}
+    gg = _gguf_te()
+    if gg:   # GGUF unpacks one layer at a time: far lower peak RAM than the nvfp4 file on this Intel GPU
+        api["te"] = {"class_type": "CLIPLoaderGGUF", "inputs": {"clip_name": gg, "type": "minimax"}}
+    else:
+        api["te"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": H3_TE, "type": "minimax", "device": "default"}}
     api["vv"] = {"class_type": "VAELoader", "inputs": {"vae_name": H3_VVAE}}
     api["va"] = {"class_type": "VAELoader", "inputs": {"vae_name": H3_AVAE}}
 
@@ -125,7 +148,7 @@ def _save(api, images, audio, prefix, fps=24.0):
 # ---------------------------------------------------------------- graphs
 def _resize_for(w, h):
     """Big sources are worked on at ~0.6 MP (H3's comfort zone); the fix is scaled back when spliced in."""
-    return ("megapixels", 0.6) if w * h > 900_000 else ("none", 1.0)
+    return ("megapixels", 0.45) if w * h > 480_000 else ("none", 1.0)
 
 
 def retake_api(path, start, end, prompt, mode, seed, steps=8, has_audio=True, clip_from=0.0, clip_len=0.0, size=(0, 0)):
@@ -327,7 +350,20 @@ def _result(dest):
     return {"filename": os.path.basename(dest), "subfolder": os.path.dirname(rel)}
 
 
+async def _free_memory():
+    """H3 + its 32B text encoder need most of this PC's RAM: unload everything else first."""
+    try:
+        async with ClientSession() as s:
+            async with s.post(f"http://127.0.0.1:{H['_port']()}/free", json={"unload_models": True, "free_memory": True}) as r:
+                await r.read()
+        await asyncio.sleep(3)
+    except Exception:
+        pass
+
+
 async def _render(job, api, label, stage):
+    job["stage"] = "Freeing memory"
+    await _free_memory()
     job["stage"] = "Waiting in the queue"
     pid = await _queue(api, label)
     job["pids"].append(pid)
@@ -439,7 +475,7 @@ def setup(ns):
 
         async def run():
             if engine == "h3":
-                w, h = h3_size(W, Hh, 0.6)
+                w, h = h3_size(W, Hh, 0.45)
                 api = h3_keyframes_api(keys[:6], prompt, w, h, seconds, seed)
             else:
                 api = ltx_keyframes_api(keys[:8], prompt, b.get("negative"), W // 32 * 32, Hh // 32 * 32, seconds, seed)

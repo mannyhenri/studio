@@ -114,6 +114,9 @@ TOOLS = [
          "cast": {"type": "array", "items": {"type": "object"}, "description": "[{name, x, y, rot (degrees, 0 faces +Y), height}]"},
          "shots": {"type": "array", "items": {"type": "object"}, "description": "[{name, seconds, prompt, camera?, start?, end?, cam?, move?, amount?}]"}},
          "required": ["name", "set_id", "shots"]}},
+    {"name": "studio_try_moves", "description": "Compare camera moves for one shot of a 3D scene: Blender renders a quick grey preview per move (push_in, pull_back, truck_left/right, orbit_left/right, crane_up/down, pan_left/right, tilt_up/down, zoom_in/out, handheld). Returns the clips.",
+     "inputSchema": {"type": "object", "properties": {"scene_id": {"type": "string"}, "shot": {"type": "string", "description": "shot id, name or number"},
+                                                      "moves": {"type": "array", "items": {"type": "string"}}, "strength": {"type": "number", "description": "x the usual amount, 0.5-2"}}, "required": ["scene_id"]}},
     {"name": "studio_render_scene", "description": "Render a scene's shots in Blender (look 'grey' fast blocking, or 'lit' with the set's own materials). Waits and returns the clips.",
      "inputSchema": {"type": "object", "properties": {"scene_id": {"type": "string"}, "look": {"type": "string", "enum": ["grey", "lit"]}}, "required": ["scene_id"]}},
 ]
@@ -161,6 +164,25 @@ def call(name, a):
             shots.append(s)
         r = http("POST", "/manny/api/scenes", {"name": a["name"], "set": a["set_id"], "cast": cast, "shots": shots})
         return [{"type": "text", "text": f"Scene created: {r['id']}. Open Studio › 3D to see it."}]
+    if name == "studio_try_moves":
+        sc = next((x for x in http("GET", "/manny/api/scenes") if x["id"] == a["scene_id"]), None)
+        if not sc:
+            raise ValueError("No such scene")
+        want = str(a.get("shot") or "1")
+        shots = sc.get("shots") or []
+        sh = next((x for x in shots if x["id"] == want or (x.get("name") or "").lower() == want.lower()), None) or \
+            (shots[int(want) - 1] if want.isdigit() and 0 < int(want) <= len(shots) else None)
+        if not sh:
+            raise ValueError("No such shot")
+        base = {"push_in": 1.5, "pull_back": 1.5, "truck_left": 1.5, "truck_right": 1.5, "orbit_left": 30, "orbit_right": 30, "crane_up": 1.5,
+                "crane_down": 1.5, "pan_left": 30, "pan_right": 30, "tilt_up": 20, "tilt_down": 20, "zoom_in": 1.5, "zoom_out": 1.5, "handheld": 1}
+        k = float(a.get("strength") or 1)
+        moves = [{"move": m, "amount": round(base.get(m, 1) * k, 2)} for m in (a.get("moves") or ["push_in", "orbit_left", "crane_up", "truck_right"])]
+        r = http("POST", f"/manny/api/scenes/{a['scene_id']}/explore", {"shot": sh["id"], "moves": moves, "seconds": 4})
+        res = wait_job(r["id"])
+        for t in res.get("tries", []):
+            t["path"] = abs_out(t["video"]) if "abs_out" in globals() else None
+        return [{"type": "text", "text": json.dumps(res, indent=1) + "\nTo keep one: studio_update the scene shot's move/amount, or pick it in Studio › 3D."}]
     if name == "studio_render_scene":
         r = http("POST", f"/manny/api/scenes/{a['scene_id']}/render", {"look": a.get("look") or "grey"})
         res = wait_job(r["id"])
@@ -446,8 +468,9 @@ TOOLS += [
      "inputSchema": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["image", "video", "audio", "any"]}, "limit": N_, "folder": {"type": "string", "description": "Only this subfolder, e.g. Videos/Upscaled"}}}},
     {"name": "studio_queue", "description": "The ComfyUI queue (what's rendering and waiting, plus Studio's scheduled jobs); action stop = stop the current render, clear = remove waiting jobs.",
      "inputSchema": {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "stop", "clear"]}}}},
-    {"name": "studio_music", "description": "Make a song or score with ACE-Step (on this PC). Waits and returns the file.",
-     "inputSchema": {"type": "object", "properties": {"style": {"type": "string", "description": "genre, mood, instruments"}, "lyrics": S_, "seconds": N_, "bpm": N_, "key": {"type": "string", "description": "e.g. A minor"}, "name": S_, "private": B_}, "required": ["style"]}},
+    {"name": "studio_music", "description": "Make a song or score on this PC. engine 'ace' (ACE-Step 1.5 XL, fast, up to 4 min) or 'music3' (MiniMax Music 3, best full songs up to 5 min; lyrics with [intro] [verse] [chorus] [bridge] [outro] tags; vocals/arrangement describe the singer and instruments). Waits and returns the file.",
+     "inputSchema": {"type": "object", "properties": {"engine": {"type": "string", "enum": ["ace", "music3"]}, "style": {"type": "string", "description": "genre, mood, instruments"},
+                                                      "vocals": {"type": "string", "description": "music3: the singer's voice and delivery"}, "arrangement": {"type": "string", "description": "music3: instruments and how the song builds"}, "lyrics": S_, "seconds": N_, "bpm": N_, "key": {"type": "string", "description": "e.g. A minor"}, "name": S_, "private": B_}, "required": ["style"]}},
     {"name": "studio_voice", "description": "Speak a line with Chatterbox; optionally copy a voice from a short recording (local path). Waits and returns the file.",
      "inputSchema": {"type": "object", "properties": {"text": S_, "voice": {"type": "string", "description": "5-15 s recording to copy (path)"}, "emotion": N_, "name": S_, "private": B_}, "required": ["text"]}},
     {"name": "studio_upscale_video", "description": "Upscale a video and/or raise its frame rate with Topaz Video (on this PC). Give a path, or filename+subfolder from the gallery.",
@@ -589,9 +612,10 @@ def call(name, a):
                                                      "progress": g.get("job"), "waiting": [short(x[3].get("manny_app", "graph")) for x in q["queue_pending"]],
                                                      "scheduled": [s for s in sch if s.get("status") == "waiting"]}, indent=1)}]
     if name == "studio_music":
-        r = http("POST", "/manny/api/music", {"tags": a["style"], "lyrics": a.get("lyrics") or "", "instrumental": not a.get("lyrics"),
+        r = http("POST", "/manny/api/music", {"engine": a.get("engine") or "ace", "vocals": a.get("vocals"), "arrangement": a.get("arrangement"),
+                                              "tags": a["style"], "lyrics": a.get("lyrics") or "", "instrumental": not a.get("lyrics"),
                                               "seconds": a.get("seconds") or 60, "bpm": a.get("bpm") or 100, "key": a.get("key"), "name": a.get("name"), "private": a.get("private")})
-        res = job_wait(r["id"], 1200)
+        res = job_wait(r["id"], 5400)
         return [{"type": "text", "text": json.dumps(dict(res, path=abs_out(res)), indent=1)}]
     if name == "studio_voice":
         r = http("POST", "/manny/api/voice", {"text": a["text"], "voice": as_input(a.get("voice"), a.get("private")) if a.get("voice") else "",

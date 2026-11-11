@@ -636,3 +636,7 @@ details.fold .lorasec .lblrow{justify-content:flex-end}
 .kfk img{width:118px;height:80px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
 .kfk .kft{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)}.kfk .kft input{width:56px;padding:4px 6px}
 .kfk .icon{position:absolute;top:4px;right:4px;width:24px;height:24px;font-size:12px;background:rgba(0,0,0,.6)}
+.trym{width:min(980px,96vw)}
+.trygrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.tryc{display:flex;flex-direction:column;gap:6px}.tryc video{width:100%;border-radius:10px;background:#000;aspect-ratio:16/9;object-fit:cover}
+#m-eng .chip.dis{opacity:.45}
