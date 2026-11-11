@@ -453,7 +453,7 @@ def setup(ns):
             if seed:
                 vals[seed["key"]] = int(time.time()) % 2_000_000_000
             job["stage"] = "Painting the frame"
-            pid = await H["_queue_app"](app, vals, private, "3D frame")
+            pid = await H["_queue_app"](app, vals, private, "3D frame", b.get("target"))
             job["pids"].append(pid)
             fn, sub = await H["_wait_output"](pid, job)
             full = await asyncio.to_thread(H["_find_out"], fn, sub, private)

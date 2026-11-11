@@ -2,12 +2,11 @@
 
 Both build their ComfyUI prompt directly (no app file), queue it, wait, and save to
 Audio/Music or Audio/Voices (Incognito: the private space)."""
-import json
 import os
 import random
 import time
 
-from aiohttp import web, ClientSession
+from aiohttp import web
 
 H = {}
 AUDIO_EXT = (".mp3", ".flac", ".wav", ".ogg", ".m4a")
@@ -116,20 +115,11 @@ def setup(ns):
     routes = ns["routes"]
     _new_job, _need_private, _root, _port = ns["_new_job"], ns["_need_private"], ns["_root"], ns["_port"]
 
-    async def _queue(api, private, label):
+    async def _queue(api, private, label, target=None):
         if private:
             ns["_privatize"](api)
-        payload = {"prompt": api, "client_id": "studio-sound", "extra_data": {"manny_label": label}}
-        async with ClientSession() as s:
-            async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=payload) as r:
-                data = await r.json()
-                if r.status != 200:
-                    err = data.get("node_errors") or data.get("error") or data
-                    raise RuntimeError(json.dumps(err)[:500])
-        pid = data.get("prompt_id")
-        if private:
-            ns["_pending_private"].add(pid)
-        return pid
+        # manny_app marks it as a Studio job everywhere it runs (comfy-mac clears lost Studio jobs by it)
+        return await ns["_queue_api"](api, {"manny_app": "sound:" + label.lower(), "manny_label": label}, private, target, "studio-sound")
 
     def _start(kind, build):
         async def handler(request):
@@ -142,7 +132,7 @@ def setup(ns):
             async def run():
                 try:
                     job["stage"] = "Waiting in the queue"
-                    pid = await _queue(api, private, label)
+                    pid = await _queue(api, private, label, b.get("target"))
                     job["pids"].append(pid)
                     job["stage"] = "Composing" if kind == "music" else "Speaking"
                     fn, sub = await ns["_wait_output"](pid, job)

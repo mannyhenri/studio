@@ -263,7 +263,7 @@ def setup(ns):
                         vals[rkey] = s["ref"]
                 for key in (b.get("seed_keys") or []):
                     vals[key] = int(time.time() * 1000 + k) % 2147483646 + 1
-                pidq = await ns["_queue_app"](app, vals, private, f"Project keyframe {k + 1}")
+                pidq = await ns["_queue_app"](app, vals, private, f"Project keyframe {k + 1}", b.get("target"))
                 job["pids"].append(pidq)
                 fn, sub = await ns["_wait_output"](pidq, job)
                 full = await asyncio.to_thread(ns["_find_out"], fn, sub, private)

@@ -19,7 +19,9 @@ import folder_paths
 from server import PromptServer
 
 from .mconv.workflow_to_api import convert_ui_to_api
+from .appwf import combo_options as _combo_options, apply_values as _apply_values, fix_custom_combos as _fix_custom_combos, prune_switches as _prune_switches
 from . import auth
+from . import remote as _remote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
@@ -132,9 +134,6 @@ def _safe_app_path(rel):
     return full
 
 
-def _combo_options(node):
-    wv = node.get("widgets_values") or []
-    return [v for v in wv[2:] if isinstance(v, str) and v != ""]
 
 
 # H3 options that load the first/last-frame model (FL2VA): it was loading both times this PC froze. Hidden and refused.
@@ -198,58 +197,8 @@ def _describe_app(rel):
     return {"id": rel, "name": name, "kind": kind, "inputs": inputs, "outputs": outputs}
 
 
-def _apply_values(wf, values):
-    nodes = {str(n["id"]): n for n in wf.get("nodes", [])}
-    for key, val in (values or {}).items():
-        nid, wname = key.split(":", 1)
-        node = nodes.get(nid)
-        if not node:
-            continue
-        wv = node.setdefault("widgets_values", [])
-        t = node.get("type")
-        if not wv:
-            wv.append(val)
-            continue
-        if t == "CustomCombo":
-            opts = _combo_options(node)
-            wv[0] = val
-            if len(wv) > 1 and val in opts:
-                wv[1] = opts.index(val)
-        elif t == "PrimitiveInt":
-            wv[0] = int(val)
-            if len(wv) > 1:
-                wv[1] = "fixed"
-        elif t == "PrimitiveFloat":
-            wv[0] = float(val)
-        elif t == "PrimitiveBoolean":
-            wv[0] = bool(val)
-        else:
-            wv[0] = val
-    return wf
 
 
-def _fix_custom_combos(api, wf):
-    """The UI-to-API converter drops CustomCombo's option list, so the node's
-    INDEX output always came out 0 (aspect and size ignored). Send what the
-    ComfyUI frontend sends: choice, index and option1..N."""
-    nodes = {str(n["id"]): n for n in wf.get("nodes", [])}
-    for sg in (wf.get("definitions") or {}).get("subgraphs", []):
-        for n in sg.get("nodes", []):
-            nodes.setdefault(str(n["id"]), n)
-    for nid, node in api.items():
-        if node.get("class_type") != "CustomCombo":
-            continue
-        ui = nodes.get(nid.split(":")[-1])
-        if not ui:
-            continue
-        opts = _combo_options(ui)
-        choice = node["inputs"].get("choice")
-        ins = {"choice": choice, "index": opts.index(choice) if choice in opts else 0}
-        for k, o in enumerate(opts, 1):
-            ins[f"option{k}"] = o
-        ins[f"option{len(opts) + 1}"] = ""
-        node["inputs"] = ins
-    return api
 
 
 async def _build_prompt(app_id, values):
@@ -262,7 +211,7 @@ async def _build_prompt(app_id, values):
     except Exception:
         oi = await _get_object_info(force=True)
         api = convert_ui_to_api(wf, oi)
-    return wf, _fix_custom_combos(api, wf)
+    return wf, _prune_switches(_fix_custom_combos(api, wf), oi)
 
 
 # ---------------------------------------------------------------- pages
@@ -334,6 +283,13 @@ async def manny_run(request):
     client_id = body.get("client_id") or uuid.uuid4().hex
     seed_keys = body.get("random_seed_keys") or []
     private = bool(body.get("private"))  # writing privately needs no unlock; viewing does
+    target = body.get("target") or _remote.LOCAL    # "local", "auto" or a worker label
+    worker = None
+    if target not in (_remote.LOCAL, _remote.AUTO):
+        try:
+            worker = _remote.find(_data_dir(), target)
+        except KeyError as e:
+            return web.json_response({"error": str(e)}, status=400)
     results = []
     async with ClientSession() as s:
         for i in range(count):
@@ -361,14 +317,125 @@ async def manny_run(request):
                 "client_id": client_id,
                 "extra_data": {"extra_pnginfo": {"workflow": wf}, "manny_app": app_id},
             }
+            if target == _remote.AUTO:
+                try:
+                    worker = await _choose(api, target, private)
+                except _remote.GateRefused as e:
+                    return web.json_response({"error": "No machine can run this: " + "; ".join(
+                        f"{k}: {(v[0] or {}).get('reason', '')}" for k, v in e.refused_by.items() if v), "refused_by": e.refused_by, "queued": results}, status=409)
+            if worker:
+                try:
+                    # a Mac picked by name downloads a missing model first; "auto" only picks a machine that has it
+                    results.append(dict(await _remote.submit(worker, api, {k: v for k, v in payload.items() if k != "prompt"}, _dirs(), private, INCOMING,
+                                                             on_done=_remote_done, fetch=target != _remote.AUTO), seed=[vals.get(k) for k in seed_keys]))
+                except _remote.GateRefused as e:
+                    return web.json_response({"error": str(e), "refused": e.why, "worker": e.label, "queued": results}, status=409)
+                except Exception as e:
+                    return web.json_response({"error": str(e), "worker": worker["label"], "queued": results}, status=502)
+                continue
             async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=payload) as r:
                 data = await r.json()
                 if r.status != 200:
                     return web.json_response({"error": data, "queued": results}, status=400)
-                results.append({"prompt_id": data.get("prompt_id"), "number": data.get("number"), "seed": [vals.get(k) for k in seed_keys]})
-                if private:
-                    _pending_private.add(data.get("prompt_id"))
+            if data.get("node_errors"):     # queued for the outputs that validated: the picture would be missing
+                async with s.post(f"http://127.0.0.1:{_port()}/queue", json={"delete": [data.get("prompt_id")]}):
+                    pass
+                async with s.post(f"http://127.0.0.1:{_port()}/interrupt", json={"prompt_id": data.get("prompt_id")}):
+                    pass
+                return web.json_response({"error": {"error": {"message": "Part of this can't run on this PC"}, "node_errors": data["node_errors"]},
+                                          "queued": results}, status=400)
+            results.append({"prompt_id": data.get("prompt_id"), "number": data.get("number"), "seed": [vals.get(k) for k in seed_keys],
+                            "worker": _remote.LOCAL})
+            if private:
+                _pending_private.add(data.get("prompt_id"))
     return web.json_response({"queued": results})
+
+
+# ---------------------------------------------------------------- remote GPU workers (remote.py)
+def _dirs():
+    return {"input": folder_paths.get_input_directory(), "output": folder_paths.get_output_directory(),
+            "temp": folder_paths.get_temp_directory()}
+
+
+@routes.get("/manny/api/workers")
+async def manny_workers(request):
+    """This PC plus every configured worker, with live health (and its error when it's down)."""
+    async def one(w):
+        try:
+            return dict(w, online=True, info=await _remote.info(w))
+        except Exception as e:
+            return dict(w, online=False, error=str(e))
+    ws = await asyncio.gather(*(one(w) for w in _remote.load_workers(_data_dir())))
+    return web.json_response([{"label": _remote.LOCAL, "host": "127.0.0.1", "port": _port(), "online": True}] + list(ws))
+
+
+@routes.post("/manny/api/workers")
+async def manny_workers_save(request):
+    """Replace the worker list. Body: {"workers": [{label, host, port, device?}]} (comfy-mac's mac-workers.json works as is).
+    Only from this PC, or with Incognito unlocked: a worker receives the input files of the jobs sent to it."""
+    if not (auth.is_local(request) or auth.unlocked(request)):
+        return web.json_response({"error": "Change GPU machines on this PC, or unlock Incognito first"}, status=403)
+    body = await request.json()
+    _remote.save_workers(_data_dir(), body.get("workers") or [])
+    return web.json_response({"workers": _remote.load_workers(_data_dir())})
+
+
+@routes.post("/manny/api/workers/check")
+async def manny_workers_check(request):
+    """Which machines can run this app with these values: {label: {"ok", "refused": [...]}}."""
+    body = await request.json()
+    _wf, api = await _build_prompt(body["app"], body.get("values") or {})
+    out = {_remote.LOCAL: {"ok": True, "refused": _remote.gate(api, await _get_object_info())}}
+    out[_remote.LOCAL]["ok"] = not out[_remote.LOCAL]["refused"]
+    for w in _remote.load_workers(_data_dir()):
+        try:
+            why = await _remote.check(w, api)
+            out[w["label"]] = {"ok": not why, "refused": why}
+        except Exception as e:
+            out[w["label"]] = {"ok": False, "error": str(e)}
+    return web.json_response(out)
+
+
+def _local_busy():
+    try:
+        return PromptServer.instance.prompt_queue.get_tasks_remaining()
+    except Exception:
+        return 0
+
+
+def _remote_done(job):
+    """Tell the browser that queued it, the same way ComfyUI does for a local job, so Create/Gallery/Storyboard
+    pick the pulled-back file up unchanged."""
+    sid = job.get("client_id")
+    try:
+        if job["status"] == "done":
+            for k, o in enumerate(job["outputs"]):
+                f = {"filename": o["filename"], "subfolder": o["subfolder"], "type": "output"}
+                PromptServer.instance.send_sync("executed", {"prompt_id": job["prompt_id"], "node": f"remote{k}", "display_node": f"remote{k}",
+                                                            "output": {"images": [f]}, "worker": job["worker"]}, sid)
+            PromptServer.instance.send_sync("execution_success", {"prompt_id": job["prompt_id"], "worker": job["worker"]}, sid)
+        elif job["status"] == "failed":
+            PromptServer.instance.send_sync("execution_error", {"prompt_id": job["prompt_id"], "exception_message": job["error"] or "failed",
+                                                               "worker": job["worker"]}, sid)
+    except Exception as e:
+        print("[Studio] remote job event:", e)
+
+
+@routes.get("/manny/api/remote_jobs")
+async def manny_remote_jobs(request):
+    return web.json_response(_remote.jobs())
+
+
+@routes.post("/manny/api/remote_jobs/{pid}/cancel")
+async def manny_remote_cancel(request):
+    job = _remote.JOBS.get(request.match_info["pid"])
+    if not job:
+        return web.json_response({"error": "unknown job"}, status=404)
+    try:
+        fg = await _remote.cancel(_remote.find(_data_dir(), job["worker"]), job["prompt_id"])
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=502)
+    return web.json_response({"cancelled": job["prompt_id"], "forgot": fg})
 
 
 @routes.post("/manny/api/preview_prompt")
@@ -930,17 +997,47 @@ def _app_by_name(name):
     raise RuntimeError(f"The “{name}” app is missing")
 
 
-async def _queue_app(app, values, private, label):
+async def _queue_app(app, values, private, label, target=None):
     wf, api = await _build_prompt(app["id"], values)
     if private:
         _privatize(api)
-    payload = {"prompt": api, "client_id": "studio-finish",
-               "extra_data": {"extra_pnginfo": {"workflow": wf}, "manny_app": app["id"], "manny_label": label}}
+    return await _queue_api(api, {"extra_pnginfo": {"workflow": wf}, "manny_app": app["id"], "manny_label": label}, private, target, "studio-finish")
+
+
+async def _choose(api, target, private=False):
+    """The worker dict that should run api, or None for this PC. target: "local"/None, "auto" or a worker label.
+    Incognito never goes to another machine on its own ("auto" keeps it here); a machine picked by name still works.
+    Raises KeyError for an unknown label and remote.GateRefused when "auto" finds no machine that can run it."""
+    if not target or target == _remote.LOCAL or (private and target == _remote.AUTO):
+        return None
+    if target != _remote.AUTO:
+        return _remote.find(_data_dir(), target)
+    why_local = _remote.gate(api, await _get_object_info())
+    label, notes = await _remote.pick(_remote.load_workers(_data_dir()), api, _local_busy(), not why_local)
+    if label is None:
+        notes[_remote.LOCAL] = why_local
+        e = _remote.GateRefused("every machine", [dict(x, machine=k) for k, v in notes.items() for x in (v or [])[:3]])
+        e.refused_by = notes
+        raise e
+    return None if label == _remote.LOCAL else _remote.find(_data_dir(), label)
+
+
+async def _queue_api(api, extra, private, target=None, client_id="studio"):
+    """Queue an API prompt (already privatized when private) on this PC, a worker or "auto"; returns its prompt_id.
+    _wait_output follows either kind. A 200 with node_errors is refused everywhere: it would run without the picture."""
+    worker = await _choose(api, target, private)
+    if worker:
+        return (await _remote.submit(worker, api, {"client_id": client_id, "extra_data": extra}, _dirs(), private, INCOMING,
+                                     on_done=_remote_done, fetch=target != _remote.AUTO))["prompt_id"]
     async with ClientSession() as s:
-        async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=payload) as r:
+        async with s.post(f"http://127.0.0.1:{_port()}/prompt", json={"prompt": api, "client_id": client_id, "extra_data": extra}) as r:
             data = await r.json()
             if r.status != 200:
-                raise RuntimeError(json.dumps(data)[:600])
+                raise RuntimeError(json.dumps(data.get("node_errors") or data.get("error") or data)[:600])
+        if data.get("node_errors"):
+            async with s.post(f"http://127.0.0.1:{_port()}/queue", json={"delete": [data.get("prompt_id")]}):
+                pass
+            raise RuntimeError("Part of this can't run on this PC: " + json.dumps(data["node_errors"])[:500])
     pid = data.get("prompt_id")
     if private:
         _pending_private.add(pid)
@@ -948,6 +1045,18 @@ async def _queue_app(app, values, private, label):
 
 
 async def _wait_output(pid, job):
+    rj = _remote.JOBS.get(pid)
+    if rj:      # rendered on another machine: wait for its files to be copied here
+        while not rj["task"].done():
+            if job.get("cancel"):
+                await _remote.cancel(_remote.find(_data_dir(), rj["worker"]), pid)
+                raise RuntimeError("Stopped")
+            await asyncio.sleep(1)
+        if rj["status"] != "done":
+            raise RuntimeError(f"{rj['worker']}: " + (rj.get("error") or rj["status"]))
+        if not rj["outputs"]:
+            raise RuntimeError("The render finished without a file")
+        return rj["outputs"][0]["filename"], rj["outputs"][0]["subfolder"]
     async with ClientSession() as s:
         while True:
             if job.get("cancel"):
@@ -1028,7 +1137,7 @@ async def _finish(job):
             vals = {}
             if not _set(app, vals, "video", _to_input(cur, private)):
                 vals[next(x["key"] for x in app["inputs"] if x["kind"] == "video")] = _to_input(cur, private)
-            pid = await _queue_app(app, vals, private, "Finish: upscale")
+            pid = await _queue_app(app, vals, private, "Finish: upscale", b.get("target"))
             job["pids"].append(pid)
             fn, sub = await _wait_output(pid, job)
             cur = await asyncio.to_thread(_find_out, fn, sub, private)
@@ -1041,7 +1150,7 @@ async def _finish(job):
             vals[vk] = _to_input(cur, private)
             ch = next(x for x in app["inputs"] if x["kind"] == "choice")
             vals[ch["key"]] = ch["options"][0 if fps == "48" else 1]
-            pid = await _queue_app(app, vals, private, "Finish: smooth")
+            pid = await _queue_app(app, vals, private, "Finish: smooth", b.get("target"))
             job["pids"].append(pid)
             fn, sub = await _wait_output(pid, job)
             cur = await asyncio.to_thread(_find_out, fn, sub, private)
@@ -2557,6 +2666,21 @@ _projects.setup(globals())
 
 # ---------------------------------------------------------------- Versions (git + GitHub)
 from . import gitver as _gitver  # noqa: E402
+
+
+# remote GPU jobs survive a restart of this ComfyUI: saved in manny_studio/remote_jobs.json, followed again here
+_remote.configure(_data_dir())
+
+
+def _resume_remote():
+    n = _remote.resume(_dirs(), INCOMING, _remote_done)
+    if n:
+        print(f"[Studio] following {n} render(s) still on other GPUs")
+
+
+_rl = getattr(PromptServer.instance, "loop", None)
+if _rl is not None:
+    _rl.call_soon_threadsafe(_resume_remote)
 _gitver.setup_routes(globals())
 
 # ---------------------------------------------------------------- 3D -> storyboard -> final render pipeline
