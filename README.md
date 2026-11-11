@@ -79,6 +79,7 @@ $PY tests/test_revise.py      # no overwrites, shared references, failed/lost/re
 $PY tests/test_entrypoints.py # every render entry point reaches the GPU it was asked for (--mutants: each path's target is checked)
 FETCH=1 $PY tests/test_entrypoints.py   # a Mac missing the model: every entry point x {present, downloading, failed, unavailable}
 $PY tests/test_entrypoints.py --fetch-mutants   # drop the download on each call site: exactly its entry points fail
+$PY tests/test_fit_mac.py       # comfy-mac's real fetch code against Studio's real model-share server (needs ~/code/comfy-mac)
 $PY tests/test_model_share.py # model sharing: every folder x file, Range, index, 403 for others, no escapes (no workers needed)
 ```
 `RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).
