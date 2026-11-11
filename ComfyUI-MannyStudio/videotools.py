@@ -9,7 +9,11 @@ Everything runs on the models already on this PC:
 The H3 first/last-frame model (FL2VA) was the one loading both times this PC froze (Nov 10 and 11); Studio no longer uses it.
 H3 work uses only the Ref2VA model, the one that rendered fine here.
 
-Fixes are spliced back with ffmpeg so the untouched parts keep the original's quality."""
+Fixes are spliced back with ffmpeg so the untouched parts keep the original's quality.
+
+Each tool renders where Run on says (body "target"): this PC, "auto" or a GPU machine, through the same path as the
+apps (_queue_api: live check, model download, upload, pull back, forget). For another machine, remote_api() makes the
+graph readable there; ffmpeg probe and splice always run on this PC, on the pulled-back file."""
 import asyncio
 import json
 import os
@@ -329,14 +333,43 @@ def ltx_keyframes_api(keys, prompt, negative, W, H, seconds, seed):
 
 
 # ---------------------------------------------------------------- running
-async def _queue(api, label):
-    payload = {"prompt": api, "client_id": "studio-videotools", "extra_data": {"manny_label": label}}
-    async with ClientSession() as s:
-        async with s.post(f"http://127.0.0.1:{H['_port']()}/prompt", json=payload) as r:
-            data = await r.json()
-            if r.status != 200:
-                raise RuntimeError(json.dumps(data.get("node_errors") or data.get("error") or data)[:600])
-    return data["prompt_id"]
+def remote_api(api, dirs=None):
+    """The graph as another machine can run it. H3LoadVideoPath reads a path on THIS PC: it becomes core LoadVideo
+    with the clip as an annotated name ("Videos/x.mp4 [output]"), which the remote path uploads and renames, and whose
+    VIDEO output H3VideoFrames takes as is. The GGUF text encoder stays a PC choice: the Mac runs the nvfp4 CLIPLoader
+    on its CPU text-encoder server. Returns a new dict; api is untouched."""
+    dirs = dirs or (H["_dirs"]() if "_dirs" in H else {})
+    out = json.loads(json.dumps(api))
+    for node in out.values():
+        ct, ins = node.get("class_type"), node.get("inputs") or {}
+        if ct == "H3LoadVideoPath":
+            path = ins.get("path") or ""
+            value = None
+            for kind in ("output", "input", "temp"):
+                root = dirs.get(kind)
+                if root and os.path.isabs(path) and os.path.realpath(path).startswith(os.path.realpath(root) + os.sep):
+                    value = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace("\\", "/") + f" [{kind}]"
+                    break
+            if value is None:
+                if os.path.isabs(path):
+                    raise RuntimeError("That video isn't in Studio's folders, so another machine can't be sent it")
+                value = path.replace("\\", "/") + " [input]"
+            node["class_type"], node["inputs"] = "LoadVideo", {"file": value}
+        elif ct == "CLIPLoaderGGUF":
+            node["class_type"], node["inputs"] = "CLIPLoader", {"clip_name": H3_TE, "type": ins.get("type", "minimax"), "device": "default"}
+    return out
+
+
+def _here(target):
+    return not target or target == H["_remote"].LOCAL
+
+
+async def _queue(api, label, target=None):
+    """Queue api on this PC, "auto" or a GPU machine (Run on); returns the prompt_id that _wait_output follows."""
+    if not _here(target):
+        api = remote_api(api)
+    return await H["_queue_api"](api, {"manny_app": "videotools:" + label.lower().replace(" ", "-"), "manny_label": label},
+                                 False, target, "studio-videotools")
 
 
 def _src(b):
@@ -372,11 +405,12 @@ async def _free_memory():
         pass
 
 
-async def _render(job, api, label, stage):
-    job["stage"] = "Freeing memory"
-    await _free_memory()
+async def _render(job, api, label, stage, target=None):
+    if _here(target):       # another machine manages its own memory
+        job["stage"] = "Freeing memory"
+        await _free_memory()
     job["stage"] = "Waiting in the queue"
-    pid = await _queue(api, label)
+    pid = await _queue(api, label, target)
     job["pids"].append(pid)
     job["stage"] = stage
     fn, sub = await H["_wait_output"](pid, job)
@@ -406,6 +440,7 @@ def setup(ns):
         if end - start < 0.2:
             raise web.HTTPBadRequest(text="Mark at least a fraction of a second")
         mode = "face" if b.get("mode") == "face" else "picture"
+        target = b.get("target")  # fix
         seed = int(b.get("seed") or int(time.time()) % 2 ** 31)
         prompt = (b.get("prompt") or "").strip()
         job = ns["_new_job"](False, kind="videofix")
@@ -417,7 +452,7 @@ def setup(ns):
                 a, z = max(0.0, start - pad), min(p["duration"], end + pad)
                 api, n = face_api(src, a, z - a, prompt or "a person, natural detailed face, consistent identity",
                                   float(b.get("denoise") or 0.45), seed, size)
-                out = await _render(job, api, "Fix a face", "Fixing the face")
+                out = await _render(job, api, "Fix a face", "Fixing the face", target)
                 job["stage"] = "Putting it back in the clip"
                 dest = _dest("Fixed", src, "face fix")
                 await asyncio.to_thread(splice, src, out, a, 0.0, min(n / 24.0, z - a), dest)
@@ -426,7 +461,7 @@ def setup(ns):
                 c0 = max(0.0, start - ctx)
                 c1 = min(p["duration"], end + ctx)
                 api, n = retake_api(src, c0, c1 - c0, prompt, float(b.get("denoise") or 0.7), seed, size)
-                out = await _render(job, api, "Fix a part", "Re-drawing the marked part")
+                out = await _render(job, api, "Fix a part", "Re-drawing the marked part", target)
                 job["stage"] = "Putting it back in the clip"
                 dest = _dest("Fixed", src, "fix")
                 # the whole re-drawn stretch goes in: its first and last frames are the original's, so the joins don't jump
@@ -450,11 +485,12 @@ def setup(ns):
         if not prompt:
             raise web.HTTPBadRequest(text="Say what happens next")
         w, h = h3_size(p["width"], p["height"])
+        target = b.get("target")  # extend
         job = ns["_new_job"](False, kind="videoextend")
 
         async def run():
             api = extend_api(src, prompt, int(b.get("seconds") or 7), b.get("ref") or None, seed, w, h, p["duration"])
-            out = await _render(job, api, "Continue a shot", "Continuing the shot")
+            out = await _render(job, api, "Continue a shot", "Continuing the shot", target)
             dest = _dest("Extended", src, "continued")
             os.replace(out, dest)
             return _result(dest)
@@ -476,11 +512,12 @@ def setup(ns):
             raise web.HTTPBadRequest(text="Describe the shot")
         seed = int(b.get("seed") or int(time.time()) % 2 ** 31)
         W, Hh = int(b.get("width") or 1280), int(b.get("height") or 704)
+        target = b.get("target")  # keyframes
         job = ns["_new_job"](False, kind="keyframes")
 
         async def run():
             api = ltx_keyframes_api(keys[:8], prompt, b.get("negative"), W // 32 * 32, Hh // 32 * 32, seconds, seed)
-            out = await _render(job, api, "Keyframe shot", "Rendering the shot")
+            out = await _render(job, api, "Keyframe shot", "Rendering the shot", target)
             return _result(out)
         asyncio.ensure_future(ns["_ai_job"](job, run))
         return web.json_response({"id": job["id"], "seed": seed})

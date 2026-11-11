@@ -30,7 +30,7 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 **Set up**
 1. On the Mac: start both workers and the LAN gate (`lan_gate.py --allow <this-pc>.local --ports 8188 8189`). ComfyUI has no password, so the gate only lets this PC in.
 2. In Studio, on this PC (or with Incognito unlocked): **Settings → GPU machines**, add `mac-vega-a` · `Mannys-Mac-Pro.local` · `8188` and `mac-vega-b` · `Mannys-Mac-Pro.local` · `8189`. They're kept in `manny_studio/workers.json` (comfy-mac's `mac-workers.json` also works pasted as is).
-3. Under **Generate** a "Run on" menu appears: **This PC**, **Any free GPU**, or one machine. The same choice is used by Finish, Music, Voices, Compare, Storyboard, project keyframes and 3D frame paint. Over MCP, `studio_generate` and `studio_project_keyframes` take `run_on`.
+3. Under **Generate** a "Run on" menu appears: **This PC**, **Any free GPU**, or one machine. The same choice is used by Finish, Music, Voices, Compare, Storyboard, project keyframes, 3D frame paint and the video tools. Over MCP, `studio_generate`, `studio_project_keyframes` and the video tools take `run_on`.
 
 **How a job is sent**
 - Studio first checks the machine *live*: every node must be installed, every model, sampler or scheduler name must be one that machine offers for that exact input, and every required input must be present. Missing anything → the job isn't sent, and you see what's missing (node, input, value). It never renders something different by accident.
@@ -42,7 +42,9 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 - Cancel (✕ in the queue drawer) takes the job out of the Mac's queue or stops it, then cleans up the same way. A Mac that restarts mid-job fails the job ("restarted and lost the job"); one that stops answering for 10 min does too.
 - Jobs on other machines survive a restart of this PC's ComfyUI: they're kept in `manny_studio/remote_jobs.json` and followed again at startup. As a safety net the Mac clears Studio jobs that finished more than 24 h ago, so a result that waits longer than a day for this PC to come back is lost (the job shows as failed).
 
-**What stays on this PC:** AI review and AI prompt help (their result is text, not a file), Topaz in Finish, and the video tools (Fix a part, Fix a face, Continue a shot, Keyframe shot), which splice the clip with ffmpeg here.
+**What stays on this PC:** AI review and AI prompt help (their result is text, not a file) and Topaz in Finish.
+
+**Video tools on the Mac.** Fix a part, Fix a face, Continue a shot and Keyframe shot follow Run on too (over MCP: `run_on` on `studio_fix_video`, `studio_extend_video`, `studio_keyframe_shot`). Only the render goes to the Mac: the clip is uploaded with the job, and the result is cut back into your clip with ffmpeg on this PC. Keyframe shot and Fix a part run on the Mac. Fix a face needs `ComfyUI-H3-FaceRefine` and Continue a shot needs `comfyui-h3-multishot`: copy those two folders from this PC's `ComfyUI/custom_nodes/` into `~/code/comfy-mac/ComfyUI/custom_nodes/` on the Mac (and `face_yolov8m.pt` into `models/ultralytics/bbox/`); until then the Mac refuses them and says which node is missing.
 
 **Models on the Mac.** A choice runs on the Mac only once its model files are there. Most come from Hugging Face: the Mac downloads them by itself the first time you pick it by name for a job that needs them (see above). Voices can't run on the Mac (its Chatterbox node isn't installed there). These exist only on this PC, so copy them yourself into `~/code/comfy-mac/ComfyUI/models/<folder>/` on the Mac. Both workers see them at once, no restart needed:
 

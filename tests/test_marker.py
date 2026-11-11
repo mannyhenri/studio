@@ -74,7 +74,7 @@ async def main():
         for k, line in enumerate(open(fn, encoding="utf-8"), 1):
             if re.search(r"(_remote\.submit|_queue_api\"?\]?)\(", line) and not re.match(r"\s*(async )?def ", line):
                 sites.append(f"{os.path.basename(fn)}:{k}")
-    covered = {"manny_run": "__init__.py", "_queue_api": "__init__.py", "_queue_app": "__init__.py", "sound": "sound.py"}
+    covered = {"manny_run": "__init__.py", "_queue_api": "__init__.py", "_queue_app": "__init__.py", "sound": "sound.py", "videotools": "videotools.py"}
     check(len(sites) == len(covered), f"remote call sites in the code: {sites} (this test drives {sorted(covered)})")
 
     remote.save_workers(studio._data_dir(), [{"label": "mac", "host": "127.0.0.1", "port": 1}])
@@ -110,6 +110,14 @@ async def main():
                 break
             await asyncio.sleep(0.05)
         paths[f"sound:{kind}"] = sent[n:]
+    n = len(sent)     # the video tools (all four share one queue path): Keyframe shot needs no clip
+    r = await ROUTES[("POST", "/manny/api/video/keyframes")](Req({"keys": [{"image": "a.png", "at": 0}, {"image": "b.png", "at": 3}],
+                                                                  "prompt": "a push in", "seconds": 5, "target": "mac"}))
+    for _ in range(100):
+        if len(sent) > n:
+            break
+        await asyncio.sleep(0.05)
+    paths["videotools"] = sent[n:]
     for name, ex in paths.items():
         check(len(ex) == 1 and isinstance(ex[0].get("manny_app"), str) and ex[0]["manny_app"],
               f"{name}: extra_data.manny_app = {ex[0].get('manny_app') if ex else None!r}")

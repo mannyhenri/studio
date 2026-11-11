@@ -1406,7 +1406,7 @@ function videoFixDialog(cur, prompt, at) {
   $("#vden", d).oninput = e => { st.den[st.mode] = +e.target.value; $("#vdenv", d).textContent = st.den[st.mode].toFixed(2); };
   $("[data-go]", d).onclick = async () => {
     const body = { filename: cur.filename, subfolder: cur.subfolder || "", start: +st.start.toFixed(2), end: +st.end.toFixed(2), mode: st.mode,
-      prompt: $("#vprompt", d).value.trim(), denoise: st.den[st.mode] };
+      prompt: $("#vprompt", d).value.trim(), denoise: st.den[st.mode], target: runTarget() };
     if (st.mode !== "face" && !body.prompt) return toast("Say what should happen in the marked part", true);
     close();
     try { await videoJob("/manny/api/video/fix", body, st.mode === "face" ? "Face fix" : "Fix"); } catch (e) { toast(e.message.slice(0, 260), true); }
@@ -1435,7 +1435,7 @@ function videoExtendDialog(cur, prompt) {
   $("[data-go]", d).onclick = async () => {
     const pr = $("#xprompt", d).value.trim(); if (!pr) return toast("Say what happens next", true);
     close();
-    try { await videoJob("/manny/api/video/extend", { filename: cur.filename, subfolder: cur.subfolder || "", prompt: pr, seconds: st.seconds, ref: st.ref }, "Continue shot"); }
+    try { await videoJob("/manny/api/video/extend", { filename: cur.filename, subfolder: cur.subfolder || "", prompt: pr, seconds: st.seconds, ref: st.ref, target: runTarget() }, "Continue shot"); }
     catch (e) { toast(e.message.slice(0, 260), true); }
   };
 }
@@ -1483,7 +1483,7 @@ function keyframeDialog() {
     if (st.keys.length < 2) return toast("Add at least two pictures", true);
     if (!(st.prompt || "").trim()) return toast("Describe the shot", true);
     const [w, hh] = AS[st.aspect] || AS["16:9"];
-    const body = { keys: st.keys.map((k, n) => ({ image: k.image, at: n === 0 ? 0 : k.at })), prompt: st.prompt.trim(), seconds: st.seconds, width: w, height: hh };
+    const body = { keys: st.keys.map((k, n) => ({ image: k.image, at: n === 0 ? 0 : k.at })), prompt: st.prompt.trim(), seconds: st.seconds, width: w, height: hh, target: runTarget() };
     close();
     try { await videoJob("/manny/api/video/keyframes", body, "Keyframe shot"); } catch (e) { toast(e.message.slice(0, 260), true); }
   };

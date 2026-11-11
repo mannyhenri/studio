@@ -23,13 +23,17 @@ LIVE = os.environ.get("LIVE") == "1"
 FETCH = os.environ.get("FETCH") == "1"
 WORKERS = [{"label": "mac-vega-a", "host": "127.0.0.1", "port": 8188}, {"label": "mac-vega-b", "host": "127.0.0.1", "port": 8189}]
 APP = "Studio - Remove background.app.json"
-MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp", "keyframes", "paint3d", "mcp:keyframes"]
+MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp", "keyframes", "paint3d", "mcp:keyframes",
+           "video:fix-part", "video:fix-face", "video:extend", "video:keyframes", "mcp:fix-video", "mcp:extend-video", "mcp:keyframe-shot"]
+VIDEO = [m for m in MEMBERS if "video" in m or m == "mcp:keyframe-shot"]
 if os.environ.get("MEMBERS"):      # LIVE=1 MEMBERS=keyframes,paint3d: only those paths
     MEMBERS = [m for m in MEMBERS if m in os.environ["MEMBERS"].split(",")]
 
 # the mutations used by --mutants: (member, file, original, replacement) — each removes that path's target.
 # Scheduled renders and MCP go through /manny/api/run, so breaking manny_run must break them too.
-VIA_RUN = {"manny_run": {"manny_run", "schedule", "mcp"}, "keyframes": {"keyframes", "mcp:keyframes"}}   # MCP keyframes calls the keyframes route
+VIA_RUN = {"manny_run": {"manny_run", "schedule", "mcp"}, "keyframes": {"keyframes", "mcp:keyframes"},    # MCP keyframes calls the keyframes route
+           "video:fix": {"video:fix-part", "video:fix-face", "mcp:fix-video"}, "video:extend": {"video:extend", "mcp:extend-video"},
+           "video:keyframes": {"video:keyframes", "mcp:keyframe-shot"}, "mcp:video": {"mcp:fix-video", "mcp:extend-video"}}
 MUTANTS = [
     ("manny_run", "__init__.py", 'target = body.get("target") or _remote.LOCAL', "target = _remote.LOCAL"),
     ("finish", "__init__.py", '"Finish: smooth", b.get("target"))', '"Finish: smooth", None)'),
@@ -42,6 +46,12 @@ MUTANTS = [
     ("keyframes", "projects.py", 'f"Project keyframe {k + 1}", b.get("target"))', 'f"Project keyframe {k + 1}", None)'),
     ("paint3d", "previs.py", '"3D frame", b.get("target"))', '"3D frame", None)'),
     ("mcp:keyframes", "studio_mcp.py", '"redo": a.get("redo"), "target": a.get("run_on") or "local"}', '"redo": a.get("redo"), "target": "local"}'),
+    ("video:fix", "videotools.py", 'target = b.get("target")  # fix', 'target = None  # fix'),
+    ("video:extend", "videotools.py", 'target = b.get("target")  # extend', 'target = None  # extend'),
+    ("video:keyframes", "videotools.py", 'target = b.get("target")  # keyframes', 'target = None  # keyframes'),
+    ("mcp:video", "studio_mcp.py", 'body = dict(f, prompt=a.get("prompt", ""), seed=a.get("seed"), target=a.get("run_on") or "local")',
+     'body = dict(f, prompt=a.get("prompt", ""), seed=a.get("seed"), target="local")'),
+    ("mcp:keyframe-shot", "studio_mcp.py", '"seed": a.get("seed"), "target": a.get("run_on") or "local"}', '"seed": a.get("seed"), "target": "local"}'),
 ]
 fails = []
 
@@ -107,14 +117,15 @@ def derive_entry_points():
 SITES = {
     "sub": {("__init__.py", "manny_run"): "manny_run", ("__init__.py", "_queue_app"): "finish", ("__init__.py", "_finish"): "finish",
             ("projects.py", "run"): "keyframes + mcp:keyframes", ("previs.py", "run"): "paint3d",
+            ("videotools.py", "_queue"): "video tools (fix part/face, extend, keyframes) + their MCP tools",
             ("__init__.py", "_queue_api"): "(routing: Finish, music, voice)", ("sound.py", "_queue"): "sound:music + sound:voice"},
     "run": {("schedule.py", "_fire"): "schedule", ("studio_mcp.py", "call"): "mcp"},
     "local": {("__init__.py", "manny_run"): "(manny_run: this PC)", ("__init__.py", "_queue_api"): "(_queue_api: this PC)",
               ("__init__.py", "_llm"): "AI review / AI prompt help: PC-only",
-              ("videotools.py", "_queue"): "Video fixes / Continue / Keyframe shot: PC-only (no Run on yet)"},
+              },
 }
 WEB = os.path.join(os.path.dirname(PKG), "ComfyUI-MannyStudio", "web", "app.js") if os.environ.get("STUDIO_PKG") else os.path.join(PKG, "web", "app.js")
-RENDER_ROUTES = r'"/manny/api/(run|finish|music|voice|schedule|previs/style)"|"/manny/api/" \+ kind|`/manny/api/projects/\$\{pr\.id\}/keyframes`'
+RENDER_ROUTES = r'"/manny/api/(run|finish|music|voice|schedule|previs/style|video/fix|video/extend|video/keyframes)"|"/manny/api/" \+ kind|`/manny/api/projects/\$\{pr\.id\}/keyframes`'
 
 
 def web_sites(src):
@@ -122,9 +133,10 @@ def web_sites(src):
     target: or is runBody()'s body (runBody itself must set target)."""
     out, lines = [], src.split("\n")
     for k, line in enumerate(lines, 1):
-        for m in re.finditer(r"post\((" + RENDER_ROUTES + r")", line):
-            depth, j, arg = 0, m.start() + 4, ""
-            rest = "\n".join(lines[k - 1:k + 3])[m.start() + 4:]
+        for m in re.finditer(r"(?:post|videoJob)\((" + RENDER_ROUTES + r")", line):
+            paren = line.index("(", m.start())
+            depth, arg = 0, ""
+            rest = "\n".join(lines[k - 1:k + 3])[paren:]
             for ch in rest:
                 depth += ch == "("
                 depth -= ch == ")"
@@ -133,7 +145,9 @@ def web_sites(src):
                     break
             prior = "\n".join(lines[max(0, k - 4):k])
             via_runbody = bool(re.search(r"\bbody\b", arg)) and "runBody(app)" in prior
-            out.append((k, m.group(1), "target:" in arg or via_runbody))
+            built = re.search(r"const body = \{.*?\};", "\n".join(lines[max(0, k - 9):k]), re.S)    # body built just above the call
+            via_body = bool(re.search(r",\s*body\b", arg)) and bool(built) and "target: runTarget()" in built.group(0)
+            out.append((k, m.group(1), "target:" in arg or via_runbody or via_body))
     rb = re.search(r"function runBody\(app\) \{.*?\n\}", src, re.S)
     out.append(("runBody", "(Generate, Later)", bool(rb) and "target: runTarget()" in rb.group(0)))
     return out
@@ -214,7 +228,7 @@ async def main():
     reached, real_submit = [], remote.submit
 
     async def spy(w, api, payload_extra, dirs, private=False, incoming=".private_incoming", on_done=None, **kw):
-        reached.append({"worker": w["label"], "client_id": payload_extra.get("client_id"), "fetch": kw.get("fetch"),
+        reached.append({"worker": w["label"], "client_id": payload_extra.get("client_id"), "fetch": kw.get("fetch"), "api": json.loads(json.dumps(api)),
                         "label": (payload_extra.get("extra_data") or {}).get("manny_label"), "at": time.time()})
         if LIVE or FETCH:
             return await real_submit(w, api, payload_extra, dirs, private, incoming, on_done, **kw)
@@ -294,6 +308,35 @@ async def main():
                     if len(reached) > n:
                         break
                     await asyncio.sleep(0.1)
+            elif member.startswith("video:") or member in ("mcp:fix-video", "mcp:extend-video", "mcp:keyframe-shot"):
+                clip = {"filename": "clip.mp4", "subfolder": "et"}
+                if member == "video:fix-part":
+                    await post(s, "/manny/api/video/fix", dict(clip, start=0.2, end=1.0, mode="picture", prompt="rain", target=label))
+                elif member == "video:fix-face":
+                    await post(s, "/manny/api/video/fix", dict(clip, start=0.2, end=1.0, mode="face", target=label))
+                elif member == "video:extend":
+                    await post(s, "/manny/api/video/extend", dict(clip, prompt="he walks on", seconds=5, target=label))
+                elif member == "video:keyframes":
+                    await post(s, "/manny/api/video/keyframes", {"keys": [{"image": "ref_couture_model.png", "at": 0}, {"image": "ref_couture_model.png", "at": 3}],
+                                                                 "prompt": "a slow push in", "seconds": 5, "target": label})
+                else:
+                    os.environ["STUDIO_URL"] = base
+                    sys.path.insert(0, PKG)
+                    import studio_mcp
+                    studio_mcp.BASE = base
+                    a = {"mcp:fix-video": ("studio_fix_video", dict(clip, start=0.2, end=1.0, mode="picture", prompt="rain")),
+                         "mcp:extend-video": ("studio_extend_video", dict(clip, prompt="he walks on", seconds=5)),
+                         "mcp:keyframe-shot": ("studio_keyframe_shot", {"keys": [{"image": "ref_couture_model.png", "at": 0}, {"image": "ref_couture_model.png", "at": 3}],
+                                                                        "prompt": "a slow push in", "seconds": 5})}[member]
+                    studio_mcp.job_wait = lambda jid, t=0: (_ for _ in ()).throw(RuntimeError("not waiting in the test"))
+                    try:
+                        said.append(str(await asyncio.to_thread(studio_mcp.call, a[0], dict(a[1], run_on=label))))
+                    except Exception as e:
+                        said.append(str(e))
+                for _ in range(1200 if LIVE else 100):
+                    if len(reached) > n:
+                        break
+                    await asyncio.sleep(0.1)
             elif member == "paint3d":
                 await post(s, "/manny/api/previs/style", {"still": "ref_couture_model.png", "prompt": "a film frame", "model": "flux 3", "target": label})
                 for _ in range(1200 if LIVE else 100):
@@ -324,6 +367,29 @@ async def main():
             except Exception as e:      # a path that blows up hasn't honoured the target either
                 got = [f"error: {str(e)[:120]}"]
             check(got == [w["label"]], f"{member} with target {w['label']}: reached {got}")
+    # what a video tool sends another machine must be readable there: no PC path, no PC-only loader
+    for r in reached:
+        if r.get("client_id") != "studio-videotools":
+            continue
+        api = r["api"]
+        cls = {n.get("class_type") for n in api.values()}
+        vids = [n["inputs"].get("file") for n in api.values() if n.get("class_type") == "LoadVideo"]
+        paths = [v for n in api.values() for v in (n.get("inputs") or {}).values() if isinstance(v, str) and (v.startswith(tmp) or re.match(r"^[A-Za-z]:[\\/]", v))]
+        check("H3LoadVideoPath" not in cls and "CLIPLoaderGGUF" not in cls and not paths and all(v and v.endswith(" [output]") for v in vids),
+              f"video job for {r['worker']} ({r['label']}) is portable: classes ok {'H3LoadVideoPath' not in cls and 'CLIPLoaderGGUF' not in cls}, "
+              f"PC paths {paths[:1]}, LoadVideo {vids}")
+    vt = sys.modules["studio.videotools"]         # remote_api's two swaps, and the clip it can't send
+    g = vt.remote_api({"te": {"class_type": "CLIPLoaderGGUF", "inputs": {"clip_name": "x.gguf", "type": "minimax"}},
+                       "lv": {"class_type": "H3LoadVideoPath", "inputs": {"path": os.path.join(tmp, "input", "a b.mp4")}}})
+    check(g["te"] == {"class_type": "CLIPLoader", "inputs": {"clip_name": vt.H3_TE, "type": "minimax", "device": "default"}}
+          and g["lv"] == {"class_type": "LoadVideo", "inputs": {"file": "a b.mp4 [input]"}}, f"remote_api: GGUF -> nvfp4 CLIPLoader, input clip -> LoadVideo: {g}")
+    try:
+        vt.remote_api({"lv": {"class_type": "H3LoadVideoPath", "inputs": {"path": "/somewhere/else.mp4"}}})
+        check(False, "remote_api refuses a clip outside Studio's folders")
+    except RuntimeError as e:
+        check("can't be sent" in str(e), f"remote_api refuses a clip outside Studio's folders: {e}")
+    check(sum(r.get("client_id") == "studio-videotools" for r in reached) >= 2 * len(VIDEO),
+          f"every video entry point reached a Mac ({sum(r.get('client_id') == 'studio-videotools' for r in reached)} jobs)")
     # PC-only: drive AI review and AI prompt help with a Mac target; they must post to this PC and reach no Mac
     n, lp = len(reached), len(local_posts)
     async with aiohttp.ClientSession() as s:
@@ -606,7 +672,7 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
 
 def fetch_mutants():
     """Drop the download on each call site in turn: exactly the entry points through it must fail."""
-    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("_queue_api", {"finish", "sound:music", "sound:voice", "keyframes", "paint3d", "mcp:keyframes"})]
+    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("_queue_api", {"finish", "sound:music", "sound:voice", "keyframes", "paint3d", "mcp:keyframes", *VIDEO})]
     bad = 0
     for fn_name, members in sites:
         d = tempfile.mkdtemp(prefix="studio-mutant-")
@@ -646,11 +712,15 @@ def web_mutants():
                 continue
         else:
             ls = src.split("\n")
-            seg = "\n".join(ls[line - 1:line + 3])
-            if "target: runTarget()" not in seg:      # a runBody() caller: covered by the runBody mutant
+            lo = line - 1
+            if "target: runTarget()" not in "\n".join(ls[line - 1:line + 3]):     # the body is built just above the call
+                lo = max(0, line - 9)
+            seg = "\n".join(ls[lo:line + 3])
+            if "target: runTarget()" not in seg or ("runBody(app)" in seg and lo != line - 1):   # a runBody() caller: covered by the runBody mutant
                 continue
-            seg2 = seg.replace(", target: runTarget()", "", 1)
-            mut = "\n".join(ls[:line - 1]) + "\n" + seg2 + "\n" + "\n".join(ls[line + 3:])
+            k2 = seg.rfind(", target: runTarget()")
+            seg2 = seg[:k2] + seg[k2 + len(", target: runTarget()"):]
+            mut = "\n".join(ls[:lo]) + ("\n" if lo else "") + seg2 + "\n" + "\n".join(ls[line + 3:])
         flagged = {l for l, r, o in web_sites(mut) if not o}
         want = {line} if line != "runBody" else {"runBody"}
         good = flagged == want

@@ -490,13 +490,13 @@ TOOLS += [
     {"name": "studio_upscale_video", "description": "Upscale a video and/or raise its frame rate with Topaz Video (on this PC). Give a path, or filename+subfolder from the gallery.",
      "inputSchema": {"type": "object", "properties": {"path": S_, "filename": S_, "subfolder": S_, "size": {"type": "string", "enum": ["1080", "1440", "4k", ""]}, "fps": {"type": "string", "enum": ["keep", "48", "60"]}, "private": B_}}},
     {"name": "studio_fix_video", "description": "Fix part of a video with LTX-2.5 (the sound is always kept). mode 'picture' re-draws the marked seconds (plus 1 s each side) from the video itself, 'face' tracks the face and re-draws only it. Only that stretch changes; the result is a new file in Videos/Fixed. Give a path, or filename+subfolder from the gallery. Waits (several minutes).",
-     "inputSchema": {"type": "object", "properties": {"path": S_, "filename": S_, "subfolder": S_, "start": N_, "end": N_, "mode": {"type": "string", "enum": ["picture", "face"]},
+     "inputSchema": {"type": "object", "properties": {"run_on": {"type": "string", "description": "Which GPU: \"local\" (this PC, default), \"auto\" or a machine name from studio_status"}, "path": S_, "filename": S_, "subfolder": S_, "start": N_, "end": N_, "mode": {"type": "string", "enum": ["picture", "face"]},
                                                       "prompt": {"type": "string", "description": "what should happen in the marked part (for 'face': describe the person)"},                                                       "denoise": {"type": "number", "description": "how much to change: face 0.25-0.7 (default 0.45), picture 0.4-0.9 (default 0.7)"}, "seed": N_}, "required": ["start", "end", "mode"]}},
     {"name": "studio_extend_video", "description": "Continue a shot with MiniMax H3 motion context: the clip's last second of motion and sound carries into the new part, which is joined on. Result: a new, longer video in Videos/Extended. Waits.",
-     "inputSchema": {"type": "object", "properties": {"path": S_, "filename": S_, "subfolder": S_, "prompt": {"type": "string", "description": "what happens next"},
+     "inputSchema": {"type": "object", "properties": {"run_on": {"type": "string", "description": "Which GPU: \"local\" (this PC, default), \"auto\" or a machine name from studio_status"}, "path": S_, "filename": S_, "subfolder": S_, "prompt": {"type": "string", "description": "what happens next"},
                                                       "seconds": {"type": "integer", "enum": [5, 7, 9, 11]}, "ref": {"type": "string", "description": "character picture (local path), optional"}, "seed": N_}, "required": ["prompt"]}},
     {"name": "studio_keyframe_shot", "description": "One continuous shot through several pictures at chosen times. LTX-2.5, two passes, up to 8 pictures. keys: [{image: local path, at: seconds}], the first at 0. Waits.",
-     "inputSchema": {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "object"}}, "prompt": S_,
+     "inputSchema": {"type": "object", "properties": {"run_on": {"type": "string", "description": "Which GPU: \"local\" (this PC, default), \"auto\" or a machine name from studio_status"}, "keys": {"type": "array", "items": {"type": "object"}}, "prompt": S_,
                                                       "seconds": N_, "aspect": {"type": "string", "enum": ["16:9", "9:16", "1:1", "21:9"]}, "seed": N_}, "required": ["keys", "prompt"]}},
     {"name": "studio_poses", "description": "Pose packs on this PC (stick-figure pictures for the 'pose' option of studio_generate), and whether the pose ControlNets are installed.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -655,7 +655,7 @@ def call(name, a):
             f = {"filename": info["filename"], "subfolder": info["subfolder"]}
         if not f["filename"]:
             raise ValueError("Give path, or filename + subfolder")
-        body = dict(f, prompt=a.get("prompt", ""), seed=a.get("seed"))
+        body = dict(f, prompt=a.get("prompt", ""), seed=a.get("seed"), target=a.get("run_on") or "local")
         if a.get("ref"):
             body["ref"] = as_input(a["ref"])
         if name == "studio_fix_video":
@@ -671,7 +671,7 @@ def call(name, a):
         w, h = sizes.get(a.get("aspect") or "16:9")
         keys = [{"image": as_input(k["image"]), "at": float(k.get("at") or 0)} for k in a["keys"]]
         r = http("POST", "/manny/api/video/keyframes", {"engine": a.get("engine", "ltx"), "keys": keys, "prompt": a["prompt"],
-                                                       "seconds": a.get("seconds") or max(5, max(k["at"] for k in keys)), "width": w, "height": h, "seed": a.get("seed")})
+                                                       "seconds": a.get("seconds") or max(5, max(k["at"] for k in keys)), "width": w, "height": h, "seed": a.get("seed"), "target": a.get("run_on") or "local"})
         res = job_wait(r["id"], 4 * 3600)
         return [{"type": "text", "text": json.dumps(dict(res, path=abs_out(res)), indent=1)}]
     if name == "studio_poses":
