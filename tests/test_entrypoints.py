@@ -545,6 +545,7 @@ SCENARIOS = {
     "unavailable": ["unavailable"],
     "slow": ["present"],            # the first ask hangs past Studio's timeout (an HF index rebuild, a PC asleep)
     "noroute": ["present"],         # a worker without /mac/fetch at all: 404
+    "push": ["push"],               # the Mac can't pull (no route to the PC): "push": true, the PC sends the file
 }
 REFUSED = {"unavailable": UNAVAILABLE, "noroute": "can't download models"}   # what the caller must be told
 
@@ -554,7 +555,8 @@ async def fake_macs(remote, labels, real_oi, sv):
     first; /mac/fetch plays the current scenario, and a file becomes listed once it answers "present". /prompt
     records whether the gate still refused at that moment (it must never)."""
     from aiohttp import web
-    st = {"hidden": set(), "landed": {}, "scenario": "present", "calls": {}, "posts": [], "fetches": [], "history": {}}
+    st = {"hidden": set(), "landed": {}, "scenario": "present", "calls": {}, "posts": [], "fetches": [], "history": {},
+          "pushed": {}, "puts": []}
 
     def oi_now():
         out = json.loads(json.dumps(real_oi))
@@ -605,6 +607,9 @@ async def fake_macs(remote, labels, real_oi, sv):
                 status = script[min(n, len(script)) - 1]
                 if not MODEL.search(v or ""):
                     status = "unavailable"      # not a model file
+                if status == "push":            # complete once the PC has pushed every byte
+                    have, want = st["pushed"].get(v, (b"", None))
+                    status = "present" if want is not None and len(have) == want else "push"
                 e = {"value": v, "status": status}
                 if status == "present":
                     st["hidden"].discard(v)
@@ -613,10 +618,37 @@ async def fake_macs(remote, labels, real_oi, sv):
                     e.update(by=label, done=n * 100_000_000, size=400_000_000)
                 elif status == "failed":
                     e["reason"] = "connection reset"
+                elif status == "push":
+                    e.update(status="unavailable", push=True, folder="loras",
+                             reason="not on Hugging Face, and the Studio PC isn't reachable ([Errno 65] No route to host)")
                 else:
                     e["reason"] = UNAVAILABLE
                 out.append(e)
             return web.json_response({"files": out})
+
+        async def models_head(q):
+            v = q.match_info["name"]
+            have, want = st["pushed"].get(v, (b"", None))
+            if want is not None and len(have) == want:
+                return web.Response(status=200, headers={"Content-Length": str(want)})
+            return web.Response(status=404, headers={"X-Mac-Have": str(len(have))})
+
+        async def models_put(q):
+            v = q.match_info["name"]
+            body = await q.read()
+            have, _w = st["pushed"].get(v, (b"", None))
+            cr = q.headers.get("Content-Range")
+            start, total = (int(cr.split()[1].split("-")[0]), int(cr.split("/")[1])) if cr else (0, len(body))
+            st["puts"].append((v, start, len(body)))
+            if start != len(have):
+                return web.Response(status=416, headers={"X-Mac-Have": str(len(have))})
+            if start == 0 and len(body) > 1:        # the first piece breaks off halfway: Studio must resume
+                body = body[: len(body) // 2]
+            have += body
+            st["pushed"][v] = (have, total)
+            if len(have) == total:
+                return web.json_response({"status": "present"}, status=201)
+            return web.json_response({"have": len(have)}, status=202)
 
         async def upload(q):
             d = await q.post()
@@ -642,6 +674,8 @@ async def fake_macs(remote, labels, real_oi, sv):
         r.add_get("/object_info", object_info)
         r.add_get("/mac/info", info)
         r.add_post("/mac/fetch", fetch)
+        r.add_route("HEAD", "/mac/models/{folder}/{name:.*}", models_head)
+        r.add_put("/mac/models/{folder}/{name:.*}", models_put)
         r.add_post("/upload/image", upload)
         r.add_post("/prompt", prompt)
         r.add_get("/history/{pid}", history)
@@ -687,6 +721,16 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
     remote.save_workers(studio._data_dir(), fakes)
     remote._caps.clear()
     remote.FETCH_POLL = 0.05
+    local = {}      # this PC's copy of each model, as pushed
+
+    def local_model(folder, value):
+        if value not in local:
+            p = os.path.join(studio._data_dir(), "pc_models", str(len(local)) + ".safetensors")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "wb").write(os.urandom(150_000 + 7 * len(local)))
+            local[value] = p
+        return local[value]
+    remote.LOCAL_MODEL = local_model
     remote.FETCH_TIMEOUT = 0.5
 
     async def settle(n_jobs, timeout=60):
@@ -748,7 +792,13 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
                 check(len(posts) == 1 and len(jobs) == 1 and posts[0]["prompt_id"] == jobs[0]["prompt_id"] and posts[0]["worker"] == w["label"],
                       f"{tag} queued once on {w['label']} under the id it got at once: posts {[(p['worker'], p['prompt_id']) for p in posts]} jobs {[j['prompt_id'] for j in jobs]}")
                 check(len(done) == 1, f"{tag} rendered and came back: {[(j['status'], j.get('error')) for j in jobs]}")
-                want = {"present": 1, "downloading": 3, "failed": 3, "slow": 1}[scen]
+                want = {"present": 1, "downloading": 3, "failed": 3, "slow": 1, "push": 2}[scen]
+                if scen == "push":
+                    vals = sorted({v for _l, vs in fetches for v in vs if MODEL.search(v or "")})
+                    same = all(st["pushed"].get(v, (b"", 0))[0] == open(local[v], "rb").read() for v in vals if v in local)
+                    resumed = all(sum(1 for pv, a, _n in st["puts"] if pv == v and a > 0) >= 1 for v in vals)
+                    check(vals and all(v in local for v in vals) and same and resumed,
+                          f"{tag} this PC pushed every missing file ({len(vals)}), byte-identical {same}, resumed after a cut {resumed}")
                 check(len(fetches) >= want, f"{tag} kept asking until present ({len(fetches)} /mac/fetch calls, >= {want})")
 
     # "Any free GPU" never downloads: it takes a machine that can run it now (here: this PC)
