@@ -747,7 +747,7 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
         for scen in SCENARIOS:
             w = fakes[k % 2]
             k += 1
-            st["scenario"], st["calls"], st["hidden"], st["landed"] = scen, {}, set(st["all_hidden"]), {}
+            st["scenario"], st["calls"], st["hidden"], st["landed"], st["pushed"], st["puts"] = scen, {}, set(st["all_hidden"]), {}, {}, []
             remote._caps.clear()
             n_reach, n_post, n_fetch, n_said, n_jobs = len(reached), len(st["posts"]), len(st["fetches"]), len(said), len(remote.JOBS)
             old_sj = set(studio._jobs)

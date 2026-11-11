@@ -116,6 +116,16 @@ def _index(folder):
     return out
 
 
+def local_model(folder, value):
+    """This PC's file for a model a GPU machine can't pull (Studio pushes it instead); same rules as the routes."""
+    try:
+        if not value or _bad_name(value):
+            return None
+        return _find(_folder(folder), value)
+    except web.HTTPException:
+        return None
+
+
 def setup(ns):
     H.update(ns)
     routes = ns["routes"]
