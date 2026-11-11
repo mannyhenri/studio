@@ -428,6 +428,10 @@ async def main():
                     await asyncio.wait_for(j["task"], 1800)
                 except Exception:
                     pass
+        for _ in range(120):       # then Studio's job saves or splices what came back
+            if not any(j.get("status") == "running" for j in studio._jobs.values()):
+                break
+            await asyncio.sleep(1)
         jobs = [j for j in remote.JOBS.values()]
         print("live jobs:", sorted((j["worker"], j["status"], j.get("label"), (j.get("error") or "")[:60]) for j in jobs))
         print("studio jobs:", [(k, j.get("kind"), j.get("status"), j.get("stage"), str(j.get("error"))[:80]) for k, j in studio._jobs.items()])
@@ -441,8 +445,8 @@ async def main():
         # a video tool is done only when its result is on this PC: spliced (fix), joined (extend) or saved (keyframes)
         vt = sys.modules["studio.videotools"]
         for j in studio._jobs.values():
-            if j.get("kind") not in ("videofix", "videoextend", "keyframes"):
-                continue
+            if j.get("kind") not in ("videofix", "videoextend", "keyframes") or "can't run this" in str(j.get("error")):
+                continue        # refused by the card with its reason: counted above
             res = j.get("result") or {}
             full = os.path.join(studio._root(False), res.get("subfolder", ""), res.get("filename", "")) if res else ""
             info = vt.probe(full) if full and os.path.isfile(full) else {}
