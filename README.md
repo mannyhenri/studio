@@ -41,7 +41,7 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 - Cancel (✕ in the queue drawer) takes the job out of the Mac's queue or stops it, then cleans up the same way. A Mac that restarts mid-job fails the job ("restarted and lost the job"); one that stops answering for 10 min does too.
 - Jobs on other machines survive a restart of this PC's ComfyUI: they're kept in `manny_studio/remote_jobs.json` and followed again at startup. As a safety net the Mac clears Studio jobs that finished more than 24 h ago, so a result that waits longer than a day for this PC to come back is lost (the job shows as failed).
 
-**What stays on this PC:** AI review and AI prompt help (their result is text, not a file) and Topaz in Finish.
+**What stays on this PC:** AI review and AI prompt help (their result is text, not a file), Topaz in Finish, and the video tools (Fix a part, Fix a face, Continue a shot, Keyframe shot), which splice the clip with ffmpeg here.
 
 **Models on the Mac.** A choice runs on the Mac only once its model files are there. Most come from Hugging Face (the comfy-mac repo fetches them). These exist only on this PC, so copy them yourself into `~/code/comfy-mac/ComfyUI/models/<folder>/` on the Mac. Both workers see them at once, no restart needed:
 

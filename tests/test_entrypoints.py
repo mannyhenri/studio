@@ -100,7 +100,8 @@ SITES = {
             ("__init__.py", "_queue_api"): "(routing: Finish, music, voice)", ("sound.py", "_queue"): "sound:music + sound:voice"},
     "run": {("schedule.py", "_fire"): "schedule", ("studio_mcp.py", "call"): "mcp"},
     "local": {("__init__.py", "manny_run"): "(manny_run: this PC)", ("__init__.py", "_queue_api"): "(_queue_api: this PC)",
-              ("__init__.py", "_llm"): "AI review / AI prompt help: PC-only"},
+              ("__init__.py", "_llm"): "AI review / AI prompt help: PC-only",
+              ("videotools.py", "_queue"): "Video fixes / Continue / Keyframe shot: PC-only (no Run on yet)"},
 }
 WEB = os.path.join(os.path.dirname(PKG), "ComfyUI-MannyStudio", "web", "app.js") if os.environ.get("STUDIO_PKG") else os.path.join(PKG, "web", "app.js")
 RENDER_ROUTES = r'"/manny/api/(run|finish|music|voice|schedule)"|"/manny/api/" \+ kind'
