@@ -125,6 +125,7 @@ SITES = {
     "run": {("schedule.py", "_fire"): "schedule", ("studio_mcp.py", "call"): "mcp"},
     "local": {("__init__.py", "manny_run"): "(manny_run: this PC)", ("__init__.py", "_queue_api"): "(_queue_api: this PC)",
               ("__init__.py", "_llm"): "AI review / AI prompt help: PC-only",
+              ("__init__.py", "_put_back"): "a moved job that failed on a card goes back in this PC's queue (by design)",
               },
 }
 WEB = os.path.join(os.path.dirname(PKG), "ComfyUI-MannyStudio", "web", "app.js") if os.environ.get("STUDIO_PKG") else os.path.join(PKG, "web", "app.js")
@@ -546,8 +547,11 @@ SCENARIOS = {
     "slow": ["present"],            # the first ask hangs past Studio's timeout (an HF index rebuild, a PC asleep)
     "noroute": ["present"],         # a worker without /mac/fetch at all: 404
     "push": ["push"],               # the Mac can't pull (no route to the PC): "push": true, the PC sends the file
+    "push-flaky": ["push"],         # ... and the connection drops in the middle of the first PUT: resume
+    "push-stuck": ["push"],         # ... and the Mac answers 202 without taking any bytes: give up with a reason
+    "push-locked": ["push"],        # ... and the Mac keeps answering 423 (a stale lock): give up with a reason
 }
-REFUSED = {"unavailable": UNAVAILABLE, "noroute": "can't download models"}   # what the caller must be told
+REFUSED = {"unavailable": UNAVAILABLE, "noroute": "can't download models", "push-stuck": "isn't taking", "push-locked": "isn't taking"}   # what the caller must be told
 
 
 async def fake_macs(remote, labels, real_oi, sv):
@@ -635,8 +639,23 @@ async def fake_macs(remote, labels, real_oi, sv):
 
         async def models_put(q):
             v = q.match_info["name"]
-            body = await q.read()
             have, _w = st["pushed"].get(v, (b"", None))
+            scen = st["scenario"]
+            if scen == "push-locked":
+                return web.Response(status=423)
+            if scen == "push-stuck":
+                await q.read()
+                st["pushed"][v] = (have, int(q.headers.get("Content-Range", "x/0").split("/")[-1]) or int(q.headers.get("Content-Length", 0)))
+                return web.json_response({"have": len(have)}, status=202)
+            if scen == "push-flaky" and not st["calls"].get(("drop", v)):
+                st["calls"][("drop", v)] = 1           # take some bytes, then the line goes dead
+                part = await q.content.read(40_000)
+                total = int(q.headers.get("Content-Length", 0))
+                st["pushed"][v] = (have + part, total)
+                st["puts"].append((v, 0, len(part)))
+                q.transport.close()
+                return web.Response(status=500)
+            body = await q.read()
             cr = q.headers.get("Content-Range")
             start, total = (int(cr.split()[1].split("-")[0]), int(cr.split("/")[1])) if cr else (0, len(body))
             st["puts"].append((v, start, len(body)))
@@ -732,6 +751,7 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
         return local[value]
     remote.LOCAL_MODEL = local_model
     remote.FETCH_TIMEOUT = 0.5
+    remote.PUSH_STALL = 1.0
 
     async def settle(n_jobs, timeout=60):
         t0 = time.time()
@@ -792,8 +812,8 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
                 check(len(posts) == 1 and len(jobs) == 1 and posts[0]["prompt_id"] == jobs[0]["prompt_id"] and posts[0]["worker"] == w["label"],
                       f"{tag} queued once on {w['label']} under the id it got at once: posts {[(p['worker'], p['prompt_id']) for p in posts]} jobs {[j['prompt_id'] for j in jobs]}")
                 check(len(done) == 1, f"{tag} rendered and came back: {[(j['status'], j.get('error')) for j in jobs]}")
-                want = {"present": 1, "downloading": 3, "failed": 3, "slow": 1, "push": 2}[scen]
-                if scen == "push":
+                want = {"present": 1, "downloading": 3, "failed": 3, "slow": 1, "push": 2, "push-flaky": 2}[scen]
+                if scen in ("push", "push-flaky"):
                     vals = sorted({v for _l, vs in fetches for v in vs if MODEL.search(v or "")})
                     same = all(st["pushed"].get(v, (b"", 0))[0] == open(local[v], "rb").read() for v in vals if v in local)
                     resumed = all(sum(1 for pv, a, _n in st["puts"] if pv == v and a > 0) >= 1 for v in vals)
