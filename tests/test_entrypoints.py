@@ -43,21 +43,89 @@ def check(c, m):
         fails.append(m)
 
 
+def _calls(path):
+    """(call node, enclosing function name) for every call in a Python file."""
+    import ast
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    out = []
+
+    decorators = {id(d) for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) for d in n.decorator_list}
+
+    def walk(node, fn):
+        for ch in ast.iter_child_nodes(node):
+            name = ch.name if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)) else fn
+            if isinstance(ch, ast.Call) and id(ch) not in decorators:   # @routes.post("/manny/api/run") registers, it doesn't call
+                out.append((ch, fn))
+            walk(ch, name)
+    walk(tree, "<module>")
+    return out
+
+
+def _text(node):
+    """The literal text of a str / f-string argument ('' otherwise)."""
+    import ast
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value for v in node.values if isinstance(v, ast.Constant))
+    return ""
+
+
 def derive_entry_points():
-    """(sites that hand jobs to another machine, callers of /manny/api/run, direct local /prompt posts) from the code."""
-    sub, run, local = [], [], []
+    """From the code, by ENCLOSING FUNCTION (not line numbers): {(file, function)} of
+    sub   - calls that can hand a job to another machine (_remote.submit, _queue_api),
+    run   - callers of /manny/api/run (they re-enter manny_run),
+    local - posts straight to this PC's ComfyUI /prompt."""
+    import ast
+    sub, run, local = set(), set(), set()
     for fn in sorted(glob.glob(os.path.join(PKG, "*.py"))):
-        for k, line in enumerate(open(fn, encoding="utf-8"), 1):
-            if re.match(r"\s*(async )?def |\s*@routes", line):
-                continue
-            where = f"{os.path.basename(fn)}:{k}"
-            if re.search(r"(_remote\.submit|_queue_api\"?\]?)\(", line):
-                sub.append(where)
-            if "/manny/api/run" in line and re.search(r"(post|http)\(", line):
-                run.append(where)
-            if re.search(r'127\.0\.0\.1:[^"]*/prompt"', line) and ".post(" in line:   # to this PC's own ComfyUI
-                local.append(where)
+        f = os.path.basename(fn)
+        for call, enc in _calls(fn):
+            c = call.func
+            if (isinstance(c, ast.Attribute) and c.attr == "submit" and isinstance(c.value, ast.Name) and c.value.id == "_remote") \
+                    or (isinstance(c, ast.Name) and c.id == "_queue_api") \
+                    or (isinstance(c, ast.Subscript) and _text(c.slice) == "_queue_api"):
+                sub.add((f, enc))
+            texts = [_text(a) for a in call.args]
+            if any("/manny/api/run" in t for t in texts) and (isinstance(c, ast.Attribute) and c.attr == "post" or isinstance(c, ast.Name) and c.id == "http"):
+                run.add((f, enc))
+            if isinstance(c, ast.Attribute) and c.attr == "post" and any("127.0.0.1" in t and t.endswith("/prompt") for t in texts):
+                local.add((f, enc))
     return sub, run, local
+
+
+# what each derived site is: the members driven below, plus routing internals and the PC-only AI path
+SITES = {
+    "sub": {("__init__.py", "manny_run"): "manny_run", ("__init__.py", "_queue_app"): "finish",
+            ("__init__.py", "_queue_api"): "(routing: Finish, music, voice)", ("sound.py", "_queue"): "sound:music + sound:voice"},
+    "run": {("schedule.py", "_fire"): "schedule", ("studio_mcp.py", "call"): "mcp"},
+    "local": {("__init__.py", "manny_run"): "(manny_run: this PC)", ("__init__.py", "_queue_api"): "(_queue_api: this PC)",
+              ("__init__.py", "_llm"): "AI review / AI prompt help: PC-only"},
+}
+WEB = os.path.join(os.path.dirname(PKG), "ComfyUI-MannyStudio", "web", "app.js") if os.environ.get("STUDIO_PKG") else os.path.join(PKG, "web", "app.js")
+RENDER_ROUTES = r'"/manny/api/(run|finish|music|voice|schedule)"|"/manny/api/" \+ kind'
+
+
+def web_sites(src):
+    """Every browser call that starts a render: (line, route, sends a target?). A call passes when its body has
+    target: or is runBody()'s body (runBody itself must set target)."""
+    out, lines = [], src.split("\n")
+    for k, line in enumerate(lines, 1):
+        for m in re.finditer(r"post\((" + RENDER_ROUTES + r")", line):
+            depth, j, arg = 0, m.start() + 4, ""
+            rest = "\n".join(lines[k - 1:k + 3])[m.start() + 4:]
+            for ch in rest:
+                depth += ch == "("
+                depth -= ch == ")"
+                arg += ch
+                if depth == 0:
+                    break
+            prior = "\n".join(lines[max(0, k - 4):k])
+            via_runbody = bool(re.search(r"\bbody\b", arg)) and "runBody(app)" in prior
+            out.append((k, m.group(1), "target:" in arg or via_runbody))
+    rb = re.search(r"function runBody\(app\) \{.*?\n\}", src, re.S)
+    out.append(("runBody", "(Generate, Later)", bool(rb) and "target: runTarget()" in rb.group(0)))
+    return out
 
 
 async def main():
@@ -109,6 +177,12 @@ async def main():
     app = web.Application()
     for m, path, fn in routes:
         app.router.add_route(m, path, fn)
+    local_posts = []
+
+    async def pc_prompt(request):       # this PC's own ComfyUI, as far as the test needs it
+        local_posts.append(await request.json())
+        return web.json_response({"error": "stand-in"}, status=400)
+    app.router.add_route("POST", "/prompt", pc_prompt)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -122,6 +196,7 @@ async def main():
             async with s.get(remote.base(WORKERS[1]) + "/object_info") as r:
                 return await r.json()
     studio._get_object_info = oi
+    studio._llm_model = lambda: "stand-in-llm.safetensors"   # the AI paths need a model name to build their prompt
     remote.save_workers(studio._data_dir(), WORKERS)
 
     # routing instrumented: record the worker every job reaches; LIVE also really sends it
@@ -138,15 +213,19 @@ async def main():
         return {"prompt_id": pid, "worker": w["label"]}
     remote.submit = spy
 
-    # ---- the set, from the code
+    # ---- the set, from the code (by enclosing function)
     sub, run, local = derive_entry_points()
-    print(f"code: remote-submit sites {sub}; /manny/api/run callers {run}; direct local /prompt posts {local}")
-    check(len(sub) == 4 and len(run) == 2, f"entry points in the code: 4 submit sites + 2 /manny/api/run callers -> members {MEMBERS}")
+    for kind, found in (("sub", sub), ("run", run), ("local", local)):
+        for site in sorted(found):
+            print(f"  {kind}: {site[0]}:{site[1]} -> {SITES[kind].get(site, 'NOT MAPPED')}")
+        check(found == set(SITES[kind]), f"{kind} sites in the code == the mapped set ({len(found)}): unmapped {sorted(found - set(SITES[kind]))}, gone {sorted(set(SITES[kind]) - found)}")
     kinds = re.findall(r'_start\("(\w+)"', open(os.path.join(PKG, "sound.py"), encoding="utf-8").read())
     check(sorted(f"sound:{k}" for k in kinds) == ["sound:music", "sound:voice"], f"sound routes in the code: {kinds}")
-    pc_only = [x for x in local if not re.search(r"__init__\.py:(3[0-9]{2}|10[0-9]{2})$", x)]   # manny_run / _queue_api local branches
-    ai_line = next((k for k, l in enumerate(open(os.path.join(PKG, "__init__.py"), encoding="utf-8"), 1) if '"studio-ai"' in l and "/prompt" in l), None)
-    check(pc_only == [f"__init__.py:{ai_line}"], f"the only direct local /prompt post outside routing is AI review/prompt: {pc_only}")
+    # the browser: every call that starts a render must send the Run-on target
+    ws = web_sites(open(WEB, encoding="utf-8").read())
+    for line, route, ok in ws:
+        check(ok, f"web app.js:{line} {route} sends the Run-on target")
+    check(len(ws) >= 9, f"browser render calls found: {len(ws) - 1} + runBody")
 
     import aiohttp
 
@@ -200,8 +279,22 @@ async def main():
             except Exception as e:      # a path that blows up hasn't honoured the target either
                 got = [f"error: {str(e)[:120]}"]
             check(got == [w["label"]], f"{member} with target {w['label']}: reached {got}")
-    # PC-only: AI review never reaches routing (it posts to this PC's ComfyUI only)
-    check(all("AI" != (r.get("label") or "") for r in reached), "AI review/prompt help never reaches another machine")
+    # PC-only: drive AI review and AI prompt help with a Mac target; they must post to this PC and reach no Mac
+    n, lp = len(reached), len(local_posts)
+    async with aiohttp.ClientSession() as s:
+        for path, body in (("/manny/api/ai/review", {"filename": "clip.mp4", "subfolder": "et"}),
+                           ("/manny/api/ai/prompt", {"idea": "a red apple", "kind": "image"})):
+            st, j = await post(s, path, dict(body, target="mac-vega-a"))
+            for _ in range(200):
+                if len(local_posts) > lp:
+                    break
+                await asyncio.sleep(0.1)
+            if len(local_posts) <= lp:
+                print("  AI jobs:", [(x.get("kind"), x.get("status"), (x.get("error") or "")[:160]) for x in studio._jobs.values() if "ai" in str(x.get("kind", "")) or "review" in str(x) or "Writing" in str(x.get("stage"))][-2:])
+            check(len(local_posts) > lp and all((p.get("extra_data") or {}).get("manny_label") == "AI" for p in local_posts[lp:]),
+                  f"{path}: posted to this PC's ComfyUI ({len(local_posts) - lp} prompt)")
+            lp = len(local_posts)
+    check(len(reached) == n, f"AI review / AI prompt help reached no Mac ({len(reached) - n})")
 
     if LIVE:    # wait for the real jobs, so each lands, comes back and is forgotten
         for pid, j in list(remote.JOBS.items()):
@@ -222,9 +315,37 @@ async def main():
     return 1 if fails else 0
 
 
+def web_mutants():
+    """Drop the target from each browser render call in turn: exactly that call must be flagged."""
+    src = open(WEB, encoding="utf-8").read()
+    base = [x for x in web_sites(src)]
+    bad = 0
+    for line, route, ok in base:
+        if line == "runBody":
+            rb = re.search(r"function runBody\(app\) \{.*?\n\}", src, re.S).group(0)
+            mut = src.replace(rb, rb.replace(" target: runTarget(),", "", 1), 1)
+            if mut == src:
+                print("FAIL web mutant runBody: nothing to mutate; update web_mutants")
+                bad += 1
+                continue
+        else:
+            ls = src.split("\n")
+            seg = "\n".join(ls[line - 1:line + 3])
+            if "target: runTarget()" not in seg:      # a runBody() caller: covered by the runBody mutant
+                continue
+            seg2 = seg.replace(", target: runTarget()", "", 1)
+            mut = "\n".join(ls[:line - 1]) + "\n" + seg2 + "\n" + "\n".join(ls[line + 3:])
+        flagged = {l for l, r, o in web_sites(mut) if not o}
+        want = {line} if line != "runBody" else {"runBody"}
+        good = flagged == want
+        bad += not good
+        print(f"{'PASS' if good else 'FAIL'} web mutant app.js:{line} {route}: flagged {sorted(map(str, flagged))}")
+    return bad
+
+
 def mutants():
     """Each mutation drops the target on ONE path: the test must fail on exactly that path's checks."""
-    bad = 0
+    bad = web_mutants()
     for member, fn, a, b in MUTANTS:
         d = tempfile.mkdtemp(prefix="studio-mutant-")
         pkg = os.path.join(d, "ComfyUI-MannyStudio")

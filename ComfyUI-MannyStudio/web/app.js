@@ -536,7 +536,7 @@ async function compareModels(app) {
     const vals = { ...buildValues(app), [L.model.key]: o };
     seedKeys.forEach(k => vals[k] = seed);
     try {
-      const res = await post("/manny/api/run", { app: app.id, values: vals, count: 1, client_id: clientId, private: S.incog });
+      const res = await post("/manny/api/run", { app: app.id, values: vals, count: 1, client_id: clientId, private: S.incog, target: runTarget() });
       const q = res.queued[0]; S.mine[q.prompt_id] = { app: app.id, compare: true };
       S.compare.items.push({ model: splitOption(o)[0], prompt_id: q.prompt_id, url: null });
     } catch (e) { toast("Couldn't queue " + splitOption(o)[0], true); }
@@ -1084,7 +1084,7 @@ async function renderShot(b, s, o = {}) {
   if (o.seed != null && K.seed) { vals[K.seed.key] = o.seed; seedKeys = seedKeys.filter(k => k !== K.seed.key); }
   try {
     const loras = loraPayload(app, vals);
-    const res = await post("/manny/api/run", { app: app.id, values: vals, count: o.count || 1, client_id: clientId, random_seed_keys: seedKeys, private: !!b.private, loras, motion_video: motion });
+    const res = await post("/manny/api/run", { app: app.id, values: vals, count: o.count || 1, client_id: clientId, random_seed_keys: seedKeys, private: !!b.private, loras, motion_video: motion, target: runTarget() });
     res.queued.forEach(q => {
       const seed = o.seed != null ? o.seed : (K.seed ? (q.seed || [])[seedKeys.indexOf(K.seed.key)] : null);
       s.takes.push({ pid: q.prompt_id, seed: seed ?? null, q: o.q || "", status: "queued", output: null, from: o.from ?? null });
