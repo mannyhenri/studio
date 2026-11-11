@@ -4,7 +4,9 @@ comfy-mac's /mac/forget clears Studio jobs a restarted dispatcher lost track of 
 them by extra_data.manny_app. This drives EVERY path that reaches remote.submit (found in the code; a new call
 site fails the test until it's covered here) with remote.submit stubbed, and checks what each one would send.
 
-  ~/code/comfy-mac/.venv/bin/python tests/test_marker.py        (no workers needed)
+  ~/code/comfy-mac/.venv/bin/python tests/test_marker.py
+Needs one running ComfyUI for /object_info (OBJECT_INFO, default http://127.0.0.1:8189/object_info) to convert the
+apps; nothing is queued anywhere (remote.submit is stubbed).
 """
 import asyncio, glob, importlib.util, json, os, re, shutil, sys, tempfile, types
 

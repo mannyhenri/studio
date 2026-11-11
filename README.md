@@ -35,11 +35,11 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 **How a job is sent**
 - Studio first checks the machine *live*: every node must be installed, every model, sampler or scheduler name must be one that machine offers for that exact input, and every required input must be present. Missing anything → the job isn't sent, and you see what's missing (node, input, value). It never renders something different by accident.
 - Model switches a job doesn't use are dropped before the check. Without that, ComfyUI would ask for every model an app *could* pick. The trimmed job is exactly what ComfyUI would run anyway.
-- **Any free GPU** picks the least busy machine that has everything, and this PC wins ties. A Mac card that has been on one of your jobs for more than 10 min counts as busier. Measured on one Vega II: Remove background 14 s, Smooth motion 27 s, Z-Image 4.5 min, Upscale (SeedVR2 7b) 9 min, LTX video 44–55 min, Upscale video over an hour.
+- **Any free GPU** picks the least busy machine that has everything, and this PC wins ties. A Mac card that has been on one of your jobs for more than 10 min counts as busier. Measured on one Vega II: Remove background 14 s, Smooth motion 27 s, Z-Image 4.5 min, Upscale (SeedVR2 7b) 9 min, Inpaint 13 min, LTX video 44–55 min, Upscale video over an hour.
 - **Incognito** jobs never go to another machine on "Any free GPU"; they run here unless you pick a Mac by name. If you do, the job crosses your network over plain HTTP and is wiped from the Mac when it's done.
 - The input files (pictures, videos, sounds) are uploaded with the job, into a folder of their own. The result is copied into this PC's output folder under the next free name (it never replaces a file here). Then the Mac deletes the job's outputs, uploads and history (`/mac/forget`). A failed job is cleaned up the same way.
 - Cancel (✕ in the queue drawer) takes the job out of the Mac's queue or stops it, then cleans up the same way. A Mac that restarts mid-job fails the job ("restarted and lost the job"); one that stops answering for 10 min does too.
-- Jobs on other machines survive a restart of this PC's ComfyUI: they're kept in `manny_studio/remote_jobs.json` and followed again at startup. As a safety net the Mac also clears Studio jobs older than 24 h.
+- Jobs on other machines survive a restart of this PC's ComfyUI: they're kept in `manny_studio/remote_jobs.json` and followed again at startup. As a safety net the Mac clears Studio jobs that finished more than 24 h ago, so a result that waits longer than a day for this PC to come back is lost (the job shows as failed).
 
 **What stays on this PC:** AI review and AI prompt help (their result is text, not a file) and Topaz in Finish.
 
@@ -53,6 +53,8 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 | `qwen_3_06b_base` | `text_encoders` | Image · Anima |
 | `p-h3-image_vae_int8_convrot` | `vae` | Image · P-H3 |
 | `moss_image_nsfw_uncensored_lora`, `qwen_image_2.1_nsfw_lora` | `loras` | the Uncensored toggles |
+
+**If Settings shows a Mac "offline"** although its workers run: the Mac's LAN gate only lets in the PC it was started for (`lan-gate.sh` allows `desktop-mggcgsg.local`). On the Mac, `ping <this-pc>.local` must answer; if it doesn't, start the gate with this PC's IP (`GATE_ALLOW=192.168.x.y ./lan-gate.sh`). Windows tries the Mac's IPv6 address first, and the gate listens on both.
 
 Check which choices a machine can run with `POST /manny/api/workers/check {"app": "<app id>", "values": {...}}`.
 
