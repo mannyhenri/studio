@@ -46,6 +46,7 @@ LOST_AFTER = 600        # a worker unreachable this long while it has our job: t
 LONG_JOB = 600          # "auto": a worker running one of our jobs for longer than this counts one busier
 LOST_MISSES = 3         # polls in a row with the job in neither /history nor /queue: the worker restarted
 FETCH_POLL = 5          # seconds between /mac/fetch asks while a model downloads
+FETCH_TIMEOUT = 60      # seconds one /mac/fetch ask may take
 FETCH_TRIES = 3         # a download that fails this many times in a row (each ask resumes it) fails the job
 LOCAL_INFO = None       # async () -> this PC's /object_info, set by Studio: says which pack a node the worker lacks comes from
 
@@ -246,9 +247,36 @@ def gate(api, object_info, self_validated=None):
             c = combo(spec)
             if not c or is_file_input(spec):
                 continue
-            if val not in c[0]:
+            if val not in c[0] and _spelled(val, c[0]) is None:
                 why.append({"node": nid, "class_type": ct, "input": name, "value": val, "reason": f"{ct}.{name} has no “{val}”"})
     return why
+
+
+def _spelled(val, options):
+    """val as options spell it when only the folder separator differs ("Civitai\\x" on the Windows PC is "Civitai/x"
+    on a Mac); None if no spelling of it is there."""
+    for alt in (val.replace("\\", "/"), val.replace("/", "\\")):
+        if alt != val and alt in options:
+            return alt
+    return None
+
+
+def respell(api, object_info, self_validated=None):
+    """Rewrite every COMBO value to the worker's own spelling of it (its ComfyUI validates exact names)."""
+    sv = SELF_VALIDATED if self_validated is None else self_validated
+    for node in api.values():
+        ct = node.get("class_type")
+        skip = sv.get(ct) or []
+        for name, val in list((node.get("inputs") or {}).items()):
+            if not isinstance(val, str) or "*" in skip or name in skip:
+                continue
+            spec = _spec(object_info.get(ct), name)
+            c = combo(spec)
+            if c and not is_file_input(spec) and val not in c[0]:
+                alt = _spelled(val, c[0])
+                if alt is not None:
+                    node["inputs"][name] = alt
+    return api
 
 
 async def check(w, api):
@@ -331,8 +359,10 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
     if why and fetch and fetchable(why):
         try:
             files = await _fetch(w, why)
-        except Exception as e:      # a worker without /mac/fetch: refuse as before, saying why
+        except NoFetch as e:        # a worker without /mac/fetch: refuse as before, saying why
             raise GateRefused(w["label"], why + [{"reason": f"it can't download models ({e})"}])
+        except Exception as e:      # slow or dropped (an index rebuild, a PC asleep): wait and ask again
+            files = [{"value": x["value"], "status": "asking", "reason": f"/mac/fetch didn't answer yet ({type(e).__name__})"} for x in why]
         bad = [f for f in files if f.get("status") == "unavailable"]
         if bad:
             raise GateRefused(w["label"], _unavailable(bad))
@@ -363,6 +393,7 @@ def _new_job(w, pid, payload_extra, private, status):
 
 async def _send(w, api, payload_extra, dirs, oi, sv, pid=None):
     """Tag, upload the inputs, POST /prompt (under pid when given). Returns (reply, uploaded inputs, open /ws)."""
+    respell(api, oi, sv)
     # ComfyUI caches output nodes too: an identical job would "finish" pointing at files /mac/forget already
     # deleted. A per-job key on each output node changes only its cache key (ComfyUI never passes an unknown
     # literal input to the node), so the save runs again while everything upstream may still come from cache.
@@ -421,6 +452,10 @@ async def name_packs(why):
 
 
 # ---------------------------------------------------------------- missing models: the worker downloads them
+class NoFetch(RuntimeError):
+    """The worker has no /mac/fetch (an older worker): it can't download models."""
+
+
 def fetchable(why):
     """True when every refusal is a COMBO value (a file the worker's folder lacks), so /mac/fetch may get it."""
     return bool(why) and all(x.get("class_type") and x.get("input") and isinstance(x.get("value"), str) for x in why)
@@ -435,7 +470,9 @@ async def _fetch(w, why):
             seen.add(k)
             files.append({"class_type": k[0], "input": k[1], "value": k[2]})
     async with ClientSession() as s:
-        async with s.post(base(w) + "/mac/fetch", json={"files": files}, timeout=ClientTimeout(total=60)) as r:
+        async with s.post(base(w) + "/mac/fetch", json={"files": files}, timeout=ClientTimeout(total=FETCH_TIMEOUT)) as r:
+            if r.status in (404, 405):
+                raise NoFetch(f"/mac/fetch HTTP {r.status}")
             if r.status != 200:
                 raise RuntimeError(f"/mac/fetch HTTP {r.status}")
             return (await r.json(content_type=None)).get("files") or []

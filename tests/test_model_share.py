@@ -52,6 +52,11 @@ for k, names in FILES.items():
     for n, size in names.items():
         base = PATHS[k][1] if n == "from_extra.safetensors" else PATHS[k][0]
         DATA[(k, n)] = put(os.path.join(base, *n.split("/")), size)
+# a compressed sibling next to every model: a client that accepts gzip/br must still get the model's own bytes
+for (k, n), _d in list(DATA.items()):
+    base = PATHS[k][1] if n == "from_extra.safetensors" else PATHS[k][0]
+    for ext in (".gz", ".br"):
+        put(os.path.join(base, *n.split("/")) + ext, 17)
 os.makedirs(os.path.join(tmp, "models", "frame_interpolation"))   # a key with no files
 PATHS["frame_interpolation"] = [os.path.join(tmp, "models", "frame_interpolation")]
 FILES["frame_interpolation"] = {}
@@ -96,7 +101,7 @@ def get_filename_list(folder):         # as the Windows PC lists them: "\" separ
     out = []
     for base in fp.folder_names_and_paths[fp.map_legacy(folder)][0]:
         for dp, _ds, fs in os.walk(base):
-            out += [os.path.relpath(os.path.join(dp, f), base).replace("/", "\\") for f in fs]
+            out += [os.path.relpath(os.path.join(dp, f), base).replace("/", "\\") for f in fs if not f.endswith((".gz", ".br"))]   # ComfyUI lists model extensions only
     return sorted(set(out))
 
 
@@ -172,7 +177,7 @@ async def main():
     await cl.start_server()
 
     async def get(url, ip="127.0.0.1", method="GET", **hd):
-        async with cl.request(method, url, headers=dict(hd, **{"X-Fake-Remote": ip})) as r:
+        async with cl.request(method, url, headers=dict({"Accept-Encoding": "gzip, br"}, **hd, **{"X-Fake-Remote": ip}), auto_decompress=False) as r:
             return r.status, dict(r.headers), await r.read()
 
     keys = [k for k in FILES]
@@ -188,7 +193,7 @@ async def main():
                 names = [n] + ([n.replace("/", "\\")] if "/" in n else [])
                 for nm in names:
                     s, h, b = await get(furl(k, nm), ip)
-                    if s != 200 or b != data or h.get("Content-Length") != str(len(data)) or h.get("Accept-Ranges") != "bytes":
+                    if s != 200 or b != data or h.get("Content-Length") != str(len(data)) or h.get("Accept-Ranges") != "bytes" or h.get("Content-Encoding"):
                         bad.append(f"GET {k}/{nm}: {s} len={len(b)} CL={h.get('Content-Length')} AR={h.get('Accept-Ranges')}")
                 s, h, b = await get(furl(k, n), ip, "HEAD")
                 if s != 200 or b or h.get("Content-Length") != str(len(data)):

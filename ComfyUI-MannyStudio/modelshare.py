@@ -23,6 +23,12 @@ NOT_MODELS = {"custom_nodes", "configs"}  # folder keys that aren't model files
 _cache = {"key": None, "at": 0, "ips": frozenset()}
 
 
+class _Plain(web.FileResponse):
+    """The model file itself, never a <file>.gz/.br sibling that aiohttp would pick for a client accepting gzip/br."""
+    def _get_file_path_stat_encoding(self, accept_encoding):
+        return super()._get_file_path_stat_encoding("")
+
+
 def _ip(s):
     """An address as ipaddress, IPv4-mapped IPv6 as IPv4 and any zone id dropped; None if it isn't one."""
     try:
@@ -129,7 +135,7 @@ def setup(ns):
         sha = await asyncio.to_thread(_sha, p)
         if sha:
             hd["X-Studio-SHA256"] = sha
-        return web.FileResponse(p, headers=hd)
+        return _Plain(p, headers=hd)
 
     @routes.get("/manny/api/models/index")
     async def model_index(request):
