@@ -2,12 +2,11 @@
 
 Both build their ComfyUI prompt directly (no app file), queue it, wait, and save to
 Audio/Music or Audio/Voices (Incognito: the private space)."""
-import json
 import os
 import random
 import time
 
-from aiohttp import web, ClientSession
+from aiohttp import web
 
 H = {}
 AUDIO_EXT = (".mp3", ".flac", ".wav", ".ogg", ".m4a")
