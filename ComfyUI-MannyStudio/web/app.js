@@ -1378,6 +1378,7 @@ function videoFixDialog(cur, prompt, at) {
     <p class="hint" id="vhint" style="margin:0"></p>
     <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Fix it</button></div></div>`);
   m.append(d);
+  $(".foot", d).prepend(runOnSelect("On a Mac GPU a fix takes several minutes; Fix the face needs the FaceRefine nodes there"));
   const v = $("video", d), sel = $(".vsel", d), head = $(".vhead", d);
   const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
   $$("[data-x]", d).forEach(x => x.onclick = close);
@@ -1406,7 +1407,7 @@ function videoFixDialog(cur, prompt, at) {
   $("#vden", d).oninput = e => { st.den[st.mode] = +e.target.value; $("#vdenv", d).textContent = st.den[st.mode].toFixed(2); };
   $("[data-go]", d).onclick = async () => {
     const body = { filename: cur.filename, subfolder: cur.subfolder || "", start: +st.start.toFixed(2), end: +st.end.toFixed(2), mode: st.mode,
-      prompt: $("#vprompt", d).value.trim(), denoise: st.den[st.mode] };
+      prompt: $("#vprompt", d).value.trim(), denoise: st.den[st.mode], target: runTarget() };
     if (st.mode !== "face" && !body.prompt) return toast("Say what should happen in the marked part", true);
     close();
     try { await videoJob("/manny/api/video/fix", body, st.mode === "face" ? "Face fix" : "Fix"); } catch (e) { toast(e.message.slice(0, 260), true); }
@@ -1425,6 +1426,7 @@ function videoExtendDialog(cur, prompt) {
       <p class="hint" style="flex:1;margin:0" id="xhint"></p></div>
     <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Continue</button></div></div>`);
   m.append(d);
+  $(".foot", d).prepend(runOnSelect("On a Mac GPU this is slow: H3 takes about an hour for 5 s; LTX isn't measured there yet"));
   const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
   $$("[data-x]", d).forEach(x => x.onclick = close);
   $("#xprompt", d).value = prompt || "";
@@ -1443,7 +1445,7 @@ function videoExtendDialog(cur, prompt) {
   $("[data-go]", d).onclick = async () => {
     const pr = $("#xprompt", d).value.trim(); if (!pr) return toast("Say what happens next", true);
     close();
-    try { await videoJob("/manny/api/video/extend", { filename: cur.filename, subfolder: cur.subfolder || "", prompt: pr, seconds: st.seconds, ref: st.engine === "h3" ? st.ref : "", engine: st.engine }, "Continue shot"); }
+    try { await videoJob("/manny/api/video/extend", { filename: cur.filename, subfolder: cur.subfolder || "", prompt: pr, seconds: st.seconds, ref: st.engine === "h3" ? st.ref : "", engine: st.engine, target: runTarget() }, "Continue shot"); }
     catch (e) { toast(e.message.slice(0, 260), true); }
   };
 }
@@ -1461,6 +1463,7 @@ function keyframeDialog() {
       <div><label class="lbl">Shape</label><div class="chips" id="kfa">${Object.keys(AS).map(x => `<div class="chip" data-v="${x}">${x}</div>`).join("")}</div></div></div>
     <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Render the shot</button></div></div>`);
   m.append(d);
+  $(".foot", d).prepend(runOnSelect("On a Mac GPU a 5 s shot takes about 40 min"));
   const close = () => { store.set("kf", st); m.classList.add("hidden"); m.innerHTML = ""; };
   $$("[data-x]", d).forEach(x => x.onclick = close);
   $("#kfp", d).value = st.prompt || ""; $("#kfp", d).oninput = e => st.prompt = e.target.value;
@@ -1491,7 +1494,7 @@ function keyframeDialog() {
     if (st.keys.length < 2) return toast("Add at least two pictures", true);
     if (!(st.prompt || "").trim()) return toast("Describe the shot", true);
     const [w, hh] = AS[st.aspect] || AS["16:9"];
-    const body = { keys: st.keys.map((k, n) => ({ image: k.image, at: n === 0 ? 0 : k.at })), prompt: st.prompt.trim(), seconds: st.seconds, width: w, height: hh };
+    const body = { keys: st.keys.map((k, n) => ({ image: k.image, at: n === 0 ? 0 : k.at })), prompt: st.prompt.trim(), seconds: st.seconds, width: w, height: hh, target: runTarget() };
     close();
     try { await videoJob("/manny/api/video/keyframes", body, "Keyframe shot"); } catch (e) { toast(e.message.slice(0, 260), true); }
   };
@@ -3081,6 +3084,17 @@ function runOptions() {
 async function loadWorkers() {
   try { S.workers = await api("/manny/api/workers"); } catch { S.workers = []; }
   document.querySelectorAll(".go").forEach(placeRunOn);   // the form may have been drawn before the list arrived
+}
+/* the same choice inside a dialog (the video tools): changing it changes the remembered Run on, so what you see is
+   where it goes; note shows while a GPU machine is picked */
+function runOnSelect(note) {
+  if (S.workers.length < 2) return h(`<span></span>`);
+  const el = h(`<label class="runon-row">Run on <select class="runon" title="Which GPU renders this">${runOptions()}</select><small class="runon-note"></small></label>`);
+  const sel = $("select", el), nt = $(".runon-note", el);
+  const show = () => { nt.textContent = note && sel.value !== "local" && sel.value !== "auto" ? note : ""; };
+  sel.onchange = () => { S.target = sel.value; saveState(); show(); };
+  show();
+  return el;
 }
 /* the "Run on" menu next to Generate, only once another GPU machine is set up in Settings */
 function placeRunOn(go) {

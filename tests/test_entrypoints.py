@@ -23,13 +23,18 @@ LIVE = os.environ.get("LIVE") == "1"
 FETCH = os.environ.get("FETCH") == "1"
 WORKERS = [{"label": "mac-vega-a", "host": "127.0.0.1", "port": 8188}, {"label": "mac-vega-b", "host": "127.0.0.1", "port": 8189}]
 APP = "Studio - Remove background.app.json"
-MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp", "keyframes", "paint3d", "mcp:keyframes"]
+MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp", "keyframes", "paint3d", "mcp:keyframes",
+           "video:fix-part", "video:fix-face", "video:extend", "video:extend-h3", "video:keyframes", "mcp:fix-video", "mcp:extend-video", "mcp:keyframe-shot",
+           "queue:move"]
 if os.environ.get("MEMBERS"):      # LIVE=1 MEMBERS=keyframes,paint3d: only those paths
     MEMBERS = [m for m in MEMBERS if m in os.environ["MEMBERS"].split(",")]
+VIDEO = [m for m in MEMBERS if "video" in m or m == "mcp:keyframe-shot"]
 
 # the mutations used by --mutants: (member, file, original, replacement) — each removes that path's target.
 # Scheduled renders and MCP go through /manny/api/run, so breaking manny_run must break them too.
-VIA_RUN = {"manny_run": {"manny_run", "schedule", "mcp"}, "keyframes": {"keyframes", "mcp:keyframes"}}   # MCP keyframes calls the keyframes route
+VIA_RUN = {"manny_run": {"manny_run", "schedule", "mcp"}, "keyframes": {"keyframes", "mcp:keyframes"},    # MCP keyframes calls the keyframes route
+           "video:fix": {"video:fix-part", "video:fix-face", "mcp:fix-video"}, "video:extend": {"video:extend", "video:extend-h3", "mcp:extend-video"},
+           "video:keyframes": {"video:keyframes", "mcp:keyframe-shot"}, "mcp:video": {"mcp:fix-video", "mcp:extend-video"}}
 MUTANTS = [
     ("manny_run", "__init__.py", 'target = body.get("target") or _remote.LOCAL', "target = _remote.LOCAL"),
     ("finish", "__init__.py", '"Finish: smooth", b.get("target"))', '"Finish: smooth", None)'),
@@ -42,6 +47,13 @@ MUTANTS = [
     ("keyframes", "projects.py", 'f"Project keyframe {k + 1}", b.get("target"))', 'f"Project keyframe {k + 1}", None)'),
     ("paint3d", "previs.py", '"3D frame", b.get("target"))', '"3D frame", None)'),
     ("mcp:keyframes", "studio_mcp.py", '"redo": a.get("redo"), "target": a.get("run_on") or "local"}', '"redo": a.get("redo"), "target": "local"}'),
+    ("video:fix", "videotools.py", 'target = b.get("target")  # fix', 'target = None  # fix'),
+    ("video:extend", "videotools.py", 'target = b.get("target")  # extend', 'target = None  # extend'),
+    ("video:keyframes", "videotools.py", 'target = b.get("target")  # keyframes', 'target = None  # keyframes'),
+    ("mcp:video", "studio_mcp.py", 'body = dict(f, prompt=a.get("prompt", ""), seed=a.get("seed"), target=a.get("run_on") or "local")',
+     'body = dict(f, prompt=a.get("prompt", ""), seed=a.get("seed"), target="local")'),
+    ("queue:move", "__init__.py", 'worker = _remote.find(_data_dir(), body.get("target") or "")', 'worker = _remote.find(_data_dir(), "")'),
+    ("mcp:keyframe-shot", "studio_mcp.py", '"seed": a.get("seed"), "target": a.get("run_on") or "local"}', '"seed": a.get("seed"), "target": "local"}'),
 ]
 fails = []
 
@@ -107,14 +119,16 @@ def derive_entry_points():
 SITES = {
     "sub": {("__init__.py", "manny_run"): "manny_run", ("__init__.py", "_queue_app"): "finish", ("__init__.py", "_finish"): "finish",
             ("projects.py", "run"): "keyframes + mcp:keyframes", ("previs.py", "run"): "paint3d",
+            ("videotools.py", "_queue"): "video tools (fix part/face, extend, keyframes) + their MCP tools",
+            ("__init__.py", "manny_queue_move"): "queue:move (Send to… a waiting PC job)",
             ("__init__.py", "_queue_api"): "(routing: Finish, music, voice)", ("sound.py", "_queue"): "sound:music + sound:voice"},
     "run": {("schedule.py", "_fire"): "schedule", ("studio_mcp.py", "call"): "mcp"},
     "local": {("__init__.py", "manny_run"): "(manny_run: this PC)", ("__init__.py", "_queue_api"): "(_queue_api: this PC)",
               ("__init__.py", "_llm"): "AI review / AI prompt help: PC-only",
-              ("videotools.py", "_queue"): "Video fixes / Continue / Keyframe shot: PC-only (no Run on yet)"},
+              },
 }
 WEB = os.path.join(os.path.dirname(PKG), "ComfyUI-MannyStudio", "web", "app.js") if os.environ.get("STUDIO_PKG") else os.path.join(PKG, "web", "app.js")
-RENDER_ROUTES = r'"/manny/api/(run|finish|music|voice|schedule|previs/style)"|"/manny/api/" \+ kind|`/manny/api/projects/\$\{pr\.id\}/keyframes`'
+RENDER_ROUTES = r'"/manny/api/(run|finish|music|voice|schedule|previs/style|video/fix|video/extend|video/keyframes)"|"/manny/api/" \+ kind|`/manny/api/projects/\$\{pr\.id\}/keyframes`'
 
 
 def web_sites(src):
@@ -122,9 +136,10 @@ def web_sites(src):
     target: or is runBody()'s body (runBody itself must set target)."""
     out, lines = [], src.split("\n")
     for k, line in enumerate(lines, 1):
-        for m in re.finditer(r"post\((" + RENDER_ROUTES + r")", line):
-            depth, j, arg = 0, m.start() + 4, ""
-            rest = "\n".join(lines[k - 1:k + 3])[m.start() + 4:]
+        for m in re.finditer(r"(?:post|videoJob)\((" + RENDER_ROUTES + r")", line):
+            paren = line.index("(", m.start())
+            depth, arg = 0, ""
+            rest = "\n".join(lines[k - 1:k + 3])[paren:]
             for ch in rest:
                 depth += ch == "("
                 depth -= ch == ")"
@@ -133,7 +148,9 @@ def web_sites(src):
                     break
             prior = "\n".join(lines[max(0, k - 4):k])
             via_runbody = bool(re.search(r"\bbody\b", arg)) and "runBody(app)" in prior
-            out.append((k, m.group(1), "target:" in arg or via_runbody))
+            built = re.search(r"const body = \{.*?\};", "\n".join(lines[max(0, k - 9):k]), re.S)    # body built just above the call
+            via_body = bool(re.search(r",\s*body\b", arg)) and bool(built) and "target: runTarget()" in built.group(0)
+            out.append((k, m.group(1), "target:" in arg or via_runbody or via_body))
     rb = re.search(r"function runBody\(app\) \{.*?\n\}", src, re.S)
     out.append(("runBody", "(Generate, Later)", bool(rb) and "target: runTarget()" in rb.group(0)))
     return out
@@ -151,6 +168,10 @@ async def main():
     shutil.copy(os.path.join(tmp, "input/studio_test/probe.png"), os.path.join(tmp, "input/ref_couture_model.png"))
     # not under output/Videos: Studio's first start moves Images/Videos into the Incognito space
     shutil.copy(os.path.join(tmp, "input/studio_test/probe.mp4"), os.path.join(tmp, "output/et/clip.mp4"))
+    if LIVE:    # a real fix needs a clip worth fixing: 3 s, 512x288, with a soundtrack (the tools keep the sound)
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=512x288:rate=24:duration=3",
+                        "-f", "lavfi", "-i", "sine=frequency=330:duration=3", "-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                        os.path.join(tmp, "output/et/clip.mp4")], check=True)
 
     # ComfyUI stand-ins; the pack's routes are collected and served by a real aiohttp server below
     fp = types.ModuleType("folder_paths")
@@ -214,7 +235,8 @@ async def main():
     reached, real_submit = [], remote.submit
 
     async def spy(w, api, payload_extra, dirs, private=False, incoming=".private_incoming", on_done=None, **kw):
-        reached.append({"worker": w["label"], "client_id": payload_extra.get("client_id"), "fetch": kw.get("fetch"),
+        reached.append({"worker": w["label"], "client_id": payload_extra.get("client_id"), "fetch": kw.get("fetch"), "api": json.loads(json.dumps(api)),
+                        "manny_app": (payload_extra.get("extra_data") or {}).get("manny_app"),
                         "label": (payload_extra.get("extra_data") or {}).get("manny_label"), "at": time.time()})
         if LIVE or FETCH:
             return await real_submit(w, api, payload_extra, dirs, private, incoming, on_done, **kw)
@@ -294,6 +316,42 @@ async def main():
                     if len(reached) > n:
                         break
                     await asyncio.sleep(0.1)
+            elif member.startswith("video:") or member in ("mcp:fix-video", "mcp:extend-video", "mcp:keyframe-shot"):
+                clip = {"filename": "clip.mp4", "subfolder": "et"}
+                if member == "video:fix-part":
+                    await post(s, "/manny/api/video/fix", dict(clip, start=0.2, end=1.0, mode="picture", prompt="rain", target=label))
+                elif member == "video:fix-face":
+                    await post(s, "/manny/api/video/fix", dict(clip, start=0.2, end=1.0, mode="face", target=label))
+                elif member in ("video:extend", "video:extend-h3"):      # LTX is the default engine; H3 on request
+                    await post(s, "/manny/api/video/extend", dict(clip, prompt="he walks on", seconds=5, target=label,
+                                                                  **({"engine": "h3"} if member.endswith("h3") else {})))
+                elif member == "video:keyframes":
+                    await post(s, "/manny/api/video/keyframes", {"keys": [{"image": "ref_couture_model.png", "at": 0}, {"image": "ref_couture_model.png", "at": 3}],
+                                                                 "prompt": "a slow push in", "seconds": 5, "target": label})
+                else:
+                    os.environ["STUDIO_URL"] = base
+                    sys.path.insert(0, PKG)
+                    import studio_mcp
+                    studio_mcp.BASE = base
+                    a = {"mcp:fix-video": ("studio_fix_video", dict(clip, start=0.2, end=1.0, mode="picture", prompt="rain")),
+                         "mcp:extend-video": ("studio_extend_video", dict(clip, prompt="he walks on", seconds=5)),
+                         "mcp:keyframe-shot": ("studio_keyframe_shot", {"keys": [{"image": "ref_couture_model.png", "at": 0}, {"image": "ref_couture_model.png", "at": 3}],
+                                                                        "prompt": "a slow push in", "seconds": 5})}[member]
+                    studio_mcp.job_wait = lambda jid, t=0: (_ for _ in ()).throw(RuntimeError("not waiting in the test"))
+                    try:
+                        said.append(str(await asyncio.to_thread(studio_mcp.call, a[0], dict(a[1], run_on=label))))
+                    except Exception as e:
+                        said.append(str(e))
+                for _ in range(1200 if LIVE else 100):
+                    if len(reached) > n:
+                        break
+                    await asyncio.sleep(0.1)
+            elif member == "queue:move":      # Send to…: a job waiting in this PC's queue (queued from the node editor: no marker)
+                _wf, qapi = await studio._build_prompt(APP, {})
+                item = [1, f"pcq-{label}", qapi, {"client_id": "editor-tab"}, []]
+                ps.prompt_queue = types.SimpleNamespace(get_current_queue=lambda: ([], [item]),
+                                                        delete_queue_item=lambda fn: fn(item))
+                await post(s, "/manny/api/queue/move", {"prompt_ids": [item[1]], "target": label})
             elif member == "paint3d":
                 await post(s, "/manny/api/previs/style", {"still": "ref_couture_model.png", "prompt": "a film frame", "model": "flux 3", "target": label})
                 for _ in range(1200 if LIVE else 100):
@@ -324,6 +382,91 @@ async def main():
             except Exception as e:      # a path that blows up hasn't honoured the target either
                 got = [f"error: {str(e)[:120]}"]
             check(got == [w["label"]], f"{member} with target {w['label']}: reached {got}")
+    # every job another machine gets is marked as Studio's (comfy-mac's stale_jobs net keys on extra_data.manny_app)
+    unmarked = sorted({str(r.get("client_id")) for r in reached if not r.get("manny_app")})
+    check(not unmarked, f"every job sent to a card carries extra_data.manny_app ({len(reached)} jobs; unmarked from {unmarked})")
+    # what a video tool sends another machine must be readable there: no PC path, no PC-only loader
+    for r in reached:
+        if r.get("client_id") != "studio-videotools":
+            continue
+        api = r["api"]
+        cls = {n.get("class_type") for n in api.values()}
+        vids = [n["inputs"].get("file") for n in api.values() if n.get("class_type") == "LoadVideo"]
+        paths = [v for n in api.values() for v in (n.get("inputs") or {}).values() if isinstance(v, str) and (v.startswith(tmp) or re.match(r"^[A-Za-z]:[\\/]", v))]
+        check("H3LoadVideoPath" not in cls and "CLIPLoaderGGUF" not in cls and not paths and all(v and v.endswith(" [output]") for v in vids),
+              f"video job for {r['worker']} ({r['label']}) is portable: classes ok {'H3LoadVideoPath' not in cls and 'CLIPLoaderGGUF' not in cls}, "
+              f"PC paths {paths[:1]}, LoadVideo {vids}")
+    vt = sys.modules["studio.videotools"]         # remote_api's two swaps, and the clip it can't send
+    g = vt.remote_api({"te": {"class_type": "CLIPLoaderGGUF", "inputs": {"clip_name": "x.gguf", "type": "minimax"}},
+                       "lv": {"class_type": "H3LoadVideoPath", "inputs": {"path": os.path.join(tmp, "input", "a b.mp4")}}})
+    check(g["te"] == {"class_type": "CLIPLoader", "inputs": {"clip_name": vt.H3_TE, "type": "minimax", "device": "default"}}
+          and g["lv"] == {"class_type": "LoadVideo", "inputs": {"file": "a b.mp4 [input]"}}, f"remote_api: GGUF -> nvfp4 CLIPLoader, input clip -> LoadVideo: {g}")
+    try:
+        vt.remote_api({"lv": {"class_type": "H3LoadVideoPath", "inputs": {"path": "/somewhere/else.mp4"}}})
+        check(False, "remote_api refuses a clip outside Studio's folders")
+    except RuntimeError as e:
+        check("can't be sent" in str(e), f"remote_api refuses a clip outside Studio's folders: {e}")
+    # "Any free GPU": the machine is chosen first, then the graph shaped for it. This PC gets its own graph
+    # (H3LoadVideoPath, its text encoder) and frees memory first; a card gets remote_api's form.
+    vt = sys.modules["studio.videotools"]
+    freed, picked, real_pick, real_free = [], [], remote.pick, vt._free_memory
+    auto_wins = () if LIVE else (remote.LOCAL, WORKERS[0]["label"])     # stub-only: LIVE must not send these for real
+
+    async def free_spy():
+        freed.append(1)
+    vt._free_memory = free_spy
+    for win in auto_wins:
+        async def fake_pick(workers, api, local_busy, local_ok=True, timeout=15, win=win):
+            picked.append({n.get("class_type") for n in api.values()})
+            return win, {}
+        remote.pick = fake_pick
+        for member in ("video:fix-part", "video:fix-face", "video:extend", "video:extend-h3", "video:keyframes"):
+            n, lp, nf, npk = len(reached), len(local_posts), len(freed), len(picked)
+            await drive(member, "auto")
+            for _ in range(100):
+                if len(local_posts) > lp or len(reached) > n:
+                    break
+                await asyncio.sleep(0.05)
+            reads_clip = member != "video:keyframes"
+            chose_with = picked[npk:] and picked[npk]
+            check(bool(chose_with) and "H3LoadVideoPath" not in chose_with,
+                  f"auto {member}: the machine is chosen with the remote form ({sorted(chose_with or [])[:4]}...)")
+            if win == remote.LOCAL:
+                got = local_posts[lp:]
+                cls = {nd.get("class_type") for nd in (got[0].get("prompt") or {}).values()} if got else set()
+                check(len(reached) == n and len(got) == 1 and len(freed) > nf and (not reads_clip or ("H3LoadVideoPath" in cls and "LoadVideo" not in cls)),
+                      f"auto {member}, this PC wins: its own graph ({'H3LoadVideoPath' in cls}), memory freed ({len(freed) - nf}), no card ({len(reached) - n})")
+            else:
+                got = reached[n:]
+                cls = {nd.get("class_type") for nd in (got[0]["api"] if got else {}).values()}
+                check(len(got) == 1 and got[0]["worker"] == win and len(freed) == nf and (not reads_clip or ("LoadVideo" in cls and "H3LoadVideoPath" not in cls)),
+                      f"auto {member}, {win} wins: the card's form reaches it ({[r['worker'] for r in got]}), no memory freeing here ({len(freed) - nf})")
+    # an "auto" refusal names the pack a missing node comes from, like a named card's does
+    async def none_pick(workers, api, local_busy, local_ok=True, timeout=15):
+        return None, {WORKERS[0]["label"]: [{"node": "1", "class_type": "H3FaceTrackCrop", "reason": "node H3FaceTrackCrop is not installed"}]}
+    remote.pick = none_pick
+    keep_info = remote.LOCAL_INFO
+
+    async def pc_info(force=False):
+        return {"H3FaceTrackCrop": {"python_module": "custom_nodes.ComfyUI-H3-FaceRefine"}}
+    remote.LOCAL_INFO = pc_info
+    try:
+        await studio._choose({"1": {"class_type": "H3FaceTrackCrop", "inputs": {}}}, "auto")
+        check(False, "auto with no machine able must refuse")
+    except remote.GateRefused as e:
+        check("copy ComfyUI/custom_nodes/ComfyUI-H3-FaceRefine" in str(e) and "copy ComfyUI/custom_nodes/ComfyUI-H3-FaceRefine" in json.dumps(e.refused_by),
+              f"auto refusal names the pack: {str(e)[:200]}")
+    remote.pick, vt._free_memory, remote.LOCAL_INFO = real_pick, real_free, keep_info
+    # every browser dialog that starts a video tool shows the Run on choice
+    src_js = open(WEB, encoding="utf-8").read()
+    funcs = re.findall(r"\n((?:async )?function (\w+)\(.*?)(?=\n(?:async )?function )", src_js, re.S)
+    dialogs = [name for body, name in funcs if re.search(r'videoJob\("/manny/api/video/', body)]
+    for name in dialogs:
+        body = next(b for b, nm in funcs if nm == name)
+        check("runOnSelect(" in body, f"web {name} shows a Run on choice")
+    check(len(dialogs) >= 3, f"video dialogs found: {dialogs}")
+    check(sum(r.get("client_id") == "studio-videotools" for r in reached) >= 2 * len(VIDEO),
+          f"every video entry point reached a Mac ({sum(r.get('client_id') == 'studio-videotools' for r in reached)} jobs)")
     # PC-only: drive AI review and AI prompt help with a Mac target; they must post to this PC and reach no Mac
     n, lp = len(reached), len(local_posts)
     async with aiohttp.ClientSession() as s:
@@ -358,6 +501,10 @@ async def main():
                     await asyncio.wait_for(j["task"], 1800)
                 except Exception:
                     pass
+        for _ in range(120):       # then Studio's job saves or splices what came back
+            if not any(j.get("status") == "running" for j in studio._jobs.values()):
+                break
+            await asyncio.sleep(1)
         jobs = [j for j in remote.JOBS.values()]
         print("live jobs:", sorted((j["worker"], j["status"], j.get("label"), (j.get("error") or "")[:60]) for j in jobs))
         print("studio jobs:", [(k, j.get("kind"), j.get("status"), j.get("stage"), str(j.get("error"))[:80]) for k, j in studio._jobs.items()])
@@ -368,6 +515,18 @@ async def main():
         check(len(landed) + len(said_no) == want and all(j["outputs"] for j in landed),
               f"LIVE: {want} jobs (every non-sound entry point x 2 workers): {len(landed)} rendered and pulled back, "
               f"{len(said_no)} refused by the card with its reason (e.g. a PC-only model)")
+        # a video tool is done only when its result is on this PC: spliced (fix), joined (extend) or saved (keyframes)
+        vt = sys.modules["studio.videotools"]
+        for j in studio._jobs.values():
+            if j.get("kind") not in ("videofix", "videoextend", "keyframes") or "can't run this" in str(j.get("error")):
+                continue        # refused by the card with its reason: counted above
+            res = j.get("result") or {}
+            full = os.path.join(studio._root(False), res.get("subfolder", ""), res.get("filename", "")) if res else ""
+            info = vt.probe(full) if full and os.path.isfile(full) else {}
+            print(f"  {j['kind']}: {j['status']} {j.get('error') or ''} -> {res} {info}")
+            same = j["kind"] != "videofix" or (abs(info.get("duration", 0) - 3.0) < 0.3 and info.get("audio"))   # a fix keeps length and sound
+            check(j["status"] == "done" and info.get("duration", 0) > 0.5 and info.get("width") and same,
+                  f"LIVE {j['kind']}: the result is a playable video on this PC ({j['status']}, {info.get('duration')} s, {info.get('width')}x{info.get('height')})")
         refused = [j for j in jobs if j["status"] not in ("done",)]
         check(not refused, f"LIVE: no other remote job: {[(j['worker'], j['status']) for j in refused]}")
     await runner.cleanup()
@@ -506,6 +665,17 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
         async with s.get(remote.base(WORKERS[1]) + "/mac/info") as r:
             sv = (await r.json()).get("self_validated")
     st, fakes, runners = await fake_macs(remote, [w["label"] for w in WORKERS], real_oi, sv)
+    pc_oi = {}      # the Studio PC's own node list (it answers on the LAN): which pack each node comes from
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(os.environ.get("PC_URL", "http://desktop-mggcgsg.local:8188") + "/object_info", timeout=aiohttp.ClientTimeout(total=30)) as r:
+                pc_oi = await r.json()
+    except Exception as e:
+        print(f"NOTE the PC's ComfyUI isn't reachable ({e}): pack names not checked")
+
+    async def pc_info(force=False):
+        return pc_oi
+    remote.LOCAL_INFO = pc_info if pc_oi else None
     remote.save_workers(studio._data_dir(), fakes)
     remote._caps.clear()
     remote.FETCH_POLL = 0.05
@@ -547,6 +717,12 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
             if missing:
                 print(f"NOTE {member} can't run on the Mac at all: {missing} not installed there")
                 check(not fetches and not posts, f"{tag} refused at once, no download, nothing queued ({len(fetches)} fetch, {len(posts)} posts)")
+                text = " ".join(said[n_said:]) + json.dumps([j.get("error") for k2, j in studio._jobs.items() if k2 not in old_sj], default=str)
+                packs = {c: str((pc_oi.get(c) or {}).get("python_module") or "") for c in missing}
+                for c, mod in packs.items():
+                    if mod.startswith("custom_nodes."):
+                        pack = mod.split(".", 1)[1].split(".")[0]
+                        check(f"copy ComfyUI/custom_nodes/{pack}" in text, f"{tag} the refusal says to copy {pack} for {c}")
                 continue
             check(bool(fetches) and all(lab == w["label"] for lab, _ in fetches), f"{tag} asked {w['label']}'s /mac/fetch ({len(fetches)} calls)")
             check(all(not p["refused_then"] for p in posts), f"{tag} no /prompt while the gate still refused: {[p['refused_then'][:1] for p in posts if p['refused_then']]}")
@@ -606,7 +782,7 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
 
 def fetch_mutants():
     """Drop the download on each call site in turn: exactly the entry points through it must fail."""
-    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("_queue_api", {"finish", "sound:music", "sound:voice", "keyframes", "paint3d", "mcp:keyframes"})]
+    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("manny_queue_move", {"queue:move"}), ("_queue_api", {"finish", "sound:music", "sound:voice", "keyframes", "paint3d", "mcp:keyframes", *VIDEO})]
     bad = 0
     for fn_name, members in sites:
         d = tempfile.mkdtemp(prefix="studio-mutant-")
@@ -646,11 +822,15 @@ def web_mutants():
                 continue
         else:
             ls = src.split("\n")
-            seg = "\n".join(ls[line - 1:line + 3])
-            if "target: runTarget()" not in seg:      # a runBody() caller: covered by the runBody mutant
+            lo = line - 1
+            if "target: runTarget()" not in "\n".join(ls[line - 1:line + 3]):     # the body is built just above the call
+                lo = max(0, line - 9)
+            seg = "\n".join(ls[lo:line + 3])
+            if "target: runTarget()" not in seg or ("runBody(app)" in seg and lo != line - 1):   # a runBody() caller: covered by the runBody mutant
                 continue
-            seg2 = seg.replace(", target: runTarget()", "", 1)
-            mut = "\n".join(ls[:line - 1]) + "\n" + seg2 + "\n" + "\n".join(ls[line + 3:])
+            k2 = seg.rfind(", target: runTarget()")
+            seg2 = seg[:k2] + seg[k2 + len(", target: runTarget()"):]
+            mut = "\n".join(ls[:lo]) + ("\n" if lo else "") + seg2 + "\n" + "\n".join(ls[line + 3:])
         flagged = {l for l, r, o in web_sites(mut) if not o}
         want = {line} if line != "runBody" else {"runBody"}
         good = flagged == want

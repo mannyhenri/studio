@@ -47,6 +47,7 @@ LONG_JOB = 600          # "auto": a worker running one of our jobs for longer th
 LOST_MISSES = 3         # polls in a row with the job in neither /history nor /queue: the worker restarted
 FETCH_POLL = 5          # seconds between /mac/fetch asks while a model downloads
 FETCH_TRIES = 3         # a download that fails this many times in a row (each ask resumes it) fails the job
+LOCAL_INFO = None       # async () -> this PC's /object_info, set by Studio: says which pack a node the worker lacks comes from
 
 
 # ---------------------------------------------------------------- remote jobs on disk (survive a restart of this PC's ComfyUI)
@@ -342,7 +343,7 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
         _persist()
         return {"prompt_id": job["prompt_id"], "number": None, "worker": w["label"], "fetching": [f.get("value") for f in files]}
     if why:
-        raise GateRefused(w["label"], why)
+        raise GateRefused(w["label"], await name_packs(why))
     data, sent, opened = await _send(w, api, payload_extra, dirs, oi, sv)
     job = _new_job(w, data["prompt_id"], payload_extra, private, "queued")
     job["inputs"] = sent
@@ -397,6 +398,26 @@ async def _send(w, api, payload_extra, dirs, oi, sv, pid=None):
         await cancel(w, data["prompt_id"], inputs=sent)
         raise GateRefused(w["label"], node_errors_why(data["node_errors"]))
     return data, sent, opened
+
+
+async def name_packs(why):
+    """A node the worker lacks: say which custom node pack it comes from on this PC, so it can be copied over.
+    Reasons keep their "node X is not installed" start; core nodes and unknown classes are left as they are."""
+    if not LOCAL_INFO or not any(x.get("class_type") and "input" not in x and str(x.get("reason", "")).startswith("node ") for x in why):
+        return why
+    try:
+        here = await LOCAL_INFO()
+    except Exception:
+        return why
+    for x in why:
+        if "input" in x or not str(x.get("reason", "")).startswith("node "):
+            continue
+        mod = str((here.get(x.get("class_type")) or {}).get("python_module") or "")
+        if mod.startswith("custom_nodes."):
+            pack = mod.split(".", 1)[1].split(".")[0]
+            x["pack"] = pack
+            x["reason"] += f" (it comes from the {pack} pack: copy ComfyUI/custom_nodes/{pack} from this PC to that machine)"
+    return why
 
 
 # ---------------------------------------------------------------- missing models: the worker downloads them
@@ -460,7 +481,7 @@ async def _fetch_then_send(w, job, api, payload_extra, dirs, incoming, on_done, 
                 if not why:
                     break
                 if not fetchable(why):
-                    raise GateRefused(w["label"], why)
+                    raise GateRefused(w["label"], await name_packs(why))
                 stale += 1      # "present" but not listed yet, or another file is still missing: ask again
                 if stale >= FETCH_TRIES:
                     raise GateRefused(w["label"], why)

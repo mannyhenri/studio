@@ -8,3 +8,4 @@ storyboards.json
 favorites.json
 loras.json
 cache/
+.claude/worktrees/

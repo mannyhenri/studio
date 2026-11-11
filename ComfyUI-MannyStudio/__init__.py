@@ -459,6 +459,7 @@ async def manny_queue_move(request):
             continue
         cid = extra.pop("client_id", None)
         extra = {k: v for k, v in extra.items() if not any(x in k.lower() for x in ("api_key", "auth_token"))}
+        extra.setdefault("manny_app", "queue-move")      # a node-editor job too: the worker's stale-job net keys on it
         payload_extra = {"client_id": cid, "extra_data": extra}
         try:
             r = await _remote.submit(worker, json.loads(json.dumps(prompt)), payload_extra, _dirs(), private, INCOMING,
@@ -1072,6 +1073,8 @@ async def _choose(api, target, private=False):
     why_local = _remote.gate(api, await _get_object_info())
     label, notes = await _remote.pick(_remote.load_workers(_data_dir()), api, _local_busy(), not why_local)
     if label is None:
+        for k in list(notes):       # a node a machine lacks: name the pack to copy from this PC
+            notes[k] = await _remote.name_packs(notes[k] or [])
         notes[_remote.LOCAL] = why_local
         e = _remote.GateRefused("every machine", [dict(x, machine=k) for k, v in notes.items() for x in (v or [])[:3]])
         e.refused_by = notes
@@ -2727,6 +2730,7 @@ from . import gitver as _gitver  # noqa: E402
 
 # remote GPU jobs survive a restart of this ComfyUI: saved in manny_studio/remote_jobs.json, followed again here
 _remote.configure(_data_dir())
+_remote.LOCAL_INFO = _get_object_info     # refusals name the pack a missing node comes from on this PC
 
 
 def _resume_remote():
@@ -2755,6 +2759,10 @@ _videotools.setup(globals())
 # ---------------------------------------------------------------- keep the queue across shutdowns
 from . import queuekeep as _queuekeep  # noqa: E402
 _queuekeep.setup(globals())
+
+# ---------------------------------------------------------------- share model files with the GPU machines (a Mac fetches what HF lacks)
+from . import modelshare as _modelshare  # noqa: E402
+_modelshare.setup(globals())
 
 
 try:   # carry on with Civitai downloads that a restart interrupted
