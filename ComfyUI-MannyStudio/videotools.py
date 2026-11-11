@@ -360,16 +360,27 @@ def remote_api(api, dirs=None):
     return out
 
 
-def _here(target):
-    return not target or target == H["_remote"].LOCAL
+async def _place(api, target):
+    """Which machine renders: None for this PC, else the worker. "auto" is decided BEFORE the graph is shaped: every
+    machine is checked against remote_api's form (this PC can run it too, so the check is fair to all), and this PC,
+    if it wins, still gets its own graph (H3LoadVideoPath, its text encoder) and frees memory first."""
+    if not target or target == H["_remote"].LOCAL:
+        return None
+    if target != H["_remote"].AUTO:
+        return H["_remote"].find(H["_data_dir"](), target)
+    try:
+        shaped = remote_api(api)
+    except RuntimeError:        # a clip outside Studio's folders can only be read here
+        return None
+    return await H["_choose"](shaped, target)
 
 
-async def _queue(api, label, target=None):
-    """Queue api on this PC, "auto" or a GPU machine (Run on); returns the prompt_id that _wait_output follows."""
-    if not _here(target):
+async def _queue(api, label, worker=None):
+    """Queue api on this PC (worker None) or on that worker, by name; returns the prompt_id _wait_output follows."""
+    if worker:
         api = remote_api(api)
     return await H["_queue_api"](api, {"manny_app": "videotools:" + label.lower().replace(" ", "-"), "manny_label": label},
-                                 False, target, "studio-videotools")
+                                 False, worker["label"] if worker else H["_remote"].LOCAL, "studio-videotools")
 
 
 def _src(b):
@@ -406,11 +417,12 @@ async def _free_memory():
 
 
 async def _render(job, api, label, stage, target=None):
-    if _here(target):       # another machine manages its own memory
+    worker = await _place(api, target)
+    if not worker:          # another machine manages its own memory
         job["stage"] = "Freeing memory"
         await _free_memory()
-    job["stage"] = "Waiting in the queue"
-    pid = await _queue(api, label, target)
+    job["stage"] = "Waiting in the queue" + (f" on {worker['label']}" if worker else "")
+    pid = await _queue(api, label, worker)
     job["pids"].append(pid)
     job["stage"] = stage
     fn, sub = await H["_wait_output"](pid, job)

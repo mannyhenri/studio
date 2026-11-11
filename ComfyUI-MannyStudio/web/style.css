@@ -183,6 +183,8 @@ details.adv .fsec{margin-top:14px}
 .kv{display:grid;grid-template-columns:80px 1fr;gap:6px 10px;font-size:13px}.kv span:nth-child(odd){color:var(--dim)}
 .dialog{width:min(620px,94vw);background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:24px;display:flex;flex-direction:column;gap:16px;max-height:92vh;overflow:auto}
 .dialog .foot{display:flex;justify-content:flex-end;gap:10px}
+.dialog .foot .runon-row{margin-right:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+.dialog .foot .runon-note{color:var(--muted, #888);max-width:260px}
 
 /* characters */
 .cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:16px}

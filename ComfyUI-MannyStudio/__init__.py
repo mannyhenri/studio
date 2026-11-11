@@ -1015,6 +1015,8 @@ async def _choose(api, target, private=False):
     why_local = _remote.gate(api, await _get_object_info())
     label, notes = await _remote.pick(_remote.load_workers(_data_dir()), api, _local_busy(), not why_local)
     if label is None:
+        for k in list(notes):       # a node a machine lacks: name the pack to copy from this PC
+            notes[k] = await _remote.name_packs(notes[k] or [])
         notes[_remote.LOCAL] = why_local
         e = _remote.GateRefused("every machine", [dict(x, machine=k) for k, v in notes.items() for x in (v or [])[:3]])
         e.refused_by = notes

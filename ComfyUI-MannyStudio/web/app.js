@@ -1378,6 +1378,7 @@ function videoFixDialog(cur, prompt, at) {
     <p class="hint" id="vhint" style="margin:0"></p>
     <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Fix it</button></div></div>`);
   m.append(d);
+  $(".foot", d).prepend(runOnSelect("On a Mac GPU a fix takes several minutes; Fix the face needs the FaceRefine nodes there"));
   const v = $("video", d), sel = $(".vsel", d), head = $(".vhead", d);
   const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
   $$("[data-x]", d).forEach(x => x.onclick = close);
@@ -1424,6 +1425,7 @@ function videoExtendDialog(cur, prompt) {
       <p class="hint" style="flex:1;margin:0">Without a picture, the clip's last frame is used to keep the look. ~10–25 min on this PC.</p></div>
     <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Continue</button></div></div>`);
   m.append(d);
+  $(".foot", d).prepend(runOnSelect("On a Mac GPU, 5 s takes about an hour (longer ones aren't measured there)"));
   const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
   $$("[data-x]", d).forEach(x => x.onclick = close);
   $("#xprompt", d).value = prompt || "";
@@ -1453,6 +1455,7 @@ function keyframeDialog() {
       <div><label class="lbl">Shape</label><div class="chips" id="kfa">${Object.keys(AS).map(x => `<div class="chip" data-v="${x}">${x}</div>`).join("")}</div></div></div>
     <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Render the shot</button></div></div>`);
   m.append(d);
+  $(".foot", d).prepend(runOnSelect("On a Mac GPU a 5 s shot takes about 40 min"));
   const close = () => { store.set("kf", st); m.classList.add("hidden"); m.innerHTML = ""; };
   $$("[data-x]", d).forEach(x => x.onclick = close);
   $("#kfp", d).value = st.prompt || ""; $("#kfp", d).oninput = e => st.prompt = e.target.value;
@@ -3067,6 +3070,17 @@ function runOptions() {
 async function loadWorkers() {
   try { S.workers = await api("/manny/api/workers"); } catch { S.workers = []; }
   document.querySelectorAll(".go").forEach(placeRunOn);   // the form may have been drawn before the list arrived
+}
+/* the same choice inside a dialog (the video tools): changing it changes the remembered Run on, so what you see is
+   where it goes; note shows while a GPU machine is picked */
+function runOnSelect(note) {
+  if (S.workers.length < 2) return h(`<span></span>`);
+  const el = h(`<label class="runon-row">Run on <select class="runon" title="Which GPU renders this">${runOptions()}</select><small class="runon-note"></small></label>`);
+  const sel = $("select", el), nt = $(".runon-note", el);
+  const show = () => { nt.textContent = note && sel.value !== "local" && sel.value !== "auto" ? note : ""; };
+  sel.onchange = () => { S.target = sel.value; saveState(); show(); };
+  show();
+  return el;
 }
 /* the "Run on" menu next to Generate, only once another GPU machine is set up in Settings */
 function placeRunOn(go) {

@@ -392,6 +392,64 @@ async def main():
         check(False, "remote_api refuses a clip outside Studio's folders")
     except RuntimeError as e:
         check("can't be sent" in str(e), f"remote_api refuses a clip outside Studio's folders: {e}")
+    # "Any free GPU": the machine is chosen first, then the graph shaped for it. This PC gets its own graph
+    # (H3LoadVideoPath, its text encoder) and frees memory first; a card gets remote_api's form.
+    vt = sys.modules["studio.videotools"]
+    freed, picked, real_pick, real_free = [], [], remote.pick, vt._free_memory
+
+    async def free_spy():
+        freed.append(1)
+    vt._free_memory = free_spy
+    for win in (remote.LOCAL, WORKERS[0]["label"]):
+        async def fake_pick(workers, api, local_busy, local_ok=True, timeout=15, win=win):
+            picked.append({n.get("class_type") for n in api.values()})
+            return win, {}
+        remote.pick = fake_pick
+        for member in ("video:fix-part", "video:fix-face", "video:extend", "video:keyframes"):
+            n, lp, nf, npk = len(reached), len(local_posts), len(freed), len(picked)
+            await drive(member, "auto")
+            for _ in range(100):
+                if len(local_posts) > lp or len(reached) > n:
+                    break
+                await asyncio.sleep(0.05)
+            reads_clip = member != "video:keyframes"
+            chose_with = picked[npk:] and picked[npk]
+            check(bool(chose_with) and "H3LoadVideoPath" not in chose_with,
+                  f"auto {member}: the machine is chosen with the remote form ({sorted(chose_with or [])[:4]}...)")
+            if win == remote.LOCAL:
+                got = local_posts[lp:]
+                cls = {nd.get("class_type") for nd in (got[0].get("prompt") or {}).values()} if got else set()
+                check(len(reached) == n and len(got) == 1 and len(freed) > nf and (not reads_clip or ("H3LoadVideoPath" in cls and "LoadVideo" not in cls)),
+                      f"auto {member}, this PC wins: its own graph ({'H3LoadVideoPath' in cls}), memory freed ({len(freed) - nf}), no card ({len(reached) - n})")
+            else:
+                got = reached[n:]
+                cls = {nd.get("class_type") for nd in (got[0]["api"] if got else {}).values()}
+                check(len(got) == 1 and got[0]["worker"] == win and len(freed) == nf and (not reads_clip or ("LoadVideo" in cls and "H3LoadVideoPath" not in cls)),
+                      f"auto {member}, {win} wins: the card's form reaches it ({[r['worker'] for r in got]}), no memory freeing here ({len(freed) - nf})")
+    # an "auto" refusal names the pack a missing node comes from, like a named card's does
+    async def none_pick(workers, api, local_busy, local_ok=True, timeout=15):
+        return None, {WORKERS[0]["label"]: [{"node": "1", "class_type": "H3FaceTrackCrop", "reason": "node H3FaceTrackCrop is not installed"}]}
+    remote.pick = none_pick
+    keep_info = remote.LOCAL_INFO
+
+    async def pc_info(force=False):
+        return {"H3FaceTrackCrop": {"python_module": "custom_nodes.ComfyUI-H3-FaceRefine"}}
+    remote.LOCAL_INFO = pc_info
+    try:
+        await studio._choose({"1": {"class_type": "H3FaceTrackCrop", "inputs": {}}}, "auto")
+        check(False, "auto with no machine able must refuse")
+    except remote.GateRefused as e:
+        check("copy ComfyUI/custom_nodes/ComfyUI-H3-FaceRefine" in str(e) and "copy ComfyUI/custom_nodes/ComfyUI-H3-FaceRefine" in json.dumps(e.refused_by),
+              f"auto refusal names the pack: {str(e)[:200]}")
+    remote.pick, vt._free_memory, remote.LOCAL_INFO = real_pick, real_free, keep_info
+    # every browser dialog that starts a video tool shows the Run on choice
+    src_js = open(WEB, encoding="utf-8").read()
+    funcs = re.findall(r"\n((?:async )?function (\w+)\(.*?)(?=\n(?:async )?function )", src_js, re.S)
+    dialogs = [name for body, name in funcs if re.search(r'videoJob\("/manny/api/video/', body)]
+    for name in dialogs:
+        body = next(b for b, nm in funcs if nm == name)
+        check("runOnSelect(" in body, f"web {name} shows a Run on choice")
+    check(len(dialogs) >= 3, f"video dialogs found: {dialogs}")
     check(sum(r.get("client_id") == "studio-videotools" for r in reached) >= 2 * len(VIDEO),
           f"every video entry point reached a Mac ({sum(r.get('client_id') == 'studio-videotools' for r in reached)} jobs)")
     # PC-only: drive AI review and AI prompt help with a Mac target; they must post to this PC and reach no Mac
