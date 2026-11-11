@@ -2670,6 +2670,7 @@ from . import gitver as _gitver  # noqa: E402
 
 # remote GPU jobs survive a restart of this ComfyUI: saved in manny_studio/remote_jobs.json, followed again here
 _remote.configure(_data_dir())
+_remote.LOCAL_INFO = _get_object_info     # refusals name the pack a missing node comes from on this PC
 
 
 def _resume_remote():

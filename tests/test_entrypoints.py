@@ -588,6 +588,17 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
         async with s.get(remote.base(WORKERS[1]) + "/mac/info") as r:
             sv = (await r.json()).get("self_validated")
     st, fakes, runners = await fake_macs(remote, [w["label"] for w in WORKERS], real_oi, sv)
+    pc_oi = {}      # the Studio PC's own node list (it answers on the LAN): which pack each node comes from
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(os.environ.get("PC_URL", "http://desktop-mggcgsg.local:8188") + "/object_info", timeout=aiohttp.ClientTimeout(total=30)) as r:
+                pc_oi = await r.json()
+    except Exception as e:
+        print(f"NOTE the PC's ComfyUI isn't reachable ({e}): pack names not checked")
+
+    async def pc_info(force=False):
+        return pc_oi
+    remote.LOCAL_INFO = pc_info if pc_oi else None
     remote.save_workers(studio._data_dir(), fakes)
     remote._caps.clear()
     remote.FETCH_POLL = 0.05
@@ -629,6 +640,12 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
             if missing:
                 print(f"NOTE {member} can't run on the Mac at all: {missing} not installed there")
                 check(not fetches and not posts, f"{tag} refused at once, no download, nothing queued ({len(fetches)} fetch, {len(posts)} posts)")
+                text = " ".join(said[n_said:]) + json.dumps([j.get("error") for k2, j in studio._jobs.items() if k2 not in old_sj], default=str)
+                packs = {c: str((pc_oi.get(c) or {}).get("python_module") or "") for c in missing}
+                for c, mod in packs.items():
+                    if mod.startswith("custom_nodes."):
+                        pack = mod.split(".", 1)[1].split(".")[0]
+                        check(f"copy ComfyUI/custom_nodes/{pack}" in text, f"{tag} the refusal says to copy {pack} for {c}")
                 continue
             check(bool(fetches) and all(lab == w["label"] for lab, _ in fetches), f"{tag} asked {w['label']}'s /mac/fetch ({len(fetches)} calls)")
             check(all(not p["refused_then"] for p in posts), f"{tag} no /prompt while the gate still refused: {[p['refused_then'][:1] for p in posts if p['refused_then']]}")
