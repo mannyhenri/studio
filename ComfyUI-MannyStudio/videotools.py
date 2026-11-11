@@ -336,6 +336,18 @@ def ltx_extend_api(path, prompt, seconds, seed, W, H, src_dur):
     return api, C
 
 
+def _mean_db(path, start=None, end=None):
+    cmd = [_ff(), "-v", "info"] + (["-ss", f"{start:.3f}"] if start is not None else []) + (["-to", f"{end:.3f}"] if end is not None else [])
+    r = subprocess.run(cmd + ["-i", path, "-vn", "-af", "volumedetect", "-f", "null", "-"], capture_output=True, creationflags=NO_WINDOW)
+    for line in (r.stderr or b"").decode("utf-8", "ignore").splitlines():
+        if "mean_volume:" in line:
+            try:
+                return float(line.split("mean_volume:")[1].split("dB")[0])
+            except Exception:
+                return None
+    return None
+
+
 def join_after(orig, new, skip, dest):
     """orig + new[skip:]: the new clip's first `skip` seconds repeat the end of the original, so they are dropped.
     Picture and sound of the new part come from the new clip; size and frame rate follow the original."""
@@ -345,7 +357,10 @@ def join_after(orig, new, skip, dest):
     fc = (f"[0:v]fps={fps},setsar=1[v0];"
           f"[1:v]trim=start={skip:.3f},setpts=PTS-STARTPTS,scale={p['width']}:{p['height']}:flags=lanczos,fps={fps},setsar=1[v1];")
     if p["audio"] and q["audio"]:
-        fc += (f"[0:a]aresample=48000[a0];[1:a]atrim=start={skip:.3f},asetpts=PTS-STARTPTS,aresample=48000[a1];"
+        # the new part's sound is levelled to the last 3 s of the original, so the join doesn't jump in loudness
+        a_db, b_db = _mean_db(orig, max(0.0, p["duration"] - 3.0)), _mean_db(new, skip)
+        gain = max(-20.0, min(20.0, a_db - b_db)) if a_db is not None and b_db is not None else 0.0
+        fc += (f"[0:a]aresample=48000[a0];[1:a]atrim=start={skip:.3f},asetpts=PTS-STARTPTS,aresample=48000,volume={gain:.2f}dB[a1];"
                f"[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]")
         maps = ["-map", "[v]", "-map", "[a]", "-c:a", "aac", "-b:a", "256k"]
     else:
