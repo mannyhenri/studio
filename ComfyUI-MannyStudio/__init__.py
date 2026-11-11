@@ -2760,6 +2760,10 @@ _videotools.setup(globals())
 from . import queuekeep as _queuekeep  # noqa: E402
 _queuekeep.setup(globals())
 
+# ---------------------------------------------------------------- share model files with the GPU machines (a Mac fetches what HF lacks)
+from . import modelshare as _modelshare  # noqa: E402
+_modelshare.setup(globals())
+
 
 try:   # carry on with Civitai downloads that a restart interrupted
     _lp = getattr(PromptServer.instance, "loop", None)
