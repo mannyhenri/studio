@@ -3,7 +3,8 @@
 Everything runs on the models already on this PC:
 - Fix a part        LTX-2.5 re-draws the marked seconds from the clip itself (video to video), first and last frames pinned
 - Fix a face        H3 Face Refine tracks and crops the face; LTX-2.5 re-draws the crop lightly; the face is stitched back
-- Continue a shot   H3 Motion Context (Ref2VA + 4-step turbo): the clip's last frames are pinned so motion carries on
+- Continue a shot   LTX-2.5 (default): the clip's last second is pinned at the start of the new part; or H3 Motion Context
+                    (Ref2VA + 4-step turbo, the H3 model that rendered fine here)
 - Keyframe shot     LTX-2.5 two-pass with a guide picture at each time
 
 The H3 first/last-frame model (FL2VA) was the one loading both times this PC froze (Nov 10 and 11); Studio no longer uses it.
@@ -139,13 +140,11 @@ def _gguf_te():
 
 
 def _h3_loaders(api, unet, lora):
+    """H3's 32B text encoder runs on the CPU (slower, a few minutes): the graphics memory then only holds the video model.
+    When this PC froze, the encoder (15 GB) sat in graphics memory while the video model was loading next to it."""
     api["m"] = {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}}
     api["lo"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["m", 0], "lora_name": lora, "strength_model": 1.0}}
-    gg = _gguf_te()
-    if gg:   # GGUF unpacks one layer at a time: far lower peak RAM than the nvfp4 file on this Intel GPU
-        api["te"] = {"class_type": "CLIPLoaderGGUF", "inputs": {"clip_name": gg, "type": "minimax"}}
-    else:
-        api["te"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": H3_TE, "type": "minimax", "device": "default"}}
+    api["te"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": H3_TE, "type": "minimax", "device": "cpu"}}
     api["vv"] = {"class_type": "VAELoader", "inputs": {"vae_name": H3_VVAE}}
     api["va"] = {"class_type": "VAELoader", "inputs": {"vae_name": H3_AVAE}}
 
@@ -168,9 +167,11 @@ def _ltx_frames(dur):
     return max(9, int((dur * 24 - 1) // 8) * 8 + 1)
 
 
-def _ltx_v2v(api, images, n, prompt, denoise, seed, guides=()):
+def _ltx_v2v(api, images, n, prompt, denoise, seed, guides=(), audio=None):
     """Re-draws `images` (n = 8k+1 frames) with LTX-2.5 at partial denoise. guides: [(image ref, frame index)] pinned exactly.
-    The text encoder runs on the CPU so the graphics memory only ever holds the video model."""
+    The text encoder runs on the CPU so the graphics memory only ever holds the video model.
+    audio: the clip's own sound for these frames. It is encoded and frozen, so LTX hears the singing while it re-draws
+    and keeps the mouth in sync (plus A/V coupling guidance, which strengthens lip-sync)."""
     api.update({
         "um": {"class_type": "UNETLoader", "inputs": {"unet_name": LTX_UNET, "weight_dtype": "default"}},
         "te": {"class_type": "CLIPLoader", "inputs": {"clip_name": LTX_TE, "type": "ltxv", "device": "cpu"}},
@@ -180,15 +181,23 @@ def _ltx_v2v(api, images, n, prompt, denoise, seed, guides=()):
         "neg": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["te", 0], "text": LTX_NEG}},
         "cond": {"class_type": "LTXVConditioning", "inputs": {"positive": ["pos", 0], "negative": ["neg", 0], "frame_rate": 24.0}},
         "enc": {"class_type": "VAEEncode", "inputs": {"pixels": images, "vae": ["vv", 0]}},
-        "ea": {"class_type": "LTXVEmptyLatentAudio", "inputs": {"frames_number": n, "frame_rate": 24, "batch_size": 1, "audio_vae": ["va", 0]}},
     })
+    if audio:
+        api["at"] = {"class_type": "TrimAudioDuration", "inputs": {"audio": audio, "start_index": 0.0, "duration": round(n / 24.0, 3)}}
+        api["ae"] = {"class_type": "LTXVAudioVAEEncode", "inputs": {"audio": ["at", 0], "audio_vae": ["va", 0]}}
+        api["ea"] = {"class_type": "LTXVFreezeLatent", "inputs": {"latent": ["ae", 0]}}
+        api["mg"] = {"class_type": "LTXVModalityGuidance", "inputs": {"model": ["um", 0], "modality_scale": 3.0, "start_percent": 0.0, "end_percent": 1.0}}
+        model = ["mg", 0]
+    else:
+        api["ea"] = {"class_type": "LTXVEmptyLatentAudio", "inputs": {"frames_number": n, "frame_rate": 24, "batch_size": 1, "audio_vae": ["va", 0]}}
+        model = ["um", 0]
     pos, neg, lat = ["cond", 0], ["cond", 1], ["enc", 0]
     for k, (img, idx) in enumerate(guides):
         api[f"gd{k}"] = {"class_type": "LTXVAddGuide", "inputs": {"positive": pos, "negative": neg, "vae": ["vv", 0], "latent": lat,
                                                                    "image": img, "frame_idx": int(idx), "strength": 1.0}}
         pos, neg, lat = [f"gd{k}", 0], [f"gd{k}", 1], [f"gd{k}", 2]
     api["av"] = {"class_type": "LTXVConcatAVLatent", "inputs": {"video_latent": lat, "audio_latent": ["ea", 0]}}
-    api["gu"] = {"class_type": "LTXVDualCFGGuider", "inputs": {"model": ["um", 0], "positive": pos, "negative": neg, "video_cfg": 1.0, "audio_cfg": 1.0}}
+    api["gu"] = {"class_type": "LTXVDualCFGGuider", "inputs": {"model": model, "positive": pos, "negative": neg, "video_cfg": 1.0, "audio_cfg": 1.0}}
     api["sg"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": _ltx_sigmas(denoise)}}
     api["ks"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
     api["nz"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}}
@@ -219,7 +228,7 @@ def retake_api(path, clip_from, clip_len, prompt, denoise, seed, size):
     imgs = _frames(api, path, clip_from, n, size)
     api["f0"] = {"class_type": "ImageFromBatch", "inputs": {"image": imgs, "batch_index": 0, "length": 1}}
     api["f1"] = {"class_type": "ImageFromBatch", "inputs": {"image": imgs, "batch_index": n - 1, "length": 1}}
-    out = _ltx_v2v(api, imgs, n, prompt, denoise, seed, guides=[(["f0", 0], 0), (["f1", 0], n - 1)])
+    out = _ltx_v2v(api, imgs, n, prompt, denoise, seed, guides=[(["f0", 0], 0), (["f1", 0], n - 1)], audio=["fr", 1])
     _save(api, out, ["fr", 1], "Videos/_work/retake")
     return api, n
 
@@ -233,7 +242,7 @@ def face_api(path, start, dur, prompt, denoise, seed, size):
         "images": imgs, "detector": FACE_DET, "confidence": 0.35, "crop_factor": 3.0, "canvas_width": 768, "canvas_height": 768,
         "canvas_mode": "auto_capped_768", "smooth_window": 21, "size_smooth_window": 51, "smooth_method": "gaussian", "size_mode": "per_frame",
         "select": "largest_face", "fallback_detector": "none", "cut_detection": "none", "absent_shots": "off"}}
-    out = _ltx_v2v(api, ["tr", 0], n, prompt, denoise, seed)
+    out = _ltx_v2v(api, ["tr", 0], n, prompt, denoise, seed, audio=["fr", 1])
     api["st"] = {"class_type": "H3FaceStitch", "inputs": {"base_images": imgs, "refined_crops": out, "transform": ["tr", 1],
                                                            "paste_region": "face_only", "mask_dilation": 24, "feather": 24, "colour_match": 1.0,
                                                            "blend": 1.0, "undetected_frames": "fade_out", "feather_scales_with_crop": False}}
@@ -275,13 +284,88 @@ def extend_api(path, prompt, seconds, ref, seed, w, h, src_dur, steps=4):
     return api
 
 
+LTX_CTX = 25          # frames (~1 s) of the clip's end that the new part starts from
+
+
+def ltx_extend_api(path, prompt, seconds, seed, W, H, src_dur):
+    """Continue a shot with LTX-2.5: the last second of the clip is pinned at the start of a new clip (two passes, like the
+    keyframe shot), so the motion carries on. The caller drops that second and joins the rest onto the original."""
+    C = LTX_CTX
+    N = int(round((C - 1 + seconds * 24) / 8.0)) * 8 + 1
+    w1, h1 = max(64, (W // 2) // 32 * 32), max(64, (H // 2) // 32 * 32)
+    api = {
+        "um": {"class_type": "UNETLoader", "inputs": {"unet_name": LTX_UNET, "weight_dtype": "default"}},
+        "te": {"class_type": "CLIPLoader", "inputs": {"clip_name": LTX_TE, "type": "ltxv", "device": "cpu"}},
+        "vv": {"class_type": "VAELoader", "inputs": {"vae_name": LTX_VVAE}},
+        "va": {"class_type": "VAELoader", "inputs": {"vae_name": LTX_AVAE}},
+        "ups": {"class_type": "LatentUpscaleModelLoader", "inputs": {"model_name": LTX_UPS}},
+        "pos": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["te", 0], "text": prompt}},
+        "neg": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["te", 0], "text": LTX_NEG}},
+        "cond": {"class_type": "LTXVConditioning", "inputs": {"positive": ["pos", 0], "negative": ["neg", 0], "frame_rate": 24.0}},
+        "lv": {"class_type": "H3LoadVideoPath", "inputs": {"path": path}},
+        "fr": {"class_type": "H3VideoFrames", "inputs": {"video": ["lv", 0], "start_seconds": max(0.0, src_dur - (C + 3) / 24.0),
+                                                          "duration_seconds": 0.0, "frame_rate": "24 (H3 native)", "resize": "none",
+                                                          "resize_value": 1.0, "snap_to_h3": False}},
+        "ctx": {"class_type": "ImageFromBatch", "inputs": {"image": ["fr", 0], "batch_index": 2, "length": C}},   # the last C frames
+        "full": {"class_type": "ImageScale", "inputs": {"image": ["ctx", 0], "upscale_method": "lanczos", "width": W, "height": H, "crop": "center"}},
+        "half": {"class_type": "ImageScale", "inputs": {"image": ["ctx", 0], "upscale_method": "lanczos", "width": w1, "height": h1, "crop": "center"}},
+        "el": {"class_type": "EmptyLTXVLatentVideo", "inputs": {"width": w1, "height": h1, "length": N, "batch_size": 1}},
+        "ea": {"class_type": "LTXVEmptyLatentAudio", "inputs": {"frames_number": N, "frame_rate": 24, "batch_size": 1, "audio_vae": ["va", 0]}},
+        "g1": {"class_type": "LTXVAddGuide", "inputs": {"positive": ["cond", 0], "negative": ["cond", 1], "vae": ["vv", 0], "latent": ["el", 0],
+                                                         "image": ["half", 0], "frame_idx": 0, "strength": 1.0}},
+        "av1": {"class_type": "LTXVConcatAVLatent", "inputs": {"video_latent": ["g1", 2], "audio_latent": ["ea", 0]}},
+        "gd1": {"class_type": "LTXVDualCFGGuider", "inputs": {"model": ["um", 0], "positive": ["g1", 0], "negative": ["g1", 1], "video_cfg": 1.0, "audio_cfg": 1.0}},
+        "s1": {"class_type": "ManualSigmas", "inputs": {"sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"}},
+        "k1": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler_ancestral"}},
+        "n1": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}},
+        "sa1": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["n1", 0], "guider": ["gd1", 0], "sampler": ["k1", 0], "sigmas": ["s1", 0], "latent_image": ["av1", 0]}},
+        "sep1": {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["sa1", 0]}},
+        "crop1": {"class_type": "LTXVCropGuides", "inputs": {"positive": ["g1", 0], "negative": ["g1", 1], "latent": ["sep1", 0]}},
+        "up": {"class_type": "LTXVLatentUpsampler", "inputs": {"samples": ["crop1", 2], "upscale_model": ["ups", 0], "vae": ["vv", 0]}},
+        "g2": {"class_type": "LTXVAddGuide", "inputs": {"positive": ["crop1", 0], "negative": ["crop1", 1], "vae": ["vv", 0], "latent": ["up", 0],
+                                                         "image": ["full", 0], "frame_idx": 0, "strength": 1.0}},
+        "av2": {"class_type": "LTXVConcatAVLatent", "inputs": {"video_latent": ["g2", 2], "audio_latent": ["sep1", 1]}},
+        "gd2": {"class_type": "LTXVDualCFGGuider", "inputs": {"model": ["um", 0], "positive": ["g2", 0], "negative": ["g2", 1], "video_cfg": 1.0, "audio_cfg": 1.0}},
+        "s2": {"class_type": "ManualSigmas", "inputs": {"sigmas": "0.85, 0.7250, 0.4219, 0.0"}},
+        "k2": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler_ancestral"}},
+        "n2": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed) + 1}},
+        "sa2": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["n2", 0], "guider": ["gd2", 0], "sampler": ["k2", 0], "sigmas": ["s2", 0], "latent_image": ["av2", 0]}},
+        "sep2": {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["sa2", 0]}},
+        "crop2": {"class_type": "LTXVCropGuides", "inputs": {"positive": ["g2", 0], "negative": ["g2", 1], "latent": ["sep2", 0]}},
+        "dec": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["crop2", 2], "vae": ["vv", 0], "tile_size": 512, "overlap": 64,
+                                                           "temporal_size": 64, "temporal_overlap": 16}},
+        "dau": {"class_type": "LTXVAudioVAEDecode", "inputs": {"samples": ["sep2", 1], "audio_vae": ["va", 0]}},
+    }
+    _save(api, ["dec", 0], ["dau", 0], "Videos/_work/extend_ltx")
+    return api, C
+
+
+def join_after(orig, new, skip, dest):
+    """orig + new[skip:]: the new clip's first `skip` seconds repeat the end of the original, so they are dropped.
+    Picture and sound of the new part come from the new clip; size and frame rate follow the original."""
+    p = probe(orig)
+    q = probe(new)
+    fps = round(p["fps"], 3)
+    fc = (f"[0:v]fps={fps},setsar=1[v0];"
+          f"[1:v]trim=start={skip:.3f},setpts=PTS-STARTPTS,scale={p['width']}:{p['height']}:flags=lanczos,fps={fps},setsar=1[v1];")
+    if p["audio"] and q["audio"]:
+        fc += (f"[0:a]aresample=48000[a0];[1:a]atrim=start={skip:.3f},asetpts=PTS-STARTPTS,aresample=48000[a1];"
+               f"[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]")
+        maps = ["-map", "[v]", "-map", "[a]", "-c:a", "aac", "-b:a", "256k"]
+    else:
+        fc += "[v0][v1]concat=n=2:v=1:a=0[v]"
+        maps = ["-map", "[v]"]
+    _run([_ff(), "-y", "-i", orig, "-i", new, "-filter_complex", fc, *maps,
+          "-c:v", "libx264", "-crf", "15", "-preset", "medium", "-pix_fmt", "yuv420p", "-movflags", "+faststart", dest])
+
+
 def ltx_keyframes_api(keys, prompt, negative, W, H, seconds, seed):
     """keys: [(input image value, seconds)], first at 0. Two passes (half size, then x2 latent upscale), like the corridor shot."""
     length = int(round(seconds * 24 / 8.0)) * 8 + 1
     w1, h1 = max(64, (W // 2) // 32 * 32), max(64, (H // 2) // 32 * 32)
     api = {
         "um": {"class_type": "UNETLoader", "inputs": {"unet_name": LTX_UNET, "weight_dtype": "default"}},
-        "te": {"class_type": "CLIPLoader", "inputs": {"clip_name": LTX_TE, "type": "ltxv", "device": "default"}},
+        "te": {"class_type": "CLIPLoader", "inputs": {"clip_name": LTX_TE, "type": "ltxv", "device": "cpu"}},   # keeps graphics memory for the video model
         "vv": {"class_type": "VAELoader", "inputs": {"vae_name": LTX_VVAE}},
         "va": {"class_type": "VAELoader", "inputs": {"vae_name": LTX_AVAE}},
         "ups": {"class_type": "LatentUpscaleModelLoader", "inputs": {"model_name": LTX_UPS}},
@@ -488,7 +572,7 @@ def setup(ns):
 
     @routes.post("/manny/api/video/extend")
     async def vextend(request):
-        """{filename, subfolder, seconds: 5|7|9|11, prompt, ref, seed}"""
+        """{filename, subfolder, engine: ltx|h3, seconds: 5|7 (ltx) or 5|7|9|11 (h3), prompt, ref (h3 only), seed}"""
         b = await request.json()
         src = _src(b)
         p = await asyncio.to_thread(probe, src)
@@ -496,15 +580,32 @@ def setup(ns):
         prompt = (b.get("prompt") or "").strip()
         if not prompt:
             raise web.HTTPBadRequest(text="Say what happens next")
-        w, h = h3_size(p["width"], p["height"])
+        engine = "h3" if b.get("engine") == "h3" else "ltx"
+        secs = int(b.get("seconds") or 5)
         target = b.get("target")  # extend
         job = ns["_new_job"](False, kind="videoextend")
 
         async def run():
-            api = extend_api(src, prompt, int(b.get("seconds") or 7), b.get("ref") or None, seed, w, h, p["duration"])
-            out = await _render(job, api, "Continue a shot", "Continuing the shot", target)
-            dest = _dest("Extended", src, "continued")
-            os.replace(out, dest)
+            if engine == "h3":
+                w, h = h3_size(p["width"], p["height"])
+                api = extend_api(src, prompt, secs, b.get("ref") or None, seed, w, h, p["duration"])
+                out = await _render(job, api, "Continue a shot (H3)", "Continuing the shot with H3", target)
+                dest = _dest("Extended", src, "continued H3")
+                os.replace(out, dest)
+            else:
+                W, Hh = p["width"] // 32 * 32, p["height"] // 32 * 32
+                if W * Hh > 900_000:                      # big sources: work at ~0.8 MP, joined back at full size
+                    f = (0.8e6 / (W * Hh)) ** 0.5
+                    W, Hh = int(W * f) // 32 * 32, int(Hh * f) // 32 * 32
+                api, C = ltx_extend_api(src, prompt, min(7, max(3, secs)), seed, W, Hh, p["duration"])
+                out = await _render(job, api, "Continue a shot (LTX)", "Continuing the shot with LTX", target)
+                job["stage"] = "Joining it on"
+                dest = _dest("Extended", src, "continued")
+                await asyncio.to_thread(join_after, src, out, C / 24.0, dest)
+                try:
+                    os.remove(out)
+                except Exception:
+                    pass
             return _result(dest)
         asyncio.ensure_future(ns["_ai_job"](job, run))
         return web.json_response({"id": job["id"], "seed": seed})
