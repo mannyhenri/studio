@@ -308,7 +308,7 @@ def build_run(a):
         vals[seed_keys[0]] = int(a["seed"])
         seed_keys = seed_keys[1:]
     body = {"app": app["id"], "values": vals, "count": max(1, min(8, int(a.get("count") or 1))), "client_id": "claude-mcp",
-            "random_seed_keys": seed_keys, "private": private}
+            "random_seed_keys": seed_keys, "private": private, "target": a.get("run_on") or "local"}
     if a.get("loras"):
         have = [l["file"] for l in http("GET", "/manny/api/loras" + ("?private=1" if private else ""))]
         lo = []
@@ -361,10 +361,23 @@ def when_at(s):
         raise RuntimeError("later: use 'idle', 'in 2h', '23:30' or an ISO time")
 
 
+def remote_outputs(pid):
+    """A job Studio sent to another GPU machine: its state, and its files once they're copied to this PC."""
+    j = next((x for x in http("GET", "/manny/api/remote_jobs") if x["prompt_id"] == pid), None)
+    if not j:
+        return None, None
+    if j["status"] in ("failed", "cancelled"):
+        return "error", f"{j['worker']}: {j.get('error') or j['status']}"
+    if j["status"] != "done":
+        return "running", []
+    return "done", [{"filename": o["filename"], "subfolder": re.sub(r"^\.private_incoming/?", "", o["subfolder"].replace("\\", "/")),
+                     "private": o["subfolder"].replace("\\", "/").startswith(".private_incoming")} for o in j["outputs"]]
+
+
 def outputs_of(pid):
     h = http("GET", f"/history/{pid}").get(pid)
     if not h:
-        return None, None
+        return remote_outputs(pid)
     st = h.get("status") or {}
     files = []
     for o in (h.get("outputs") or {}).values():
@@ -439,6 +452,7 @@ TOOLS += [
          "pose_strength": {"type": "number", "description": "How closely to copy the pose, 0.3-1.2 (default 0.85)"},
          "loras": {"type": "array", "items": {"type": "object"}, "description": "[{name, strength}] installed LoRAs (part of the file name)"},
          "uncensored": B_, "private": {"type": "boolean", "description": "Save in Incognito"}, "count": N_, "seed": N_,
+         "run_on": {"type": "string", "description": "Which GPU: \"local\" (this PC, default), \"auto\" (least busy machine that has the models) or a machine name from studio_status"},
          "later": {"type": "string"}, "wait": B_, "timeout": {"type": "number", "description": "Seconds to wait (default 300)"}}, "required": ["app"]}},
     {"name": "studio_wait", "description": "Wait for renders by prompt id and return their files.",
      "inputSchema": {"type": "object", "properties": {"prompt_ids": {"type": "array", "items": S_}, "timeout": N_}, "required": ["prompt_ids"]}},
@@ -549,7 +563,8 @@ def call(name, a):
             return [{"type": "text", "text": f"Scheduled ({'when the PC is free' if when == 'idle' else time.strftime('%a %H:%M', time.localtime(at))}). id {r['id']}" + ("\nNotes: " + "; ".join(notes) if notes else "")}]
         r = http("POST", "/manny/api/run", body)
         pids = [q["prompt_id"] for q in r.get("queued", [])]
-        head = f"Queued {len(pids)} on {short(app['id'])}: {pids}" + ("\nNotes: " + "; ".join(notes) if notes else "")
+        where = sorted({q.get("worker") or "local" for q in r.get("queued", [])})
+        head = f"Queued {len(pids)} on {short(app['id'])} ({', '.join(where)}): {pids}" + ("\nNotes: " + "; ".join(notes) if notes else "")
         if not a.get("wait", app["kind"] == "image"):
             return [{"type": "text", "text": head + "\nUse studio_wait with these ids to get the files."}]
         return result_content(wait_prompts(pids, float(a.get("timeout") or 300)), head)

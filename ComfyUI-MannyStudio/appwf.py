@@ -73,12 +73,28 @@ def build_app_prompt(app_path, values, object_info):
     return wf, prune_switches(fix_custom_combos(convert_ui_to_api(wf, object_info), wf), object_info)
 
 
+def missing_required(inputs, oi_node):
+    """Required inputs of a node (its /object_info entry) that inputs lacks, the way ComfyUI's validation sees it:
+    a dynamic input counts through its "<name>.<child>" keys, and an autogrow input needs template.min children."""
+    out = []
+    for name, spec in (((oi_node or {}).get("input") or {}).get("required") or {}).items():
+        kids = sum(1 for k in inputs if k.startswith(name + "."))
+        if isinstance(spec, (list, tuple)) and spec and spec[0] == "COMFY_AUTOGROW_V3":
+            if kids < int(((spec[1] if len(spec) > 1 else {}).get("template") or {}).get("min", 0)):
+                out.append(name)
+        elif name not in inputs and not kids:
+            out.append(name)
+    return out
+
+
 # ---------------------------------------------------------------- dead switch branches
 # ComfyUI validates every input of a ComfySwitchNode, the branch not taken too, so a worker would need every
 # model the app could ever pick. When the switch is a constant (a toggle, a dropdown's index, or math on those)
 # the switch is replaced by its taken branch and whatever no output still reaches is dropped. ComfyUI runs only
 # what outputs reach, so the render is the same. A taken branch with nothing connected ("use?" switches on optional
 # references) makes the switch output None: the input it fed is removed, which is how an unconnected optional looks.
+# When that input is REQUIRED (the node gets None at runtime and e.g. bypasses), there is no way to say so without
+# the switch: such a switch is left as it is.
 # the functions ComfyMathExpression offers (comfy_extras/nodes_math.py MATH_FUNCTIONS)
 _MATH = {"sum": lambda *a: sum(a[0]) if len(a) == 1 and hasattr(a[0], "__iter__") else sum(a), "min": min, "max": max,
          "abs": abs, "round": round, "pow": pow, "sqrt": math.sqrt, "ceil": math.ceil, "floor": math.floor, "log": math.log,
@@ -168,8 +184,25 @@ def _const(api, v, seen=()):
     raise _NotConstant(ct)
 
 
+def _none_ok(api, object_info, sid):
+    """True when every input the switch sid feeds can simply be removed (optional, or an autogrow child with enough left)."""
+    for n in api.values():
+        ins = n.get("inputs") or {}
+        fed = [k for k, v in ins.items() if _is_link(v) and v[0] == sid]
+        if not fed:
+            continue
+        oi = object_info.get(n.get("class_type"))
+        if oi is None:
+            return False
+        rest = {k: v for k, v in ins.items() if k not in fed}
+        if set(missing_required(rest, oi)) - set(missing_required(ins, oi)):
+            return False
+    return True
+
+
 def prune_switches(api, object_info):
     """Fold constant ComfySwitchNodes into their taken branch and drop nodes no output reaches. In place; returns api."""
+    keep_switch = set()
     while True:
         folded = {}
         for nid, n in api.items():
@@ -180,7 +213,12 @@ def prune_switches(api, object_info):
                 taken = "on_true" if _const(api, ins.get("switch")) else "on_false"
             except (_NotConstant, ArithmeticError, TypeError, ValueError, SyntaxError):
                 continue
+            if nid in keep_switch:
+                continue
             folded[nid] = ins.get(taken, _NONE)
+            if folded[nid] is _NONE and not _none_ok(api, object_info, nid):
+                keep_switch.add(nid)
+                del folded[nid]
         if not folded:
             break
         for n in api.values():

@@ -305,13 +305,11 @@ async def manny_run(request):
                 "extra_data": {"extra_pnginfo": {"workflow": wf}, "manny_app": app_id},
             }
             if target == _remote.AUTO:
-                why_local = _remote.gate(api, await _get_object_info())
-                label, notes = await _remote.pick(_remote.load_workers(_data_dir()), api, _local_busy(), not why_local)
-                if label is None:
-                    notes[_remote.LOCAL] = why_local
+                try:
+                    worker = await _choose(api, target)
+                except _remote.GateRefused as e:
                     return web.json_response({"error": "No machine can run this: " + "; ".join(
-                        f"{k}: {(v[0] or {}).get('reason', '')}" for k, v in notes.items() if v), "refused_by": notes, "queued": results}, status=409)
-                worker = None if label == _remote.LOCAL else _remote.find(_data_dir(), label)
+                        f"{k}: {(v[0] or {}).get('reason', '')}" for k, v in e.refused_by.items() if v), "refused_by": e.refused_by, "queued": results}, status=409)
             if worker:
                 try:
                     results.append(dict(await _remote.submit(worker, api, {k: v for k, v in payload.items() if k != "prompt"}, _dirs(), private, INCOMING,
@@ -982,17 +980,46 @@ def _app_by_name(name):
     raise RuntimeError(f"The “{name}” app is missing")
 
 
-async def _queue_app(app, values, private, label):
+async def _queue_app(app, values, private, label, target=None):
     wf, api = await _build_prompt(app["id"], values)
     if private:
         _privatize(api)
-    payload = {"prompt": api, "client_id": "studio-finish",
-               "extra_data": {"extra_pnginfo": {"workflow": wf}, "manny_app": app["id"], "manny_label": label}}
+    return await _queue_api(api, {"extra_pnginfo": {"workflow": wf}, "manny_app": app["id"], "manny_label": label}, private, target, "studio-finish")
+
+
+async def _choose(api, target):
+    """The worker dict that should run api, or None for this PC. target: "local"/None, "auto" or a worker label.
+    Raises KeyError for an unknown label and remote.GateRefused when "auto" finds no machine that can run it."""
+    if not target or target == _remote.LOCAL:
+        return None
+    if target != _remote.AUTO:
+        return _remote.find(_data_dir(), target)
+    why_local = _remote.gate(api, await _get_object_info())
+    label, notes = await _remote.pick(_remote.load_workers(_data_dir()), api, _local_busy(), not why_local)
+    if label is None:
+        notes[_remote.LOCAL] = why_local
+        e = _remote.GateRefused("every machine", [dict(x, machine=k) for k, v in notes.items() for x in (v or [])[:3]])
+        e.refused_by = notes
+        raise e
+    return None if label == _remote.LOCAL else _remote.find(_data_dir(), label)
+
+
+async def _queue_api(api, extra, private, target=None, client_id="studio"):
+    """Queue an API prompt (already privatized when private) on this PC, a worker or "auto"; returns its prompt_id.
+    _wait_output follows either kind. A 200 with node_errors is refused everywhere: it would run without the picture."""
+    worker = await _choose(api, target)
+    if worker:
+        return (await _remote.submit(worker, api, {"client_id": client_id, "extra_data": extra}, _dirs(), private, INCOMING,
+                                     on_done=_remote_done))["prompt_id"]
     async with ClientSession() as s:
-        async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=payload) as r:
+        async with s.post(f"http://127.0.0.1:{_port()}/prompt", json={"prompt": api, "client_id": client_id, "extra_data": extra}) as r:
             data = await r.json()
             if r.status != 200:
-                raise RuntimeError(json.dumps(data)[:600])
+                raise RuntimeError(json.dumps(data.get("node_errors") or data.get("error") or data)[:600])
+        if data.get("node_errors"):
+            async with s.post(f"http://127.0.0.1:{_port()}/queue", json={"delete": [data.get("prompt_id")]}):
+                pass
+            raise RuntimeError("Part of this can't run on this PC: " + json.dumps(data["node_errors"])[:500])
     pid = data.get("prompt_id")
     if private:
         _pending_private.add(pid)
@@ -1000,6 +1027,18 @@ async def _queue_app(app, values, private, label):
 
 
 async def _wait_output(pid, job):
+    rj = _remote.JOBS.get(pid)
+    if rj:      # rendered on another machine: wait for its files to be copied here
+        while not rj["task"].done():
+            if job.get("cancel"):
+                await _remote.cancel(_remote.find(_data_dir(), rj["worker"]), pid)
+                raise RuntimeError("Stopped")
+            await asyncio.sleep(1)
+        if rj["status"] != "done":
+            raise RuntimeError(f"{rj['worker']}: " + (rj.get("error") or rj["status"]))
+        if not rj["outputs"]:
+            raise RuntimeError("The render finished without a file")
+        return rj["outputs"][0]["filename"], rj["outputs"][0]["subfolder"]
     async with ClientSession() as s:
         while True:
             if job.get("cancel"):
@@ -1080,7 +1119,7 @@ async def _finish(job):
             vals = {}
             if not _set(app, vals, "video", _to_input(cur, private)):
                 vals[next(x["key"] for x in app["inputs"] if x["kind"] == "video")] = _to_input(cur, private)
-            pid = await _queue_app(app, vals, private, "Finish: upscale")
+            pid = await _queue_app(app, vals, private, "Finish: upscale", b.get("target"))
             job["pids"].append(pid)
             fn, sub = await _wait_output(pid, job)
             cur = await asyncio.to_thread(_find_out, fn, sub, private)
@@ -1093,7 +1132,7 @@ async def _finish(job):
             vals[vk] = _to_input(cur, private)
             ch = next(x for x in app["inputs"] if x["kind"] == "choice")
             vals[ch["key"]] = ch["options"][0 if fps == "48" else 1]
-            pid = await _queue_app(app, vals, private, "Finish: smooth")
+            pid = await _queue_app(app, vals, private, "Finish: smooth", b.get("target"))
             job["pids"].append(pid)
             fn, sub = await _wait_output(pid, job)
             cur = await asyncio.to_thread(_find_out, fn, sub, private)

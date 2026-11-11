@@ -382,11 +382,7 @@ function renderForm(form, app) {
       <button class="btn primary" id="gen">Generate ${S.count > 1 ? S.count + " " + (app.kind === "video" ? "shots" : "pictures") : ""}</button>
       <button class="btn" id="later" title="Render later: at a set time or when the PC is free">⏱ Later</button>
     </div>`);
-  if (S.workers.length > 1) {   // only once another GPU machine is set up in Settings
-    const sel = h(`<select class="runon" title="Which GPU renders this">${runOptions()}</select>`);
-    sel.onchange = () => { S.target = sel.value; saveState(); };
-    $(".stepper", go).after(sel);
-  }
+  placeRunOn(go);
   $$(".stepper button", go).forEach(b => b.onclick = () => { S.count = Math.max(1, Math.min(8, S.count + +b.dataset.d)); saveState(); renderForm(form, app); });
   $("#gen", go).onclick = () => generate(app);
   $("#later", go).onclick = e => scheduleMenu(app, e.currentTarget);
@@ -1371,7 +1367,7 @@ function finishDialog(b, s, n, after) {
     if (st.sound === "replace" && !audio) return toast("Add the sound first", true);
     if (!st.upscale && st.fps === "keep" && st.sound === "keep") return toast("Pick at least one thing to change", true);
     try {
-      const r = await post("/manny/api/finish", { ...t.output, private: !!b.private, upscale: st.upscale, size: st.size, fps: st.fps, sound: st.sound, audio, name: `${b.name} shot ${n + 1}` });
+      const r = await post("/manny/api/finish", { ...t.output, private: !!b.private, upscale: st.upscale, size: st.size, fps: st.fps, sound: st.sound, audio, name: `${b.name} shot ${n + 1}`, target: runTarget() });
       s.finish = { id: r.id, stage: "Starting", status: "running", from: s.pick }; saveBoard(b, true); close(); toast("Finishing shot " + (n + 1)); after(); pollFinish();
     } catch (e) { toast("Couldn't start: " + e.message.slice(0, 200), true); }
   };
@@ -2118,7 +2114,7 @@ function stepSound(b, pr) {
     if (!(pr.music || "").trim()) return toast("Describe the music first", true);
     const btn = $("#pmk", d); btn.disabled = true;
     try {
-      const r = await post("/manny/api/music", { tags: pr.music, instrumental: true, seconds: Math.min(240, Math.max(15, total)), name: (pr.title || "Film") + " score", private: !!pr.private });
+      const r = await post("/manny/api/music", { tags: pr.music, instrumental: true, seconds: Math.min(240, Math.max(15, total)), name: (pr.title || "Film") + " score", private: !!pr.private, target: runTarget() });
       const res = await pollJob(r.id, st => { const e = $("#pms", d); if (e) e.textContent = st + "…"; });
       pr.music_file = res; saveProject(pr, true); toast("Music ready. It's in Music & voices; pick it as the music in the film editor."); const e = $("#pms", d); if (e) e.textContent = "Made: " + res.filename;
     } catch (e) { toast("Music failed: " + e.message.slice(0, 160), true); } finally { btn.disabled = false; }
@@ -2129,7 +2125,7 @@ function stepSound(b, pr) {
       const who = (pr.cast || []).map(id => S.chars.find(c => c.id === id)).find(c => c && (s.characters || []).some(n => c.name.toLowerCase().startsWith(n.toLowerCase().split(" ")[0])));
       try {
         $("#pvs", d).textContent = "Speaking: " + s.title;
-        const r = await post("/manny/api/voice", { text: s.dialogue, voice: who && who.voice ? who.voice : "", name: (pr.title || "Film") + " - " + s.title, private: !!pr.private });
+        const r = await post("/manny/api/voice", { text: s.dialogue, voice: who && who.voice ? who.voice : "", name: (pr.title || "Film") + " - " + s.title, private: !!pr.private, target: runTarget() });
         s.voice_file = await pollJob(r.id); saveProject(pr);
       } catch (e) { toast("Voice failed for " + s.title + ": " + e.message.slice(0, 120), true); }
     }
@@ -2187,7 +2183,7 @@ async function pageSound(main) {
     if (j.status === "done") { toast(j.kind === "music" ? "Song ready" : "Voice ready"); loadList(); }
   };
   const go = async (kind, body, label) => {
-    try { const r = await post("/manny/api/" + kind, { ...body, private: !!S.incog }); const j = { id: r.id, kind, label, stage: "Queued", status: "running" }; jobs.unshift(j); drawJobs(); poll(j); }
+    try { const r = await post("/manny/api/" + kind, { ...body, private: !!S.incog, target: runTarget() }); const j = { id: r.id, kind, label, stage: "Queued", status: "running" }; jobs.unshift(j); drawJobs(); poll(j); }
     catch (e) { toast("Couldn't start: " + e.message.slice(0, 200), true); }
   };
   $("#m-go", p).onclick = () => {
@@ -2844,7 +2840,7 @@ function drawDrawer() {
     b.append(h(`<div class="qhead">Other GPUs</div>`));
     rem.forEach(j => {
       const live = remoteActive(j);
-      const el = h(`<div class="qitem ${j.status === "running" ? "run" : ""} ${live ? "" : "done"}"><div class="row"><b>${esc(remoteName(j))}</b>${live ? `<button class="icon" title="Stop">✕</button>` : ""}</div>
+      const el = h(`<div class="qitem ${j.status === "running" ? "run" : ""} ${live ? "" : "done"}"><div class="row"><b>${esc(remoteName(j))}</b>${live && j.status !== "cancelling" ? `<button class="icon" title="Stop">✕</button>` : ""}</div>
         <small>${esc(j.worker)} · ${esc(remoteState(j))}</small>${j.status === "running" ? `<div class="bar" style="margin-top:8px"><div style="width:${Math.round(j.progress * 100)}%"></div></div>` : ""}</div>`);
       const x = $("button", el);
       if (x) x.onclick = async () => { x.disabled = true; try { await post(`/manny/api/remote_jobs/${j.prompt_id}/cancel`, {}); toast("Stopped on " + j.worker); } catch (e) { toast(e.message, true); } pollRemote(); };
@@ -2853,11 +2849,11 @@ function drawDrawer() {
   }
 }
 /* ------------------------------------------------------------ other GPU machines (remote workers) */
-const remoteActive = j => ["queued", "running", "downloading"].includes(j.status);
+const remoteActive = j => ["queued", "running", "downloading", "cancelling"].includes(j.status);
 function remoteName(j) { const a = S.apps.find(x => x.id === j.app); return a ? appShort(a) : (j.label || "Job"); }
 function remoteState(j) {
   return { queued: "Waiting", running: j.step ? `${Math.round(j.progress * 100)}% · ${j.step}` : "Rendering", downloading: "Copying to this PC",
-           done: "Done", failed: "Failed: " + (j.error || "").slice(0, 140), cancelled: "Stopped" }[j.status] || j.status;
+           cancelling: "Stopping…", done: "Done", failed: "Failed: " + (j.error || "").slice(0, 140), cancelled: "Stopped" }[j.status] || j.status;
 }
 function runTarget() { return S.workers.length > 1 && (S.target === "auto" || S.workers.some(w => w.label === S.target)) ? S.target : "local"; }
 function runOptions() {
@@ -2865,7 +2861,19 @@ function runOptions() {
   return [["local", "This PC"], ["auto", "Any free GPU"], ...S.workers.slice(1).map(w => [w.label, w.label + (w.online ? "" : " (offline)")])]
     .map(([v, l]) => `<option value="${esc(v)}" ${v === t ? "selected" : ""}>${esc(l)}</option>`).join("");
 }
-async function loadWorkers() { try { S.workers = await api("/manny/api/workers"); } catch { S.workers = []; } }
+async function loadWorkers() {
+  try { S.workers = await api("/manny/api/workers"); } catch { S.workers = []; }
+  document.querySelectorAll(".go").forEach(placeRunOn);   // the form may have been drawn before the list arrived
+}
+/* the "Run on" menu next to Generate, only once another GPU machine is set up in Settings */
+function placeRunOn(go) {
+  const old = $("select.runon", go);
+  if (old) old.remove();
+  if (S.workers.length < 2) return;
+  const sel = h(`<select class="runon" title="Which GPU renders this">${runOptions()}</select>`);
+  sel.onchange = () => { S.target = sel.value; saveState(); };
+  $(".stepper", go).after(sel);
+}
 async function pollRemote() {
   if (S.workers.length < 2 && !S.remote.some(remoteActive)) return;
   try { S.remote = await api("/manny/api/remote_jobs"); } catch { return; }
@@ -2902,8 +2910,8 @@ function connect() {
       case "executing": if (d.node == null) { S.progressNode = ""; pollQueue(); } else { S.progressNode = "Working"; drawQueueCard(); } break;
       case "progress": if (!(S.srvAt && Date.now() - S.srvAt < 10000)) { S.progress = d.max ? d.value / d.max : 0; S.progressNode = `Step ${d.value}/${d.max}`; } drawQueueCard(); { const w8 = S.compare && S.compare.items.find(x => x.prompt_id === S.running && !x.url); if (w8 && location.hash.startsWith("#/create")) { const c = $(`.cmpcell[data-pid="${w8.prompt_id}"] .cmpwait`); if (c) c.textContent = "Rendering " + Math.round(S.progress * 100) + "%"; } } { const tk = location.hash.startsWith("#/storyboard") && $(`.take[data-pid="${S.running}"] span`); if (tk) tk.textContent = Math.round(S.progress * 100) + "%"; } if (!$("#drawer").classList.contains("hidden")) drawDrawer(); break;
       case "executed": onOutput(d); break;
-      case "execution_success": S.progress = 1; drawQueueCard(); S.gallery = []; break;
-      case "execution_error": toast("Render failed: " + (d.exception_message || "error").slice(0, 300), true); pollQueue(); break;
+      case "execution_success": if (d.worker) { pollRemote(); S.gallery = []; break; } S.progress = 1; drawQueueCard(); S.gallery = []; break;
+      case "execution_error": toast((d.worker ? `Render failed on ${d.worker}: ` : "Render failed: ") + (d.exception_message || "error").slice(0, 300), true); if (d.worker) pollRemote(); else pollQueue(); break;
       case "execution_interrupted": toast("Stopped"); pollQueue(); break;
     }
   };

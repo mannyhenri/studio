@@ -6,7 +6,8 @@ mac-workers.json, so its "workers" list can be pasted in as is). "local" is this
 What a worker can run is read LIVE from its /object_info, never from a manifest. gate() refuses a prompt unless
 every node exists on the worker and every string value sent to a COMBO input is one of that input's options
 (models, samplers, schedulers; the folder is checked too, a VAE file in a UNet slot fails; an empty folder
-refuses everything). Like ComfyUI's own validation, inputs a node validates itself are skipped: the worker's
+refuses everything), and every required input is there (dynamic "<name>.<child>" keys count; an autogrow input
+needs its template's min children). Like ComfyUI's own validation, inputs a node validates itself are skipped: the worker's
 /mac/info lists them as "self_validated" {class: [input, ...] or ["*"]}; a worker without /mac/info (and this PC)
 uses SELF_VALIDATED. File inputs (image/video/audio upload COMBOs) are always skipped: Studio uploads those.
 
@@ -21,6 +22,8 @@ import time
 
 from aiohttp import ClientSession, ClientTimeout, FormData
 
+from .appwf import missing_required
+
 LOCAL = "local"
 AUTO = "auto"
 CAPS_TTL = 120
@@ -32,6 +35,7 @@ _caps = {}      # label -> {"at": t, "data": object_info}
 JOBS = {}       # remote prompt_id -> job dict (see submit)
 JOBS_UPLOADING = {}     # label -> jobs still uploading inputs (not in the worker's queue yet)
 KEEP_DONE = 3600        # finished jobs stay listed this long
+LOST_AFTER = 600        # a worker unreachable this long while it has our job: the job is failed
 
 
 # ---------------------------------------------------------------- registry
@@ -150,6 +154,8 @@ def gate(api, object_info, self_validated=None):
         if oi is None:
             why.append({"node": nid, "class_type": ct, "reason": f"node {ct} is not installed"})
             continue
+        for name in missing_required(node.get("inputs") or {}, oi):
+            why.append({"node": nid, "class_type": ct, "input": name, "reason": f"{ct}.{name} is required but missing"})
         for name, val in (node.get("inputs") or {}).items():
             if not isinstance(val, str):
                 continue        # links ([id, slot]) and numbers
@@ -234,6 +240,13 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
     why = gate(api, oi, sv)
     if why:
         raise GateRefused(w["label"], why)
+    # ComfyUI caches output nodes too: an identical job would "finish" pointing at files /mac/forget already
+    # deleted. A per-job key on each output node changes only its cache key (ComfyUI never passes an unknown
+    # literal input to the node), so the save runs again while everything upstream may still come from cache.
+    tag = os.urandom(6).hex()
+    for node in api.values():
+        if (oi.get(node.get("class_type")) or {}).get("output_node"):
+            node.setdefault("inputs", {})["studio_job"] = tag
     async with ClientSession() as s:
         JOBS_UPLOADING[w["label"]] = JOBS_UPLOADING.get(w["label"], 0) + 1
         try:
@@ -241,12 +254,22 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
         finally:
             JOBS_UPLOADING[w["label"]] -= 1
         body = dict(payload_extra, prompt=api)
-        async with s.post(base(w) + "/prompt", json=body, timeout=ClientTimeout(total=120)) as r:
-            data = await r.json(content_type=None)
-            if r.status != 200:
-                raise RuntimeError(f"{w['label']} refused the job: {json.dumps(data)[:600]}")
+        opened = await _open_ws(w, payload_extra["client_id"]) if payload_extra.get("client_id") else None
+        try:
+            async with s.post(base(w) + "/prompt", json=body, timeout=ClientTimeout(total=120)) as r:
+                data = await r.json(content_type=None)
+                if r.status != 200:
+                    raise RuntimeError(f"{w['label']} refused the job: {json.dumps(data)[:600]}")
+        except BaseException:
+            if opened:
+                await opened[1].close()
+                await opened[0].close()
+            raise
     pid = data["prompt_id"]
     if data.get("node_errors"):
+        if opened:
+            await opened[1].close()
+            await opened[0].close()
         # ComfyUI queues a job when ANY output validates and lists the failed nodes in the same 200 reply: that
         # job would "succeed" without the picture. Take it back out and refuse, like the gate would have.
         await cancel(w, pid, inputs=sent)
@@ -256,7 +279,7 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
            "queued_at": time.time(), "app": ex.get("manny_app"), "label": ex.get("manny_label"), "client_id": payload_extra.get("client_id"),
            "progress": 0.0, "step": None}
     JOBS[pid] = job
-    job["task"] = asyncio.ensure_future(_follow(w, job, dirs, incoming, on_done))
+    job["task"] = asyncio.ensure_future(_follow(w, job, dirs, incoming, on_done, opened=opened))
     return {"prompt_id": pid, "number": data.get("number"), "worker": w["label"]}
 
 
@@ -294,41 +317,64 @@ def _local_target(dirs, f, private, incoming):
     return dst
 
 
-async def _progress(w, job):
+def _ws_url(w, client_id):
+    return base(w).replace("http", "ws", 1) + f"/ws?clientId={client_id}"
+
+
+async def _open_ws(w, client_id):
+    """(session, websocket) to the worker, opened BEFORE the job is queued so no early step is missed; None if it fails."""
+    s = ClientSession()
+    try:
+        return s, await s.ws_connect(_ws_url(w, client_id), heartbeat=30, timeout=10)
+    except Exception:
+        await s.close()
+        return None
+
+
+async def _progress(w, job, opened=None):
     """Step progress from the worker's /ws. ComfyUI sends it only to the client_id that queued, which is ours."""
-    pid, url = job["prompt_id"], base(w).replace("http", "ws", 1) + f"/ws?clientId={job['client_id']}"
+    pid = job["prompt_id"]
     while job["status"] in ("queued", "running"):
         try:
-            async with ClientSession() as s:
-                async with s.ws_connect(url, heartbeat=30) as ws:
-                    async for m in ws:
-                        if m.type != 1:     # TEXT; previews are binary
-                            continue
-                        d = json.loads(m.data)
-                        x = d.get("data") or {}
-                        if x.get("prompt_id") != pid:
-                            continue
-                        if d.get("type") == "execution_start":
-                            job["status"] = "running"
-                        elif d.get("type") == "progress" and x.get("max"):
-                            job["status"] = "running"
-                            job["progress"], job["step"] = x["value"] / x["max"], f"Step {x['value']}/{x['max']}"
+            if not opened:
+                opened = await _open_ws(w, job["client_id"])
+                if not opened:
+                    raise ConnectionError("no /ws")
+            s, ws = opened
+            async with s, ws:
+                async for m in ws:
+                    if m.type != 1:     # TEXT; previews are binary
+                        continue
+                    d = json.loads(m.data)
+                    x = d.get("data") or {}
+                    if x.get("prompt_id") != pid:
+                        continue
+                    if d.get("type") == "execution_start":
+                        job["status"] = "running"
+                    elif d.get("type") == "progress" and x.get("max"):
+                        job["status"] = "running"
+                        job["progress"], job["step"] = x["value"] / x["max"], f"Step {x['value']}/{x['max']}"
         except asyncio.CancelledError:
             raise
         except Exception:
             await asyncio.sleep(3)
+        opened = None
 
 
-async def _follow(w, job, dirs, incoming, on_done, poll=2):
+async def _follow(w, job, dirs, incoming, on_done, poll=2, opened=None):
     pid = job["prompt_id"]
-    prog = asyncio.ensure_future(_progress(w, job)) if job.get("client_id") else None
+    prog = asyncio.ensure_future(_progress(w, job, opened)) if job.get("client_id") else None
     try:
         async with ClientSession() as s:
+            seen = time.time()
             while True:
                 try:
                     h = (await _get(s, w, f"/history/{pid}")).get(pid)
-                except Exception:
-                    h = None    # worker briefly unreachable: keep waiting
+                    seen = time.time()
+                except Exception as e:
+                    h = None    # worker briefly unreachable: keep waiting, but not forever
+                    if time.time() - seen > LOST_AFTER:
+                        raise RuntimeError(f"Lost contact with {w['label']} for {LOST_AFTER // 60} min ({e}); the job may still be there")
                 if h:
                     st = h.get("status") or {}
                     if st.get("status_str") == "error":
@@ -354,7 +400,8 @@ async def _follow(w, job, dirs, incoming, on_done, poll=2):
             job["status"], job["progress"] = "done", 1.0
             job["forgot"] = await forget(s, w, pid, job["inputs"])
     except asyncio.CancelledError:
-        job["status"] = "cancelled"
+        if job["status"] != "cancelling":
+            job["status"] = "cancelled"
         raise
     except Exception as e:
         job["status"], job["error"] = "failed", str(e)
@@ -391,6 +438,8 @@ async def cancel(w, pid, settle=20, inputs=None):
     """Drop a remote job wherever it is (out of the worker's queue, or interrupted while running), then have the
     worker forget it and the inputs we uploaded. Returns the forget reply."""
     job = JOBS.get(pid)
+    if job:
+        job["status"] = "cancelling"    # "cancelled" once the worker has dropped it and forgotten its files
     if job and job.get("task") and not job["task"].done():
         job["task"].cancel()
     async with ClientSession() as s:

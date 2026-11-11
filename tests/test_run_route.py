@@ -161,6 +161,38 @@ async def main():
         lst = json.loads((await H[("GET", "/manny/api/remote_jobs")](Req())).text)
         check({a, b} <= {j["prompt_id"] for j in lst} and all("task" not in j for j in lst), f"/manny/api/remote_jobs lists them ({len(lst)})")
 
+    # the other render paths share _queue_api: Finish (_queue_app + _wait_output) and the Music/Voice routes
+    if eligible.keys() & RENDER:
+        app = sorted(eligible.keys() & RENDER)[0]
+        desc = studio._describe_app(app)
+        for w in WORKERS:
+            pid = await studio._queue_app(desc, {}, False, "Finish test", w["label"])
+            fn, sub = await asyncio.wait_for(studio._wait_output(pid, {}), 1800)
+            check(remote.JOBS[pid]["worker"] == w["label"] and os.path.isfile(os.path.join(tmp, "output", sub, fn)),
+                  f"Finish path (_queue_app -> _wait_output) on {w['label']}: {sub}/{fn} is on this PC")
+        job = {"cancel": True}
+        pid = await studio._queue_app(desc, {}, False, "Finish stop", WORKERS[-1]["label"])
+        try:
+            await studio._wait_output(pid, job)
+            check(False, "Stop during a remote Finish step must raise")
+        except RuntimeError as e:
+            fg = remote.JOBS[pid].get("forgot") or {}
+            check(str(e) == "Stopped" and remote.JOBS[pid]["status"] == "cancelled" and "warning" not in fg,
+                  f"Stop during a remote Finish step: {e}, job {remote.JOBS[pid]['status']}, forget {json.dumps(fg)[:160]}")
+    for kind, body in (("music", {"tags": "calm piano", "instrumental": True, "seconds": 15}), ("voice", {"text": "Hello there."})):
+        for w in WORKERS:
+            r = await H[("POST", f"/manny/api/{kind}")](Req(dict(body, target=w["label"])))
+            job = studio._jobs[json.loads(r.text)["id"]]
+            for _ in range(120):
+                if job["status"] != "running":
+                    break
+                await asyncio.sleep(0.5)
+            oi, sv = await remote.caps(w)
+            sapi = (studio._sound.music_prompt if kind == "music" else studio._sound.voice_prompt)(body)[0] if hasattr(studio._sound, "music_prompt") else None
+            expect_ok = sapi is not None and not remote.gate(sapi, oi, sv)
+            check((job["status"] == "failed" and "can't run" in (job.get("error") or "")) if not expect_ok else job["status"] != "failed",
+                  f"{kind} route with target {w['label']}: {job['status']} {(job.get('error') or '')[:160]}")
+
     # auto, with this PC busy: every app goes to an eligible worker or is refused naming every machine
     studio._local_busy = lambda: 99
     for app in apps:
@@ -175,12 +207,31 @@ async def main():
             check(r.status == 409 and set(d.get("refused_by") or {}) == {"local"} | {w["label"] for w in WORKERS},
                   f"auto {app}: 409, refused by {sorted(d.get('refused_by') or {})}")
     studio._local_busy = lambda: 0
+    import aiohttp
+    staged = []     # "this PC" is worker 1 here, and its input folder doesn't have the apps' default files: upload them
+    async with aiohttp.ClientSession() as s:
+        for app in sorted(eligible):
+            _wf, api = await studio._build_prompt(app, {})
+            oi1, _sv = await remote.caps(WORKERS[0])
+            api2 = json.loads(json.dumps(api))
+            for node in api2.values():
+                for k, v in list(node.get("inputs", {}).items()):
+                    if isinstance(v, str) and remote.is_file_input(remote._spec(oi1.get(node["class_type"]), k)):
+                        rel = remote._split_annot(v)[0]
+                        fd = aiohttp.FormData()
+                        fd.add_field("image", open(os.path.join(tmp, "input", rel), "rb"), filename=os.path.basename(rel))
+                        fd.add_field("subfolder", os.path.dirname(rel)); fd.add_field("type", "input"); fd.add_field("overwrite", "true")
+                        async with s.post(remote.base(WORKERS[0]) + "/upload/image", data=fd) as r:
+                            staged.append(rel)
     for app in sorted(eligible):
         r = await H[("POST", "/manny/api/run")](Req({"app": app, "target": "auto", "client_id": "browser-1"}))
         q = json.loads(r.text)["queued"][0]
         check(q["worker"] == "local", f"auto {app} with this PC idle and able: stays local ({q['worker']})")
         await post_local_cancel(q["prompt_id"])
+    async with aiohttp.ClientSession() as s:
+        await remote.forget(s, WORKERS[0], "studio-route-staged", sorted(set(staged)))
     await pick_units()
+    mcp_units()
     r = await H[("POST", "/manny/api/workers/check")](Req({"app": apps[0]}))
     d = json.loads(r.text)
     check(set(d) == {"local"} | {w["label"] for w in WORKERS}, f"workers/check answers per machine: { {k: v.get('ok') for k, v in d.items()} }")
@@ -197,6 +248,21 @@ async def post_local_cancel(pid):
             pass
         async with s.post(base + "/interrupt", json={"prompt_id": pid}):
             pass
+
+
+def mcp_units():
+    """studio_wait (MCP) follows jobs on other machines too: their state and files come from /manny/api/remote_jobs."""
+    sys.path.insert(0, PKG)
+    import studio_mcp
+    jobs = [{"prompt_id": "r1", "worker": "w", "status": "done", "outputs": [{"filename": "a.png", "subfolder": "Images"}]},
+            {"prompt_id": "r2", "worker": "w", "status": "done", "outputs": [{"filename": "b.png", "subfolder": ".private_incoming/Images"}]},
+            {"prompt_id": "r3", "worker": "w", "status": "running", "outputs": []},
+            {"prompt_id": "r4", "worker": "w", "status": "failed", "error": "OOM", "outputs": []}]
+    studio_mcp.http = lambda m, path, body=None, timeout=60: jobs if path == "/manny/api/remote_jobs" else {}
+    got = {p: studio_mcp.outputs_of(p) for p in ("r1", "r2", "r3", "r4", "nope")}
+    check(got == {"r1": ("done", [{"filename": "a.png", "subfolder": "Images", "private": False}]),
+                  "r2": ("done", [{"filename": "b.png", "subfolder": "Images", "private": True}]),
+                  "r3": ("running", []), "r4": ("error", "w: OOM"), "nope": (None, None)}, f"MCP outputs_of for remote jobs: {got}")
 
 
 async def pick_units():

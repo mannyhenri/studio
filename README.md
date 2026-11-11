@@ -22,3 +22,43 @@ Private data (password hash, characters, storyboards, favorites, LoRA notes, Civ
 ## Features
 
 Create (Image, Video and tools: Edit, Inpaint, Upscale, Upscale video, Remove background, Smooth motion) · Gallery with fast cached previews · Compare models · Characters · Storyboard with takes, pick, final-quality re-render, compare/wipe, continue from last frame, finish (1080p, 48/60 fps, sound) · Film editor (trims, crossfades, titles, captions, music bed) · Reel cut to the beat · AI review of a take and AI prompt help (local Qwen3-VL) · LoRA browser for Civitai (your own key) · Incognito private space · Mobile layout.
+
+## Render on other GPUs (the Mac Pro)
+
+Studio can send a render to another computer running ComfyUI. Today that's the Mac Pro's two Radeon Pro Vega II cards, one worker per card (set up in the `comfy-mac` repo). The file comes back to this PC's output folder, so Gallery, Storyboard and Finish work as usual.
+
+**Set up**
+1. On the Mac: start both workers and the LAN gate (`lan_gate.py --allow <this-pc>.local --ports 8188 8189`). ComfyUI has no password, so the gate only lets this PC in.
+2. In Studio: **Settings → GPU machines**, add `mac-vega-a` · `Mannys-Mac-Pro.local` · `8188` and `mac-vega-b` · `Mannys-Mac-Pro.local` · `8189`. They're kept in `manny_studio/workers.json` (comfy-mac's `mac-workers.json` also works pasted as is).
+3. Under **Generate** a "Run on" menu appears: **This PC**, **Any free GPU**, or one machine. The same choice is used by Finish, Music and Voices. Over MCP, `studio_generate` takes `run_on`.
+
+**How a job is sent**
+- Studio first checks the machine *live*: every node must be installed, every model, sampler or scheduler name must be one that machine offers for that exact input, and every required input must be present. Missing anything → the job isn't sent, and you see what's missing (node, input, value). It never renders something different by accident.
+- Model switches a job doesn't use are dropped before the check. Without that, ComfyUI would ask for every model an app *could* pick. The trimmed job is exactly what ComfyUI would run anyway.
+- **Any free GPU** picks the least busy machine that has everything, and this PC wins ties. Note: an LTX video takes about 55 min on one Vega card when both are busy.
+- The input files (pictures, videos, sounds) are uploaded with the job. When the result is copied back, the Mac deletes the job's outputs, uploads and history (`/mac/forget`). Incognito jobs leave nothing behind on the Mac.
+- Cancel (✕ in the queue drawer) takes the job out of the Mac's queue or stops it, then cleans up the same way. If a Mac stops answering for 10 min while it has your job, the job is marked failed.
+
+**What stays on this PC:** AI review and AI prompt help (their result is text, not a file) and Topaz in Finish.
+
+**Models on the Mac.** A choice runs on the Mac only once its model files are there. Most come from Hugging Face (the comfy-mac repo fetches them). These exist only on this PC, so copy them yourself into `~/code/comfy-mac/ComfyUI/models/<folder>/` on the Mac. Both workers see them at once, no restart needed:
+
+| File | Folder | Unlocks |
+|---|---|---|
+| `anime_desire_illustrious_v3_fp16` | `checkpoints` | Image · Anime Desire |
+| `flux3-image-klein-int8-convrot` | `diffusion_models` | Image and Edit · FLUX 3 Klein (needs `qwen3vl_4b_int8_convrot` from HF too) |
+| `anima-base-v1.0` | `diffusion_models` | Image · Anima (with `qwen_3_06b_base`) |
+| `qwen_3_06b_base` | `text_encoders` | Image · Anima |
+| `p-h3-image_vae_int8_convrot` | `vae` | Image · P-H3 |
+| `moss_image_nsfw_uncensored_lora`, `qwen_image_2.1_nsfw_lora` | `loras` | the Uncensored toggles |
+
+Check which choices a machine can run with `POST /manny/api/workers/check {"app": "<app id>", "values": {...}}`.
+
+**Tests** (need the workers running; comfy-mac's venv has aiohttp and simpleeval):
+```sh
+PY=~/code/comfy-mac/.venv/bin/python
+$PY tests/test_prune.py       # every app x every choice: trimmed job == what ComfyUI runs
+$PY tests/test_remote.py      # check == each worker's own validation, real renders, cleanup
+$PY tests/test_run_route.py   # Studio's routes: Run on, Any free GPU, cancel, Finish/Music/Voice paths
+```
+`RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).

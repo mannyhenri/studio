@@ -5,7 +5,9 @@ exactly what ComfyUI would execute.
 
 Reference, independent of appwf: every ComfyMathExpression is evaluated with simpleeval (what ComfyUI's node uses), every
 switch takes on_true/on_false from that, and the reference graph is what the outputs reach through the TAKEN branches.
-Pruned prompt == reference: same node ids, same inputs once switch links are resolved, no ComfySwitchNode left.
+Pruned prompt == reference: same node ids, same inputs once switch links are resolved. A switch whose taken branch is
+unconnected stays when it feeds a REQUIRED input (the node gets None at runtime; there is no other way to say that).
+No pruned node may lack a required input (ComfyUI's required_input_missing), and no foldable switch may be left.
 """
 import glob, importlib, json, math, os, sys, types, urllib.request
 
@@ -56,9 +58,46 @@ def ref_value(api, v):
 NONE = "<switch gives None>"
 
 
+def required_names(ct):
+    return list(((OI.get(ct) or {}).get("input") or {}).get("required") or {})
+
+
+def lacks_required(ct, ins):
+    """Required inputs missing from ins (dynamic keys "<name>.<child>" count; autogrow needs template min)."""
+    out = []
+    for name in required_names(ct):
+        spec = OI[ct]["input"]["required"][name]
+        kids = [k for k in ins if k.startswith(name + ".")]
+        if spec[0] == "COMFY_AUTOGROW_V3":
+            if len(kids) < spec[1].get("template", {}).get("min", 0):
+                out.append(name)
+        elif name not in ins and not kids:
+            out.append(name)
+    return out
+
+
+def kept_switches(api):
+    """Constant switches whose taken branch is unconnected and feeds a required input: ComfyUI must see them as they are."""
+    kept = set()
+    for sid, n in api.items():
+        if n["class_type"] != "ComfySwitchNode":
+            continue
+        if ("on_true" if ref_value(api, n["inputs"]["switch"]) else "on_false") in n["inputs"]:
+            continue
+        for c in api.values():
+            fed = [k for k, v in c["inputs"].items() if link(v) and v[0] == sid]
+            rest = {k: v for k, v in c["inputs"].items() if k not in fed}
+            if fed and set(lacks_required(c["class_type"], rest)) - set(lacks_required(c["class_type"], c["inputs"])):
+                kept.add(sid)
+    return kept
+
+
+KEPT = set()
+
+
 def resolve(api, v):
-    """Follow switch outputs to the taken branch's source (NONE when that branch isn't connected)."""
-    while link(v) and api[v[0]]["class_type"] == "ComfySwitchNode":
+    """Follow switch outputs to the taken branch's source (NONE when that branch isn't connected), stopping at kept switches."""
+    while link(v) and api[v[0]]["class_type"] == "ComfySwitchNode" and v[0] not in KEPT:
         ins = api[v[0]]["inputs"]
         v = ins.get("on_true" if ref_value(api, ins["switch"]) else "on_false", NONE)
     return v
@@ -98,6 +137,7 @@ def main():
     apps = sorted(glob.glob(os.path.join(ROOT, "workflows", "*.app.json")))
     check(len(apps) == 9, f"{len(apps)} apps")
     cases = switches_before = 0
+    kept_total = [0]
     for path in apps:
         wf0 = json.load(open(path, encoding="utf-8"))
         combos = [None] + list(drivers(wf0))
@@ -109,15 +149,21 @@ def main():
             raw = appwf.fix_custom_combos(convert_ui_to_api(wf, OI), wf)
             switches_before += sum(n["class_type"] == "ComfySwitchNode" for n in raw.values())
             _wf, pruned = appwf.build_app_prompt(path, values, OI)
+            KEPT.clear()
+            KEPT.update(kept_switches(raw))
             ref = reference(raw)
             cases += 1
-            ok = check(not any(n["class_type"] == "ComfySwitchNode" for n in pruned.values()), f"{name} {d}: switch left after pruning")
+            kept_total[0] += len(KEPT)
+            ok = check({k for k, n in pruned.items() if n["class_type"] == "ComfySwitchNode"} == KEPT & set(ref),
+                       f"{name} {d}: switches left {sorted(k for k, n in pruned.items() if n['class_type'] == 'ComfySwitchNode')} != kept {sorted(KEPT & set(ref))}")
+            lack = {k: lacks_required(n["class_type"], n["inputs"]) for k, n in pruned.items() if n["class_type"] in OI}
+            ok &= check(not any(lack.values()), f"{name} {d}: required inputs missing after pruning: { {k: v for k, v in lack.items() if v} }")
             ok &= check(set(pruned) == set(ref), f"{name} {d}: nodes differ: extra {sorted(set(pruned) - set(ref))[:5]} missing {sorted(set(ref) - set(pruned))[:5]}")
             ok &= check(all(pruned[k]["inputs"] == ref[k] for k in set(pruned) & set(ref)),
                         f"{name} {d}: inputs differ on {[k for k in set(pruned) & set(ref) if pruned[k]['inputs'] != ref[k]][:5]}")
             bad += not ok
         print(f"{'PASS' if not bad else 'FAIL'} {name}: {len(combos)} cases (default + every dropdown option / toggle), pruned == ComfyUI's taken branches")
-    print(f"\n{cases} cases, {switches_before} switch nodes before pruning; " + (f"{len(fails)} failed" if fails else "all passed"))
+    print(f"\n{cases} cases, {switches_before} switch nodes before pruning, {kept_total[0]} kept (None into a required input); " + (f"{len(fails)} failed" if fails else "all passed"))
     sys.exit(1 if fails else 0)
 
 

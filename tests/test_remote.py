@@ -37,6 +37,25 @@ def check(cond, msg):
         fails.append(msg)
 
 
+def unit_required():
+    """ComfyUI's required_input_missing, mirrored: dynamic "<name>.<child>" keys count, autogrow needs template.min."""
+    oi = {"Rs": {"input": {"required": {"input": ["COMFY_MATCHTYPE_V3", {}], "resize_type": ["COMFY_DYNAMICCOMBO_V3", {}]}}},
+          "Bi": {"input": {"required": {"images": ["COMFY_AUTOGROW_V3", {"template": {"min": 1}}]}}},
+          "Te": {"input": {"required": {"images": ["COMFY_AUTOGROW_V3", {"template": {"min": 0}}]}}},
+          "Mx": {"input": {"required": {"values": ["COMFY_AUTOGROW_V3", {"template": {}}], "expression": ["STRING", {}]}}}}
+    ok = {"1": {"class_type": "Rs", "inputs": {"input": ["9", 0], "resize_type": "scale", "resize_type.longer_size": 1536}},
+          "2": {"class_type": "Bi", "inputs": {"images.image0": ["9", 0]}},
+          "3": {"class_type": "Te", "inputs": {}},
+          "4": {"class_type": "Mx", "inputs": {"expression": "a", "values.a": 1}}}
+    check(remote.gate(ok, oi) == [], "gate: required inputs present (dynamic keys count, autogrow min 0 may be empty)")
+    bad = {"1": {"class_type": "Rs", "inputs": {"resize_type": "scale", "resize_type.longer_size": 1536}},
+           "2": {"class_type": "Bi", "inputs": {}},
+           "4": {"class_type": "Mx", "inputs": {"values.a": 1}}}
+    why = remote.gate(bad, oi)
+    check(sorted((w["node"], w.get("input")) for w in why) == [("1", "input"), ("2", "images"), ("4", "expression")],
+          f"gate: required_input_missing + autogrow below min refused: {[w['reason'] for w in why]}")
+
+
 def unit():
     oi = {"Ck": {"input": {"required": {"ckpt": [["a.safetensors", "b.safetensors"], {}]}}},
           "Un": {"input": {"required": {"unet": ["COMBO", {"options": ["u.safetensors"]}], "w": ["INT", {}]}}},
@@ -54,7 +73,7 @@ def unit():
     check(remote.gate(ok, oi) == [], "gate: legacy + 0.44 COMBO values, file inputs, links, self-validated CustomCombo pass")
     check(remote.gate(ok, oi, {}) != [], "gate: without the self_validated entry the CustomCombo choice is refused (worker's list is used)")
     bad = {"1": {"class_type": "Ck", "inputs": {"ckpt": "u.safetensors"}},
-           "2": {"class_type": "Un", "inputs": {"unet": "a.safetensors"}},
+           "2": {"class_type": "Un", "inputs": {"unet": "a.safetensors", "w": 3}},
            "3": {"class_type": "Gone", "inputs": {}},
            "4": {"class_type": "Opt", "inputs": {"s": "dpm"}},
            "5": {"class_type": "Cv", "inputs": {"clip_name": "clip_vision_h.safetensors"}}}
@@ -155,6 +174,7 @@ async def round_trip(dirs):
         check(ckpt in remote.combo(remote._spec(oi["CheckpointLoaderSimple"], "ckpt_name"))[0], f"{w['label']}: has {ckpt}")
         for private in (False, True):
             api = img2img(ckpt)
+            api["6"]["inputs"]["seed"] = int.from_bytes(os.urandom(4), "big")   # a fresh seed: ComfyUI's cache would skip sampling
             if private:   # what Studio's _privatize does: save under the incoming folder
                 api["8"]["inputs"]["filename_prefix"] = ".private_incoming/studio_test/rt"
             r = await remote.submit(w, api, {"client_id": f"studio-test-{w['label']}-{private}", "extra_data": {"manny_app": "test"}}, dirs, private)
@@ -211,6 +231,34 @@ async def node_errors_refusal(dirs):
           f"the half-valid job {cancelled} was taken back out of the worker's queue")
 
 
+async def lost_contact():
+    """A worker that stops answering while it has our job: the job fails after LOST_AFTER instead of waiting forever."""
+    keep = remote.LOST_AFTER
+    remote.LOST_AFTER = 2
+    w = {"label": "gone", "host": "127.0.0.1", "port": 9}
+    job = {"prompt_id": "x", "worker": "gone", "status": "queued", "private": False, "inputs": [], "outputs": [], "error": None,
+           "client_id": None, "progress": 0.0, "step": None}
+    try:
+        await asyncio.wait_for(remote._follow(w, job, {}, ".private_incoming", None, poll=0.2), 30)
+    finally:
+        remote.LOST_AFTER = keep
+    check(job["status"] == "failed" and "Lost contact" in (job["error"] or ""), f"lost worker -> {job['status']}: {job['error']}")
+
+
+async def repeat_job(dirs):
+    """The same job twice: ComfyUI's cache must not hand back the first job's files, which forget has deleted."""
+    for w in WORKERS:
+        got = []
+        for k in range(2):
+            api = img2img("v1-5-pruned-emaonly-fp16.safetensors")
+            api["6"]["inputs"]["seed"] = 1234
+            r = await remote.submit(w, api, {"client_id": f"studio-test-repeat-{w['label']}"}, dirs)
+            job = remote.JOBS[r["prompt_id"]]
+            await asyncio.wait_for(job["task"], 600)
+            got.append((job["status"], [os.path.isfile(o["path"]) for o in job["outputs"]], job["error"]))
+        check(all(st == "done" and files == [True] for st, files, _e in got), f"{w['label']}: identical job twice, both pulled back: {got}")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="studio-remote-")
     dirs = {k: os.path.join(os.path.realpath(tmp), k) for k in ("input", "output", "temp")}
@@ -218,12 +266,15 @@ def main():
         os.makedirs(d)
     make_inputs(dirs)
     unit()
+    unit_required()
 
     async def live():
         eligible = await app_set(dirs)
+        await lost_contact()
         await refused_submit()
         await node_errors_refusal(dirs)
         await round_trip(dirs)
+        await repeat_job(dirs)
         await render_eligible(eligible, dirs)
     asyncio.run(live())
     print(f"\n{len(fails)} failed" if fails else "\nall passed")
