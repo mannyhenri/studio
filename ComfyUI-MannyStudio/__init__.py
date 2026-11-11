@@ -25,7 +25,7 @@ from . import remote as _remote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-VERSION = "1.23.0"
+VERSION = "1.24.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -430,6 +430,68 @@ async def manny_remote_jobs(request):
 _PC_ONLY_CLIENTS = ("studio-videotools", "studio-sound", "studio-ai")
 
 
+# Jobs moved to a worker keep their original here until they finish there; a job that fails or is refused on the
+# worker goes back into this PC's queue (at the front) instead of being lost. Incognito originals stay in the private space.
+def _moved_file(private):
+    return os.path.join(_priv_root(), ".moved_jobs.json") if private else os.path.join(_data_dir(), "moved_jobs.json")
+
+
+def _moved_load(private):
+    try:
+        with open(_moved_file(private), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _moved_save(private, d):
+    tmp = _moved_file(private) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f)
+    os.replace(tmp, _moved_file(private))
+
+
+def _moved_put(new_pid, prompt, extra, private):
+    d = _moved_load(private)
+    d[new_pid] = {"prompt": prompt, "extra": extra, "at": time.time()}
+    _moved_save(private, d)
+
+
+async def _put_back(job):
+    """A moved job ended on its worker: drop the kept original, or, if it failed there, queue it here again."""
+    pid = job.get("prompt_id")
+    for private in (False, True):
+        d = _moved_load(private)
+        item = d.pop(pid, None)
+        if item is None:
+            continue
+        _moved_save(private, d)
+        if job.get("status") != "failed":
+            return
+        extra = dict(item["extra"] or {})
+        cid = extra.pop("client_id", None) or "studio-moved-back"
+        body = {"prompt": item["prompt"], "client_id": cid, "extra_data": extra, "front": True}
+        try:
+            async with ClientSession() as s:
+                async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=body) as r:
+                    data = await r.json()
+            if data.get("prompt_id"):
+                if private:
+                    _pending_private.add(data["prompt_id"])
+                job["error"] = (job.get("error") or "failed") + " · put back in this PC's queue"
+                job["moved_back"] = data["prompt_id"]
+                print(f"[Studio] {job.get('worker')} couldn't do a moved job; it's back in this PC's queue")
+        except Exception as e:
+            print("[Studio] could not put a moved job back:", e)
+        return
+
+
+def _moved_done(job):
+    _remote_done(job)
+    if job.get("status") in ("done", "failed", "cancelled"):
+        asyncio.ensure_future(_put_back(job))
+
+
 @routes.post("/manny/api/queue/move")
 async def manny_queue_move(request):
     """Move waiting jobs from this PC's queue to a GPU worker. Body: {"prompt_ids": [...], "target": label}.
@@ -463,7 +525,7 @@ async def manny_queue_move(request):
         payload_extra = {"client_id": cid, "extra_data": extra}
         try:
             r = await _remote.submit(worker, json.loads(json.dumps(prompt)), payload_extra, _dirs(), private, INCOMING,
-                                     on_done=_remote_done, fetch=True)
+                                     on_done=_moved_done, fetch=True)
         except _remote.GateRefused as e:
             kept.append({"prompt_id": pid, "reason": "; ".join(x.get("reason", "") for x in e.why) or str(e)})
             continue
@@ -480,6 +542,7 @@ async def manny_queue_move(request):
             kept.append({"prompt_id": pid, "reason": "it started rendering here before it could move"})
             continue
         _pending_private.discard(pid)
+        _moved_put(r["prompt_id"], prompt, dict(t[3] or {}), private)
         moved.append({"from": pid, "to": r["prompt_id"], "worker": worker["label"], "fetching": r.get("fetching")})
     return web.json_response({"moved": moved, "kept": kept})
 
@@ -2734,7 +2797,7 @@ _remote.LOCAL_INFO = _get_object_info     # refusals name the pack a missing nod
 
 
 def _resume_remote():
-    n = _remote.resume(_dirs(), INCOMING, _remote_done)
+    n = _remote.resume(_dirs(), INCOMING, _moved_done)   # a moved job that fails comes back to this PC
     if n:
         print(f"[Studio] following {n} render(s) still on other GPUs")
 
