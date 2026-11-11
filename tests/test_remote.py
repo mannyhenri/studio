@@ -10,7 +10,7 @@ Needs live ComfyUI workers and aiohttp (comfy-mac's venv has it):
 3. A small img2img job through remote.submit on every worker, public and private: the input is uploaded, the
    output lands in a local output folder (private under the incoming folder), and the worker forgets the job.
 """
-import asyncio, glob, importlib, json, os, sys, tempfile, types
+import asyncio, glob, importlib, json, os, re, sys, tempfile, types
 
 import aiohttp
 
@@ -102,7 +102,7 @@ def probe_files(api, oi):
 
 async def worker_accepts(s, w, api, oi, dirs):
     api = json.loads(json.dumps(api))
-    sent = await remote._upload_inputs(s, w, api, oi, dirs)
+    sent = await remote._upload_inputs(s, w, api, oi, dirs, "probe" + os.urandom(4).hex())
     async with s.post(remote.base(w) + "/prompt", json={"prompt": api, "client_id": "studio-gate-test"}) as r:
         d = await r.json(content_type=None)
     if r.status == 200:     # queued: take it straight back out (it may already have started), then forget it
@@ -187,7 +187,8 @@ async def round_trip(dirs):
             inside = os.path.join(dirs["output"], ".private_incoming") if private else dirs["output"]
             check(len(outs) == 1 and os.path.getsize(outs[0]) > 0 and outs[0].startswith(inside + os.sep),
                   f"{tag}: output pulled back to {outs}")
-            check(job["inputs"] == ["studio_test/in.png"], f"{tag}: uploaded {job['inputs']}")
+            check(len(job["inputs"]) == 1 and re.fullmatch(r"studio/[0-9a-f]{12}/studio_test/in\.png", job["inputs"][0]),
+                  f"{tag}: uploaded into its own folder: {job['inputs']}")
             fg = job.get("forgot") or {}
             check(bool(fg.get("deleted")) and "warning" not in fg, f"{tag}: worker forgot the job: {json.dumps(fg)[:200]}")
             async with aiohttp.ClientSession() as s:

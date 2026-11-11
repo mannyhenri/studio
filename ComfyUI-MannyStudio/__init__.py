@@ -306,7 +306,7 @@ async def manny_run(request):
             }
             if target == _remote.AUTO:
                 try:
-                    worker = await _choose(api, target)
+                    worker = await _choose(api, target, private)
                 except _remote.GateRefused as e:
                     return web.json_response({"error": "No machine can run this: " + "; ".join(
                         f"{k}: {(v[0] or {}).get('reason', '')}" for k, v in e.refused_by.items() if v), "refused_by": e.refused_by, "queued": results}, status=409)
@@ -357,7 +357,10 @@ async def manny_workers(request):
 
 @routes.post("/manny/api/workers")
 async def manny_workers_save(request):
-    """Replace the worker list. Body: {"workers": [{label, host, port, device?}]} (comfy-mac's mac-workers.json works as is)."""
+    """Replace the worker list. Body: {"workers": [{label, host, port, device?}]} (comfy-mac's mac-workers.json works as is).
+    Only from this PC, or with Incognito unlocked: a worker receives the input files of the jobs sent to it."""
+    if not (auth.is_local(request) or auth.unlocked(request)):
+        return web.json_response({"error": "Change GPU machines on this PC, or unlock Incognito first"}, status=403)
     body = await request.json()
     _remote.save_workers(_data_dir(), body.get("workers") or [])
     return web.json_response({"workers": _remote.load_workers(_data_dir())})
@@ -987,10 +990,11 @@ async def _queue_app(app, values, private, label, target=None):
     return await _queue_api(api, {"extra_pnginfo": {"workflow": wf}, "manny_app": app["id"], "manny_label": label}, private, target, "studio-finish")
 
 
-async def _choose(api, target):
+async def _choose(api, target, private=False):
     """The worker dict that should run api, or None for this PC. target: "local"/None, "auto" or a worker label.
+    Incognito never goes to another machine on its own ("auto" keeps it here); a machine picked by name still works.
     Raises KeyError for an unknown label and remote.GateRefused when "auto" finds no machine that can run it."""
-    if not target or target == _remote.LOCAL:
+    if not target or target == _remote.LOCAL or (private and target == _remote.AUTO):
         return None
     if target != _remote.AUTO:
         return _remote.find(_data_dir(), target)
@@ -1007,7 +1011,7 @@ async def _choose(api, target):
 async def _queue_api(api, extra, private, target=None, client_id="studio"):
     """Queue an API prompt (already privatized when private) on this PC, a worker or "auto"; returns its prompt_id.
     _wait_output follows either kind. A 200 with node_errors is refused everywhere: it would run without the picture."""
-    worker = await _choose(api, target)
+    worker = await _choose(api, target, private)
     if worker:
         return (await _remote.submit(worker, api, {"client_id": client_id, "extra_data": extra}, _dirs(), private, INCOMING,
                                      on_done=_remote_done))["prompt_id"]
@@ -2648,6 +2652,21 @@ _projects.setup(globals())
 
 # ---------------------------------------------------------------- Versions (git + GitHub)
 from . import gitver as _gitver  # noqa: E402
+
+
+# remote GPU jobs survive a restart of this ComfyUI: saved in manny_studio/remote_jobs.json, followed again here
+_remote.configure(_data_dir())
+
+
+def _resume_remote():
+    n = _remote.resume(_dirs(), INCOMING, _remote_done)
+    if n:
+        print(f"[Studio] following {n} render(s) still on other GPUs")
+
+
+_rl = getattr(PromptServer.instance, "loop", None)
+if _rl is not None:
+    _rl.call_soon_threadsafe(_resume_remote)
 _gitver.setup_routes(globals())
 
 # ---------------------------------------------------------------- 3D -> storyboard -> final render pipeline

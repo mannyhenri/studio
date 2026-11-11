@@ -29,15 +29,17 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 
 **Set up**
 1. On the Mac: start both workers and the LAN gate (`lan_gate.py --allow <this-pc>.local --ports 8188 8189`). ComfyUI has no password, so the gate only lets this PC in.
-2. In Studio: **Settings → GPU machines**, add `mac-vega-a` · `Mannys-Mac-Pro.local` · `8188` and `mac-vega-b` · `Mannys-Mac-Pro.local` · `8189`. They're kept in `manny_studio/workers.json` (comfy-mac's `mac-workers.json` also works pasted as is).
+2. In Studio, on this PC (or with Incognito unlocked): **Settings → GPU machines**, add `mac-vega-a` · `Mannys-Mac-Pro.local` · `8188` and `mac-vega-b` · `Mannys-Mac-Pro.local` · `8189`. They're kept in `manny_studio/workers.json` (comfy-mac's `mac-workers.json` also works pasted as is).
 3. Under **Generate** a "Run on" menu appears: **This PC**, **Any free GPU**, or one machine. The same choice is used by Finish, Music and Voices. Over MCP, `studio_generate` takes `run_on`.
 
 **How a job is sent**
 - Studio first checks the machine *live*: every node must be installed, every model, sampler or scheduler name must be one that machine offers for that exact input, and every required input must be present. Missing anything → the job isn't sent, and you see what's missing (node, input, value). It never renders something different by accident.
 - Model switches a job doesn't use are dropped before the check. Without that, ComfyUI would ask for every model an app *could* pick. The trimmed job is exactly what ComfyUI would run anyway.
-- **Any free GPU** picks the least busy machine that has everything, and this PC wins ties. Note: an LTX video takes about 55 min on one Vega card when both are busy.
-- The input files (pictures, videos, sounds) are uploaded with the job. When the result is copied back, the Mac deletes the job's outputs, uploads and history (`/mac/forget`). Incognito jobs leave nothing behind on the Mac.
-- Cancel (✕ in the queue drawer) takes the job out of the Mac's queue or stops it, then cleans up the same way. If a Mac stops answering for 10 min while it has your job, the job is marked failed.
+- **Any free GPU** picks the least busy machine that has everything, and this PC wins ties. A Mac card that has been on one of your jobs for more than 10 min counts as busier. Measured on one Vega II: Remove background 14 s, Smooth motion 27 s, Z-Image 4.5 min, Upscale (SeedVR2 7b) 9 min, LTX video 44–55 min, Upscale video over an hour.
+- **Incognito** jobs never go to another machine on "Any free GPU"; they run here unless you pick a Mac by name. If you do, the job crosses your network over plain HTTP and is wiped from the Mac when it's done.
+- The input files (pictures, videos, sounds) are uploaded with the job, into a folder of their own. The result is copied into this PC's output folder under the next free name (it never replaces a file here). Then the Mac deletes the job's outputs, uploads and history (`/mac/forget`). A failed job is cleaned up the same way.
+- Cancel (✕ in the queue drawer) takes the job out of the Mac's queue or stops it, then cleans up the same way. A Mac that restarts mid-job fails the job ("restarted and lost the job"); one that stops answering for 10 min does too.
+- Jobs on other machines survive a restart of this PC's ComfyUI: they're kept in `manny_studio/remote_jobs.json` and followed again at startup. As a safety net the Mac also clears Studio jobs older than 24 h.
 
 **What stays on this PC:** AI review and AI prompt help (their result is text, not a file) and Topaz in Finish.
 
@@ -60,5 +62,6 @@ PY=~/code/comfy-mac/.venv/bin/python
 $PY tests/test_prune.py       # every app x every choice: trimmed job == what ComfyUI runs
 $PY tests/test_remote.py      # check == each worker's own validation, real renders, cleanup
 $PY tests/test_run_route.py   # Studio's routes: Run on, Any free GPU, cancel, Finish/Music/Voice paths
+$PY tests/test_revise.py      # no overwrites, shared references, failed/lost/restarted jobs, resume after restart
 ```
 `RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).

@@ -232,6 +232,7 @@ async def main():
         await remote.forget(s, WORKERS[0], "studio-route-staged", sorted(set(staged)))
     await pick_units()
     mcp_units()
+    await revise_route(apps, eligible)
     r = await H[("POST", "/manny/api/workers/check")](Req({"app": apps[0]}))
     d = json.loads(r.text)
     check(set(d) == {"local"} | {w["label"] for w in WORKERS}, f"workers/check answers per machine: { {k: v.get('ok') for k, v in d.items()} }")
@@ -248,6 +249,27 @@ async def post_local_cancel(pid):
             pass
         async with s.post(base + "/interrupt", json={"prompt_id": pid}):
             pass
+
+
+async def revise_route(apps, eligible):
+    """C4: only this PC (or an unlocked Incognito) may change the GPU machines. C9: Incognito never goes to another
+    machine on "auto", even with this PC busy; picked by name it still does."""
+    far = Req({"workers": [{"label": "evil", "host": "10.0.0.66", "port": 8188}]})
+    far.remote = "192.168.4.77"
+    r = await H[("POST", "/manny/api/workers")](far)
+    check(r.status == 403 and all(w["label"] != "evil" for w in remote.load_workers(studio._data_dir())),
+          f"C4 a LAN device can't change the GPU machines: {r.status}")
+    r = await H[("POST", "/manny/api/workers")](Req({"workers": WORKERS}))
+    check(r.status == 200, f"C4 this PC can: {r.status}")
+    studio._local_busy = lambda: 99
+    for app in apps:
+        _wf, api = await studio._build_prompt(app, {})
+        ch = await studio._choose(api, "auto", True)
+        check(ch is None, f"C9 {app}: Incognito + auto stays on this PC (PC busy): {ch and ch['label']}")
+        if app in eligible:
+            ch = await studio._choose(api, eligible[app][0], True)
+            check(bool(ch) and ch["label"] == eligible[app][0], f"C9 {app}: Incognito + a Mac picked by name goes there")
+    studio._local_busy = lambda: 0
 
 
 def mcp_units():

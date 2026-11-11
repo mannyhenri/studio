@@ -18,6 +18,7 @@ nothing stays on the worker. No ComfyUI imports here: the paths come in as argum
 import asyncio
 import json
 import os
+import re
 import time
 
 from aiohttp import ClientSession, ClientTimeout, FormData
@@ -36,6 +37,72 @@ JOBS = {}       # remote prompt_id -> job dict (see submit)
 JOBS_UPLOADING = {}     # label -> jobs still uploading inputs (not in the worker's queue yet)
 KEEP_DONE = 3600        # finished jobs stay listed this long
 LOST_AFTER = 600        # a worker unreachable this long while it has our job: the job is failed
+LONG_JOB = 600          # "auto": a worker running one of our jobs for longer than this counts one busier
+LOST_MISSES = 3         # polls in a row with the job in neither /history nor /queue: the worker restarted
+
+
+# ---------------------------------------------------------------- remote jobs on disk (survive a restart of this PC's ComfyUI)
+_STATE = {"dir": None}
+ACTIVE = ("queued", "running", "downloading", "cancelling")
+
+
+def configure(data_dir):
+    """Where the job list is kept (manny_studio/); None turns persistence off."""
+    _STATE["dir"] = data_dir
+
+
+def state_file():
+    return os.path.join(_STATE["dir"], "remote_jobs.json") if _STATE["dir"] else None
+
+
+def _persist():
+    path = state_file()
+    if not path:
+        return
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump([job_view(j) for j in JOBS.values()], f)
+        os.replace(tmp, path)
+    except Exception as e:
+        print("[Studio] could not save remote jobs:", e)
+
+
+def resume(dirs, incoming=".private_incoming", on_done=None):
+    """After a restart: load the saved jobs and follow the unfinished ones again (pull back, forget).
+    Returns how many were resumed. Must run on the event loop."""
+    path = state_file()
+    try:
+        with open(path, encoding="utf-8") as f:
+            saved = json.load(f)
+    except Exception:
+        return 0
+    workers = {w["label"]: w for w in load_workers(_STATE["dir"])}
+    n = 0
+    for job in saved if isinstance(saved, list) else []:
+        if not isinstance(job, dict) or not job.get("prompt_id") or job["prompt_id"] in JOBS:
+            continue
+        JOBS[job["prompt_id"]] = job
+        if job.get("status") not in ACTIVE:
+            continue
+        w = workers.get(job.get("worker"))
+        if not w:
+            job.update(status="failed", error=f"{job.get('worker')} is no longer set up", finished_at=time.time())
+            continue
+        if job["status"] == "cancelling":
+            job["task"] = asyncio.ensure_future(_quiet(cancel(w, job["prompt_id"])))
+        else:
+            job["task"] = asyncio.ensure_future(_follow(w, job, dirs, incoming, on_done))
+        n += 1
+    _persist()
+    return n
+
+
+async def _quiet(coro):
+    try:
+        return await coro
+    except Exception as e:
+        print("[Studio] remote:", e)
 
 
 # ---------------------------------------------------------------- registry
@@ -187,6 +254,9 @@ async def pick(workers, api, local_busy, local_ok=True, timeout=15):
             nfo = await asyncio.wait_for(info(w), timeout)
             busy = nfo.get("queue_remaining") or 0
             busy += JOBS_UPLOADING.get(w["label"], 0)
+            # one of our jobs has held this card for >10 min (an LTX video, an upscale): count it as busier
+            busy += sum(1 for j in JOBS.values() if j["worker"] == w["label"] and j["status"] == "running"
+                        and time.time() - (j.get("started_at") or time.time()) > LONG_JOB)
             return w, busy, None
         except Exception as e:
             return w, None, [{"reason": f"{w['label']} is unreachable: {e}"}]
@@ -205,8 +275,9 @@ def _split_annot(v):
     return v, "input"
 
 
-async def _upload_inputs(s, w, api, object_info, dirs):
-    """Send every file the prompt reads to the worker; rewrite the values to the worker's names."""
+async def _upload_inputs(s, w, api, object_info, dirs, tag):
+    """Send every file the prompt reads to the worker, under studio/<tag>/ so jobs never share (and never
+    forget) each other's copies; rewrite the values to the worker's names."""
     sent = []
     for node in api.values():
         oi = object_info.get(node.get("class_type"))
@@ -217,9 +288,11 @@ async def _upload_inputs(s, w, api, object_info, dirs):
             src = os.path.realpath(os.path.join(dirs[kind], rel))
             if not src.startswith(os.path.realpath(dirs[kind]) + os.sep) or not os.path.isfile(src):
                 raise RuntimeError(f"The file “{rel}” isn't on this PC")
-            sub = os.path.dirname(rel).replace("\\", "/")
+            sub = "/".join(x for x in ("studio", tag, os.path.dirname(rel).replace("\\", "/")) if x)
+            with open(src, "rb") as fh:
+                data = fh.read()
             fd = FormData()
-            fd.add_field("image", open(src, "rb"), filename=os.path.basename(rel))
+            fd.add_field("image", data, filename=os.path.basename(rel))
             fd.add_field("subfolder", sub)
             fd.add_field("type", "input")
             fd.add_field("overwrite", "true")
@@ -245,12 +318,13 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
     # literal input to the node), so the save runs again while everything upstream may still come from cache.
     tag = os.urandom(6).hex()
     for node in api.values():
-        if (oi.get(node.get("class_type")) or {}).get("output_node"):
+        ct = node.get("class_type")
+        if (oi.get(ct) or {}).get("output_node") and "*" not in (sv.get(ct) or []):   # "*" nodes would receive it
             node.setdefault("inputs", {})["studio_job"] = tag
     async with ClientSession() as s:
         JOBS_UPLOADING[w["label"]] = JOBS_UPLOADING.get(w["label"], 0) + 1
         try:
-            sent = await _upload_inputs(s, w, api, oi, dirs)
+            sent = await _upload_inputs(s, w, api, oi, dirs, tag)
         finally:
             JOBS_UPLOADING[w["label"]] -= 1
         body = dict(payload_extra, prompt=api)
@@ -280,6 +354,7 @@ async def submit(w, api, payload_extra, dirs, private=False, incoming=".private_
            "progress": 0.0, "step": None}
     JOBS[pid] = job
     job["task"] = asyncio.ensure_future(_follow(w, job, dirs, incoming, on_done, opened=opened))
+    _persist()
     return {"prompt_id": pid, "number": data.get("number"), "worker": w["label"]}
 
 
@@ -301,9 +376,10 @@ class GateRefused(RuntimeError):
 
 
 def _outputs(h):
+    """Every file the job saved, whatever key its node reports it under (images, videos, audio, 3d, ...)."""
     for o in (h.get("outputs") or {}).values():
-        for k in ("images", "gifs", "videos", "audio"):
-            for f in o.get(k) or []:
+        for v in o.values():
+            for f in v if isinstance(v, list) else []:
                 if isinstance(f, dict) and f.get("type") == "output" and f.get("filename"):
                     yield f
 
@@ -314,7 +390,27 @@ def _local_target(dirs, f, private, incoming):
     dst = os.path.realpath(os.path.join(root, sub, f["filename"]))
     if not dst.startswith(os.path.realpath(dirs["output"]) + os.sep):
         raise RuntimeError(f"Refused an output path outside the output folder: {sub}/{f['filename']}")
-    return dst
+    return _claim(dst)
+
+
+_COUNTER = re.compile(r"^(.*_)(\d{5})(_\.[^.]+)$")
+
+
+def _claim(dst):
+    """dst, or the next free name ComfyUI-style (x_00001_.png -> x_00002_.png), created empty so that a job
+    finishing at the same moment can't take it too. Never overwrites a file on this PC."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    d, name = os.path.split(dst)
+    m = _COUNTER.match(name)
+    stem, ext = os.path.splitext(name)
+    for k in range(100000):
+        cand = name if k == 0 else (f"{m.group(1)}{int(m.group(2)) + k:05d}{m.group(3)}" if m else f"{stem}_{k}{ext}")
+        try:
+            os.close(os.open(os.path.join(d, cand), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return os.path.join(d, cand)
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"No free name for {name}")
 
 
 def _ws_url(w, client_id):
@@ -349,10 +445,10 @@ async def _progress(w, job, opened=None):
                     x = d.get("data") or {}
                     if x.get("prompt_id") != pid:
                         continue
-                    if d.get("type") == "execution_start":
+                    if d.get("type") == "execution_start" or (d.get("type") == "progress" and x.get("max")):
+                        job.setdefault("started_at", time.time())
                         job["status"] = "running"
-                    elif d.get("type") == "progress" and x.get("max"):
-                        job["status"] = "running"
+                    if d.get("type") == "progress" and x.get("max"):
                         job["progress"], job["step"] = x["value"] / x["max"], f"Step {x['value']}/{x['max']}"
         except asyncio.CancelledError:
             raise
@@ -366,11 +462,22 @@ async def _follow(w, job, dirs, incoming, on_done, poll=2, opened=None):
     prog = asyncio.ensure_future(_progress(w, job, opened)) if job.get("client_id") else None
     try:
         async with ClientSession() as s:
-            seen = time.time()
+            seen, misses = time.time(), 0
             while True:
                 try:
                     h = (await _get(s, w, f"/history/{pid}")).get(pid)
                     seen = time.time()
+                    if not h:   # not finished: still queued, or did the worker restart and lose it?
+                        q = await _get(s, w, "/queue")
+                        if any(it[1] == pid for it in q.get("queue_running", []) + q.get("queue_pending", [])):
+                            misses = 0
+                        else:
+                            h = (await _get(s, w, f"/history/{pid}")).get(pid)    # it may have just finished
+                            misses = 0 if h else misses + 1
+                            if misses >= LOST_MISSES:
+                                raise RuntimeError(f"{w['label']} restarted and lost the job; send it again")
+                except RuntimeError:
+                    raise
                 except Exception as e:
                     h = None    # worker briefly unreachable: keep waiting, but not forever
                     if time.time() - seen > LOST_AFTER:
@@ -389,14 +496,22 @@ async def _follow(w, job, dirs, incoming, on_done, poll=2, opened=None):
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 q = {"filename": f["filename"], "subfolder": f.get("subfolder") or "", "type": "output"}
                 async with s.get(base(w) + "/view", params=q, timeout=ClientTimeout(total=1800)) as r:
-                    if r.status != 200:
-                        raise RuntimeError(f"{w['label']}: could not fetch {f['filename']} (HTTP {r.status})")
                     tmp = dst + ".part"
-                    with open(tmp, "wb") as out:
-                        async for chunk in r.content.iter_chunked(1 << 20):
-                            out.write(chunk)
+                    try:
+                        if r.status != 200:
+                            raise RuntimeError(f"{w['label']}: could not fetch {f['filename']} (HTTP {r.status})")
+                        with open(tmp, "wb") as out:
+                            async for chunk in r.content.iter_chunked(1 << 20):
+                                out.write(chunk)
+                    except BaseException:
+                        for x in (tmp, dst):    # the empty name _claim reserved, and any half file
+                            try:
+                                os.remove(x)
+                            except OSError:
+                                pass
+                        raise
                 os.replace(tmp, dst)
-                job["outputs"].append({"filename": f["filename"], "subfolder": f.get("subfolder") or "", "path": dst})
+                job["outputs"].append({"filename": os.path.basename(dst), "subfolder": f.get("subfolder") or "", "path": dst})
             job["status"], job["progress"] = "done", 1.0
             job["forgot"] = await forget(s, w, pid, job["inputs"])
     except asyncio.CancelledError:
@@ -405,10 +520,21 @@ async def _follow(w, job, dirs, incoming, on_done, poll=2, opened=None):
         raise
     except Exception as e:
         job["status"], job["error"] = "failed", str(e)
+        for o in job["outputs"]:    # files of a half-copied job: keep the PC clean too
+            try:
+                os.remove(o["path"])
+            except OSError:
+                pass
+        try:            # nothing of a failed job stays on the worker: uploads, outputs, history (the prompt)
+            async with ClientSession() as s2:
+                job["forgot"] = await forget(s2, w, pid, job["inputs"])
+        except Exception as fe:
+            job["forgot"] = {"deleted": [], "warning": f"forget failed: {fe}"}
     finally:
         if prog:
             prog.cancel()
         job["finished_at"] = time.time()
+        _persist()
         if on_done:
             try:
                 on_done(job)
@@ -440,8 +566,19 @@ async def cancel(w, pid, settle=20, inputs=None):
     job = JOBS.get(pid)
     if job:
         job["status"] = "cancelling"    # "cancelled" once the worker has dropped it and forgotten its files
-    if job and job.get("task") and not job["task"].done():
+        _persist()
+    if job and job.get("task") and not job["task"].done() and job["task"] is not asyncio.current_task():
         job["task"].cancel()
+    try:
+        return await _cancel(w, pid, settle, inputs, job)
+    except Exception as e:
+        if job:
+            job.update(status="failed", error=f"Couldn't cancel on {w['label']}: {e}", finished_at=time.time())
+            _persist()
+        raise
+
+
+async def _cancel(w, pid, settle, inputs, job):
     async with ClientSession() as s:
         async with s.post(base(w) + "/queue", json={"delete": [pid]}, timeout=ClientTimeout(total=10)):
             pass
@@ -461,6 +598,7 @@ async def cancel(w, pid, settle=20, inputs=None):
         fg = await forget(s, w, pid, inputs if inputs is not None else (job or {}).get("inputs") or [])
     if job:
         job["status"], job["forgot"], job["finished_at"] = "cancelled", fg, time.time()
+        _persist()
     return fg
 
 
@@ -471,6 +609,9 @@ def job_view(job):
 def jobs(now=None):
     """Live and recently finished remote jobs, newest first (finished ones older than KEEP_DONE are dropped)."""
     now = now or time.time()
-    for pid in [p for p, j in JOBS.items() if j.get("finished_at") and now - j["finished_at"] > KEEP_DONE]:
+    old = [p for p, j in JOBS.items() if j.get("finished_at") and j["status"] not in ACTIVE and now - j["finished_at"] > KEEP_DONE]
+    for pid in old:
         del JOBS[pid]
+    if old:
+        _persist()
     return sorted((job_view(j) for j in JOBS.values()), key=lambda j: -j["queued_at"])
