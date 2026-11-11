@@ -165,6 +165,10 @@ async def main():
     shutil.copy(os.path.join(tmp, "input/studio_test/probe.png"), os.path.join(tmp, "input/ref_couture_model.png"))
     # not under output/Videos: Studio's first start moves Images/Videos into the Incognito space
     shutil.copy(os.path.join(tmp, "input/studio_test/probe.mp4"), os.path.join(tmp, "output/et/clip.mp4"))
+    if LIVE:    # a real fix needs a clip worth fixing: 3 s, 512x288, with a soundtrack (the tools keep the sound)
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=512x288:rate=24:duration=3",
+                        "-f", "lavfi", "-i", "sine=frequency=330:duration=3", "-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                        os.path.join(tmp, "output/et/clip.mp4")], check=True)
 
     # ComfyUI stand-ins; the pack's routes are collected and served by a real aiohttp server below
     fp = types.ModuleType("folder_paths")
@@ -434,6 +438,18 @@ async def main():
         check(len(landed) + len(said_no) == want and all(j["outputs"] for j in landed),
               f"LIVE: {want} jobs (every non-sound entry point x 2 workers): {len(landed)} rendered and pulled back, "
               f"{len(said_no)} refused by the card with its reason (e.g. a PC-only model)")
+        # a video tool is done only when its result is on this PC: spliced (fix), joined (extend) or saved (keyframes)
+        vt = sys.modules["studio.videotools"]
+        for j in studio._jobs.values():
+            if j.get("kind") not in ("videofix", "videoextend", "keyframes"):
+                continue
+            res = j.get("result") or {}
+            full = os.path.join(studio._root(False), res.get("subfolder", ""), res.get("filename", "")) if res else ""
+            info = vt.probe(full) if full and os.path.isfile(full) else {}
+            print(f"  {j['kind']}: {j['status']} {j.get('error') or ''} -> {res} {info}")
+            same = j["kind"] != "videofix" or (abs(info.get("duration", 0) - 3.0) < 0.3 and info.get("audio"))   # a fix keeps length and sound
+            check(j["status"] == "done" and info.get("duration", 0) > 0.5 and info.get("width") and same,
+                  f"LIVE {j['kind']}: the result is a playable video on this PC ({j['status']}, {info.get('duration')} s, {info.get('width')}x{info.get('height')})")
         refused = [j for j in jobs if j["status"] not in ("done",)]
         check(not refused, f"LIVE: no other remote job: {[(j['worker'], j['status']) for j in refused]}")
     await runner.cleanup()
