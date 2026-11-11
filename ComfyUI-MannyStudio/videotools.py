@@ -1,10 +1,13 @@
 """Video tools: fix a part of a clip, fix a face, continue a shot, and keyframe shots (several pictures -> one shot).
 
 Everything runs on the models already on this PC:
-- Fix a part        H3 Retake (MiniMax H3 FL2VA + 8-step turbo): only the chosen seconds are re-generated
-- Fix a face        H3 Face Refine: track the face, re-detail it at low denoise, stitch it back
+- Fix a part        LTX-2.5 re-draws the marked seconds from the clip itself (video to video), first and last frames pinned
+- Fix a face        H3 Face Refine tracks and crops the face; LTX-2.5 re-draws the crop lightly; the face is stitched back
 - Continue a shot   H3 Motion Context (Ref2VA + 4-step turbo): the clip's last frames are pinned so motion carries on
-- Keyframe shot     LTX-2.5 two-pass with a guide picture at each time (or H3 Keyframes)
+- Keyframe shot     LTX-2.5 two-pass with a guide picture at each time
+
+The H3 first/last-frame model (FL2VA) was the one loading both times this PC froze (Nov 10 and 11); Studio no longer uses it.
+H3 work uses only the Ref2VA model, the one that rendered fine here.
 
 Fixes are spliced back with ffmpeg so the untouched parts keep the original's quality."""
 import asyncio
@@ -19,8 +22,6 @@ H = {}
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # model files on this PC (same ones the Video app uses)
-H3_FL2VA = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
-H3_FL2VA_TURBO = "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
 H3_REF2VA = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
 H3_REF2VA_TURBO = "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
 H3_TE = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
@@ -33,7 +34,6 @@ LTX_AVAE = "ltx-2.5-audio-vae-bf16.safetensors"
 LTX_UPS = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
 LTX_NEG = "pc game, console game, video game, cartoon, CGI, plastic skin, blurry, low quality, deformed face, distorted"
 FACE_DET = "face_yolov8m.pt"
-MODES = {"redo": "video + audio (redo the moment)", "picture": "video only (keep the performance)", "sound": "audio only (keep the picture)"}
 EXT_LENGTHS = {5: 124, 7: 175, 9: 226, 11: 277}       # motion-context friendly lengths (video and audio frames align)
 
 
@@ -119,10 +119,16 @@ def _gguf_te():
         import folder_paths
         if "CLIPLoaderGGUF" not in nodes.NODE_CLASS_MAPPINGS:
             return None
-        names = folder_paths.get_filename_list("text_encoders") or []
-        for n in names:
-            if n.replace("\\", "/").split("/")[-1] == H3_TE_GGUF and os.path.getsize(folder_paths.get_full_path("text_encoders", n)) > 19e9:
-                return n
+        for kind in ("clip_gguf", "text_encoders"):   # the GGUF pack lists .gguf files under its own key
+            try:
+                names = folder_paths.get_filename_list(kind) or []
+            except Exception:
+                continue
+            for n in names:
+                if n.replace("\\", "/").split("/")[-1] == H3_TE_GGUF:
+                    full = folder_paths.get_full_path(kind, n)
+                    if full and os.path.getsize(full) > 19e9:
+                        return n
     except Exception:
         pass
     return None
@@ -146,66 +152,92 @@ def _save(api, images, audio, prefix, fps=24.0):
 
 
 # ---------------------------------------------------------------- graphs
-def _resize_for(w, h):
-    """Big sources are worked on at ~0.6 MP (H3's comfort zone); the fix is scaled back when spliced in."""
-    return ("megapixels", 0.45) if w * h > 480_000 else ("none", 1.0)
+def _ltx_sigmas(denoise):
+    """The distilled LTX-2.5 schedule, started part-way down for video-to-video."""
+    d = max(0.15, min(0.95, float(denoise)))
+    tail = [s for s in (0.909375, 0.725, 0.5625, 0.421875, 0.28, 0.14) if s < d - 0.02]
+    return ", ".join(f"{x:.4f}" for x in [d] + tail + [0.0])
 
 
-def retake_api(path, start, end, prompt, mode, seed, steps=8, has_audio=True, clip_from=0.0, clip_len=0.0, size=(0, 0)):
-    """start/end are seconds inside the loaded piece (clip_from .. clip_from+clip_len of the source)."""
-    api = {}
-    _h3_loaders(api, H3_FL2VA, H3_FL2VA_TURBO)
-    rz, rv = _resize_for(*size)
-    api["lv"] = {"class_type": "H3LoadVideoPath", "inputs": {"path": path}}
-    api["fr"] = {"class_type": "H3VideoFrames", "inputs": {"video": ["lv", 0], "start_seconds": float(clip_from), "duration_seconds": float(clip_len),
-                                                            "frame_rate": "24 (H3 native)", "resize": rz, "resize_value": rv, "snap_to_h3": True}}
-    api["ks"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}}
-    api["sc"] = {"class_type": "BasicScheduler", "inputs": {"model": ["lo", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}}
-    api["rt"] = {"class_type": "H3Retake", "inputs": {"model": ["lo", 0], "clip": ["te", 0], "video_vae": ["vv", 0], "audio_vae": ["va", 0],
-                                                       "images": ["fr", 0], "audio": ["fr", 1], "prompt": prompt, "start_seconds": float(start),
-                                                       "end_seconds": float(end), "mode": MODES.get(mode, MODES["redo"]), "seed": int(seed),
-                                                       "sampler": ["ks", 0], "sigmas": ["sc", 0]}}
-    _save(api, ["rt", 0], ["rt", 1], "Videos/_work/retake")
-    return api
+def _ltx_frames(dur):
+    """LTX wants 8k+1 frames."""
+    return max(9, int((dur * 24 - 1) // 8) * 8 + 1)
 
 
-def face_api(path, start, dur, prompt, ref, denoise, seed, steps=8):
-    api = {}
-    _h3_loaders(api, H3_FL2VA, H3_FL2VA_TURBO)
-    api["lv"] = {"class_type": "H3LoadVideoPath", "inputs": {"path": path}}
-    api["fr"] = {"class_type": "H3VideoFrames", "inputs": {"video": ["lv", 0], "start_seconds": float(start), "duration_seconds": float(dur),
-                                                            "frame_rate": "24 (H3 native)", "resize": "none", "resize_value": 1.0, "snap_to_h3": True}}
-    trk = {"images": ["fr", 0], "detector": FACE_DET, "confidence": 0.35, "crop_factor": 3.0, "canvas_width": 768, "canvas_height": 768,
-           "canvas_mode": "auto_capped_768", "smooth_window": 21, "size_smooth_window": 51, "smooth_method": "gaussian", "size_mode": "per_frame",
-           "select": "largest_face", "fallback_detector": "none", "cut_detection": "none", "absent_shots": "off"}
-    r2v = {"clip": ["te", 0], "prompt": prompt, "width": ["tr", 4], "height": ["tr", 5], "length": ["tr", 6], "ref_image_size": "match",
-           "vae": ["vv", 0], "audio_vae": ["va", 0], "ref_audios.ref_audio_0": ["fr", 1]}
-    if ref:
-        api["ref"] = {"class_type": "LoadImage", "inputs": {"image": ref}}
-        trk.update(identity_reference=["ref", 0], identity_track=True, identity_threshold=0.28, identity_model="insightface")
-        r2v["ref_images.ref_image_0"] = ["ref", 0]
-    api["tr"] = {"class_type": "H3FaceTrackCrop", "inputs": trk}
-    api["r2v"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": r2v}
-    api["inj"] = {"class_type": "H3InjectVideoLatent", "inputs": {"av_latent": ["r2v", 1], "images": ["tr", 0], "vae": ["vv", 0]}}
-    api["pfd"] = {"class_type": "H3PerFrameDenoise", "inputs": {"model": ["lo", 0], "av_latent": ["inj", 0], "transform": ["tr", 1],
-                                                                 "denoise_multiplier_small_face": 1.0, "denoise_multiplier_large_face": 0.35,
-                                                                 "scale_mode": "absolute_px", "face_px_small": 30.0, "face_px_large": 120.0,
-                                                                 "gamma": 1.0, "smooth_frames": 9}}
-    api["g"] = {"class_type": "BasicGuider", "inputs": {"model": ["pfd", 2], "conditioning": ["r2v", 0]}}
-    api["ks"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "er_sde"}}
-    api["sc"] = {"class_type": "BasicScheduler", "inputs": {"model": ["pfd", 2], "scheduler": "simple", "steps": steps, "denoise": float(denoise)}}
+def _ltx_v2v(api, images, n, prompt, denoise, seed, guides=()):
+    """Re-draws `images` (n = 8k+1 frames) with LTX-2.5 at partial denoise. guides: [(image ref, frame index)] pinned exactly.
+    The text encoder runs on the CPU so the graphics memory only ever holds the video model."""
+    api.update({
+        "um": {"class_type": "UNETLoader", "inputs": {"unet_name": LTX_UNET, "weight_dtype": "default"}},
+        "te": {"class_type": "CLIPLoader", "inputs": {"clip_name": LTX_TE, "type": "ltxv", "device": "cpu"}},
+        "vv": {"class_type": "VAELoader", "inputs": {"vae_name": LTX_VVAE}},
+        "va": {"class_type": "VAELoader", "inputs": {"vae_name": LTX_AVAE}},
+        "pos": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["te", 0], "text": prompt}},
+        "neg": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["te", 0], "text": LTX_NEG}},
+        "cond": {"class_type": "LTXVConditioning", "inputs": {"positive": ["pos", 0], "negative": ["neg", 0], "frame_rate": 24.0}},
+        "enc": {"class_type": "VAEEncode", "inputs": {"pixels": images, "vae": ["vv", 0]}},
+        "ea": {"class_type": "LTXVEmptyLatentAudio", "inputs": {"frames_number": n, "frame_rate": 24, "batch_size": 1, "audio_vae": ["va", 0]}},
+    })
+    pos, neg, lat = ["cond", 0], ["cond", 1], ["enc", 0]
+    for k, (img, idx) in enumerate(guides):
+        api[f"gd{k}"] = {"class_type": "LTXVAddGuide", "inputs": {"positive": pos, "negative": neg, "vae": ["vv", 0], "latent": lat,
+                                                                   "image": img, "frame_idx": int(idx), "strength": 1.0}}
+        pos, neg, lat = [f"gd{k}", 0], [f"gd{k}", 1], [f"gd{k}", 2]
+    api["av"] = {"class_type": "LTXVConcatAVLatent", "inputs": {"video_latent": lat, "audio_latent": ["ea", 0]}}
+    api["gu"] = {"class_type": "LTXVDualCFGGuider", "inputs": {"model": ["um", 0], "positive": pos, "negative": neg, "video_cfg": 1.0, "audio_cfg": 1.0}}
+    api["sg"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": _ltx_sigmas(denoise)}}
+    api["ks"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
     api["nz"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}}
-    api["sa"] = {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["nz", 0], "guider": ["g", 0], "sampler": ["ks", 0],
-                                                                    "sigmas": ["sc", 0], "latent_image": ["pfd", 0]}}
-    api["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sa", 0], "vae": ["vv", 0]}}
-    api["st"] = {"class_type": "H3FaceStitch", "inputs": {"base_images": ["fr", 0], "refined_crops": ["dec", 0], "transform": ["tr", 1],
+    api["sa"] = {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["nz", 0], "guider": ["gu", 0], "sampler": ["ks", 0],
+                                                                    "sigmas": ["sg", 0], "latent_image": ["av", 0]}}
+    api["sep"] = {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["sa", 0]}}
+    api["crop"] = {"class_type": "LTXVCropGuides", "inputs": {"positive": pos, "negative": neg, "latent": ["sep", 0]}}
+    api["dec"] = {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["crop", 2], "vae": ["vv", 0], "tile_size": 512, "overlap": 64,
+                                                             "temporal_size": 64, "temporal_overlap": 16}}
+    return ["dec", 0]
+
+
+def _frames(api, path, start, n, size):
+    """n frames from `start` seconds, on a /32 canvas (big sources come down to ~0.8 MP)."""
+    w, h = size
+    api["lv"] = {"class_type": "H3LoadVideoPath", "inputs": {"path": path}}
+    rz, rv = ("megapixels", 0.8) if w * h > 900_000 else ("none", 1.0)
+    api["fr"] = {"class_type": "H3VideoFrames", "inputs": {"video": ["lv", 0], "start_seconds": float(start), "duration_seconds": n / 24.0 + 0.2,
+                                                            "frame_rate": "24 (H3 native)", "resize": rz, "resize_value": rv, "snap_to_h3": True}}
+    api["cut"] = {"class_type": "ImageFromBatch", "inputs": {"image": ["fr", 0], "batch_index": 0, "length": int(n)}}
+    return ["cut", 0]
+
+
+def retake_api(path, clip_from, clip_len, prompt, denoise, seed, size):
+    """Re-draws clip_from .. clip_from+clip_len with LTX-2.5; the first and last frames are pinned to the original."""
+    api = {}
+    n = _ltx_frames(clip_len)
+    imgs = _frames(api, path, clip_from, n, size)
+    api["f0"] = {"class_type": "ImageFromBatch", "inputs": {"image": imgs, "batch_index": 0, "length": 1}}
+    api["f1"] = {"class_type": "ImageFromBatch", "inputs": {"image": imgs, "batch_index": n - 1, "length": 1}}
+    out = _ltx_v2v(api, imgs, n, prompt, denoise, seed, guides=[(["f0", 0], 0), (["f1", 0], n - 1)])
+    _save(api, out, ["fr", 1], "Videos/_work/retake")
+    return api, n
+
+
+def face_api(path, start, dur, prompt, denoise, seed, size):
+    """Tracks the face, re-draws the face crop with LTX-2.5 at low denoise, stitches it back."""
+    api = {}
+    n = _ltx_frames(dur)
+    imgs = _frames(api, path, start, n, size)
+    api["tr"] = {"class_type": "H3FaceTrackCrop", "inputs": {
+        "images": imgs, "detector": FACE_DET, "confidence": 0.35, "crop_factor": 3.0, "canvas_width": 768, "canvas_height": 768,
+        "canvas_mode": "auto_capped_768", "smooth_window": 21, "size_smooth_window": 51, "smooth_method": "gaussian", "size_mode": "per_frame",
+        "select": "largest_face", "fallback_detector": "none", "cut_detection": "none", "absent_shots": "off"}}
+    out = _ltx_v2v(api, ["tr", 0], n, prompt, denoise, seed)
+    api["st"] = {"class_type": "H3FaceStitch", "inputs": {"base_images": imgs, "refined_crops": out, "transform": ["tr", 1],
                                                            "paste_region": "face_only", "mask_dilation": 24, "feather": 24, "colour_match": 1.0,
                                                            "blend": 1.0, "undetected_frames": "fade_out", "feather_scales_with_crop": False}}
     _save(api, ["st", 0], ["fr", 1], "Videos/_work/face")
-    return api
+    return api, n
 
 
-def extend_api(path, prompt, seconds, ref, seed, w, h, src_dur, steps=6):
+def extend_api(path, prompt, seconds, ref, seed, w, h, src_dur, steps=4):
     api = {}
     _h3_loaders(api, H3_REF2VA, H3_REF2VA_TURBO)
     length = EXT_LENGTHS.get(int(seconds), 175)
@@ -296,27 +328,6 @@ def ltx_keyframes_api(keys, prompt, negative, W, H, seconds, seed):
     return api
 
 
-def h3_keyframes_api(keys, prompt, W, H, seconds, seed, steps=8):
-    length = 5 + max(1, int(round((seconds * 24 - 5) / 17.0))) * 17
-    api = {}
-    _h3_loaders(api, H3_FL2VA, H3_FL2VA_TURBO)
-    kf = {"clip": ["te", 0], "vae": ["vv", 0], "prompt": prompt, "width": W, "height": H, "length": length,
-          "positions": ", ".join(str(min(length - 1, int(round(t * 24)))) if t > 0 else "0" for _i, t in keys)}
-    for k, (img, _t) in enumerate(keys[:6], start=1):
-        api[f"im{k}"] = {"class_type": "LoadImage", "inputs": {"image": img}}
-        kf[f"image_{k}"] = [f"im{k}", 0]
-    api["kf"] = {"class_type": "H3Keyframes", "inputs": kf}
-    api["g"] = {"class_type": "BasicGuider", "inputs": {"model": ["lo", 0], "conditioning": ["kf", 0]}}
-    api["ks"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}}
-    api["sc"] = {"class_type": "BasicScheduler", "inputs": {"model": ["lo", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}}
-    api["nz"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}}
-    api["sa"] = {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["nz", 0], "guider": ["g", 0], "sampler": ["ks", 0], "sigmas": ["sc", 0], "latent_image": ["kf", 1]}}
-    api["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sa", 0], "vae": ["vv", 0]}}
-    api["dau"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["sa", 0], "vae": ["va", 0]}}
-    _save(api, ["dec", 0], ["dau", 0], "Videos/Keyframes/H3 keyframes")
-    return api
-
-
 # ---------------------------------------------------------------- running
 async def _queue(api, label):
     payload = {"prompt": api, "client_id": "studio-videotools", "extra_data": {"manny_label": label}}
@@ -351,7 +362,7 @@ def _result(dest):
 
 
 async def _free_memory():
-    """H3 + its 32B text encoder need most of this PC's RAM: unload everything else first."""
+    """Big video models need most of this PC's memory: unload everything else first."""
     try:
         async with ClientSession() as s:
             async with s.post(f"http://127.0.0.1:{H['_port']()}/free", json={"unload_models": True, "free_memory": True}) as r:
@@ -386,7 +397,7 @@ def setup(ns):
 
     @routes.post("/manny/api/video/fix")
     async def vfix(request):
-        """{filename, subfolder, start, end, mode: redo|picture|sound|face, prompt, ref, denoise, seed}"""
+        """{filename, subfolder, start, end, mode: picture|face, prompt, denoise, seed  (LTX-2.5; the sound is always kept)}"""
         b = await request.json()
         src = _src(b)
         p = await asyncio.to_thread(probe, src)
@@ -394,37 +405,32 @@ def setup(ns):
         end = min(p["duration"], float(b.get("end", start + 2)))
         if end - start < 0.2:
             raise web.HTTPBadRequest(text="Mark at least a fraction of a second")
-        mode = b.get("mode") or "redo"
+        mode = "face" if b.get("mode") == "face" else "picture"
         seed = int(b.get("seed") or int(time.time()) % 2 ** 31)
         prompt = (b.get("prompt") or "").strip()
         job = ns["_new_job"](False, kind="videofix")
 
         async def run():
+            size = (p["width"], p["height"])
             if mode == "face":
                 pad = 0.25
                 a, z = max(0.0, start - pad), min(p["duration"], end + pad)
-                api = face_api(src, a, z - a, prompt or "a person, natural detailed face, consistent identity",
-                               b.get("ref") or None, float(b.get("denoise") or 0.4), seed)
+                api, n = face_api(src, a, z - a, prompt or "a person, natural detailed face, consistent identity",
+                                  float(b.get("denoise") or 0.45), seed, size)
                 out = await _render(job, api, "Fix a face", "Fixing the face")
                 job["stage"] = "Putting it back in the clip"
-                q = await asyncio.to_thread(probe, out)
                 dest = _dest("Fixed", src, "face fix")
-                await asyncio.to_thread(splice, src, out, a, 0.0, min(q["duration"], z - a), dest)
+                await asyncio.to_thread(splice, src, out, a, 0.0, min(n / 24.0, z - a), dest)
             else:
-                ctx = 2.0                       # frozen context either side, so the fix matches what's around it
+                ctx = 1.0                       # a second either side is re-drawn too, so the fix blends into what's around it
                 c0 = max(0.0, start - ctx)
                 c1 = min(p["duration"], end + ctx)
-                api = retake_api(src, start - c0, end - c0, prompt, mode, seed, has_audio=p["audio"],
-                                 clip_from=c0, clip_len=c1 - c0, size=(p["width"], p["height"]))
-                out = await _render(job, api, "Fix a part", "Re-rendering the marked part")
+                api, n = retake_api(src, c0, c1 - c0, prompt, float(b.get("denoise") or 0.7), seed, size)
+                out = await _render(job, api, "Fix a part", "Re-drawing the marked part")
                 job["stage"] = "Putting it back in the clip"
                 dest = _dest("Fixed", src, "fix")
-                pad = 0.12                      # include H3's latent-slot rounding on both sides
-                a, z = max(0.0, start - pad), min(p["duration"], end + pad)
-                if mode == "picture" or not p["audio"]:
-                    await asyncio.to_thread(splice, src, out, a, a - c0, z - c0, dest)
-                else:
-                    await asyncio.to_thread(splice_with_new_sound, src, out, a, a - c0, z - c0, dest)
+                # the whole re-drawn stretch goes in: its first and last frames are the original's, so the joins don't jump
+                await asyncio.to_thread(splice, src, out, c0, 0.0, min(n / 24.0, p["duration"] - c0), dest)
             try:
                 os.remove(out)
             except Exception:
@@ -457,7 +463,7 @@ def setup(ns):
 
     @routes.post("/manny/api/video/keyframes")
     async def vkeys(request):
-        """{engine: ltx|h3, keys: [{image: input value, at: seconds}], prompt, negative, seconds, width, height, seed}"""
+        """{keys: [{image: input value, at: seconds}], prompt, negative, seconds, width, height, seed}"""
         b = await request.json()
         keys = sorted([(k["image"], float(k.get("at") or 0)) for k in (b.get("keys") or []) if k.get("image")], key=lambda x: x[1])
         if len(keys) < 2:
@@ -470,15 +476,10 @@ def setup(ns):
             raise web.HTTPBadRequest(text="Describe the shot")
         seed = int(b.get("seed") or int(time.time()) % 2 ** 31)
         W, Hh = int(b.get("width") or 1280), int(b.get("height") or 704)
-        engine = "h3" if b.get("engine") == "h3" else "ltx"
         job = ns["_new_job"](False, kind="keyframes")
 
         async def run():
-            if engine == "h3":
-                w, h = h3_size(W, Hh, 0.45)
-                api = h3_keyframes_api(keys[:6], prompt, w, h, seconds, seed)
-            else:
-                api = ltx_keyframes_api(keys[:8], prompt, b.get("negative"), W // 32 * 32, Hh // 32 * 32, seconds, seed)
+            api = ltx_keyframes_api(keys[:8], prompt, b.get("negative"), W // 32 * 32, Hh // 32 * 32, seconds, seed)
             out = await _render(job, api, "Keyframe shot", "Rendering the shot")
             return _result(out)
         asyncio.ensure_future(ns["_ai_job"](job, run))

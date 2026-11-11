@@ -1358,18 +1358,16 @@ function videoFixDialog(cur, prompt, at) {
   if (cur.private) return toast("Video fixes don't work on Incognito videos yet", true);
   const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
   const url = itemUrl(cur);
-  const st = { start: Math.max(0, (at || 0) - 1), end: (at || 0) + 1, mode: "picture", ref: "", denoise: 0.4 };
+  const st = { start: Math.max(0, (at || 0) - 1), end: (at || 0) + 1, mode: "picture", den: { picture: 0.7, face: 0.45 } };
   const d = h(`<div class="dialog vfix"><div class="row" style="justify-content:space-between"><h2>🩹 Fix a part of this video</h2><button class="icon" data-x>✕</button></div>
     <video src="${url}" controls playsinline preload="auto"></video>
     <div class="vrange"><div class="vbar"><div class="vsel"></div><div class="vhead"></div></div>
       <div class="row vmarks"><button class="btn sm" data-a>⇤ Start here</button><span class="vtimes"></span><button class="btn sm" data-b>End here ⇥</button><button class="ghost sm" data-play>▶ Play the marked part</button></div></div>
     <div><label class="lbl">What to fix</label><div class="chips" id="vmode">
-      <div class="chip" data-v="picture" title="Re-draw the picture in the marked seconds; the sound stays as it is">Picture only (keep the sound)</div>
-      <div class="chip" data-v="redo" title="Re-do picture and sound in the marked seconds">Picture + sound</div>
+      <div class="chip" data-v="picture" title="Re-draw the picture in the marked seconds; the sound stays as it is">Re-draw the picture</div>
       <div class="chip" data-v="face" title="Find the face and re-draw only it, frame by frame, with a light touch">Fix the face</div></div></div>
     <div><label class="lbl" id="vplbl">What should happen in the marked part</label><textarea id="vprompt" rows="3"></textarea></div>
-    <div class="row vref"><div class="ref" id="vrefbox" title="A clear picture of the person's face (optional, helps keep them the same)"><span class="plus">+</span><span class="rl">Face picture<br><small>optional</small></span><input type="file" accept="image/*" hidden></div>
-      <div class="vden hidden" style="flex:1"><label class="lbl">How much to change the face <b id="vdenv"></b></label><input type="range" min="0.2" max="0.7" step="0.05" id="vden"></div></div>
+    <div class="vden"><label class="lbl"><span id="vdenl"></span> <b id="vdenv"></b></label><input type="range" step="0.05" id="vden"></div>
     <p class="hint" id="vhint" style="margin:0"></p>
     <div class="foot"><button class="ghost" data-x>Cancel</button><button class="btn primary" data-go>Fix it</button></div></div>`);
   m.append(d);
@@ -1383,12 +1381,13 @@ function videoFixDialog(cur, prompt, at) {
     $(".vtimes", d).textContent = `${fmtT(st.start)} → ${fmtT(st.end)}  (${(st.end - st.start).toFixed(1)} s)`;
     const face = st.mode === "face";
     $$("#vmode .chip", d).forEach(c => c.classList.toggle("on", c.dataset.v === st.mode));
-    $(".vden", d).classList.toggle("hidden", !face);
-    $("#vden", d).value = st.denoise; $("#vdenv", d).textContent = st.denoise.toFixed(2);
+    const r = $("#vden", d); r.min = face ? 0.25 : 0.4; r.max = face ? 0.7 : 0.9; r.value = st.den[st.mode];
+    $("#vdenl", d).textContent = face ? "How much to change the face" : "How much to change the picture";
+    $("#vdenv", d).textContent = st.den[st.mode].toFixed(2);
     $("#vplbl", d).textContent = face ? "Describe the person (helps the face come out right)" : "What should happen in the marked part";
     $("#vhint", d).textContent = face
-      ? "Tracks the biggest face in the marked part and re-draws only the face, then blends it back. Lower = closer to the original, higher = more re-drawn. ~1–3 min per second of video on this PC."
-      : "Only the marked seconds are re-made; 2 s on each side are used so it blends in, and everything else stays exactly as it was. ~2–4 min per second on this PC.";
+      ? "LTX-2.5 tracks the biggest face in the marked part, re-draws only the face and blends it back. The sound stays. Lower = closer to the original, higher = more re-drawn."
+      : "LTX-2.5 re-draws the marked seconds (plus 1 s each side so it blends in) from the video itself. The sound and everything else stay as they were. Lower = closer to the original.";
   };
   v.onloadedmetadata = () => { if (st.end > v.duration) { st.end = v.duration; st.start = Math.max(0, st.end - 2); } v.currentTime = st.start; draw(); };
   v.ontimeupdate = () => { head.style.left = (v.currentTime / (v.duration || 1) * 100) + "%"; if (v.dataset.loop && v.currentTime >= st.end) { v.pause(); delete v.dataset.loop; } };
@@ -1397,13 +1396,10 @@ function videoFixDialog(cur, prompt, at) {
   $("[data-b]", d).onclick = () => { st.end = v.currentTime; if (st.start >= st.end - 0.3) st.start = Math.max(0, st.end - 2); draw(); };
   $("[data-play]", d).onclick = () => { v.currentTime = st.start; v.dataset.loop = "1"; v.play(); };
   $$("#vmode .chip", d).forEach(c => c.onclick = () => { st.mode = c.dataset.v; draw(); });
-  $("#vden", d).oninput = e => { st.denoise = +e.target.value; $("#vdenv", d).textContent = st.denoise.toFixed(2); };
-  const rb = $("#vrefbox", d), rf = $("input", rb);
-  rb.onclick = () => rf.click();
-  rf.onchange = async () => { if (!rf.files[0]) return; try { st.ref = await upload(rf.files[0]); rb.classList.add("on"); rb.innerHTML = `<img src="${inputUrl(st.ref)}"><span class="rl">Face picture</span>`; } catch (e) { toast(e.message, true); } };
+  $("#vden", d).oninput = e => { st.den[st.mode] = +e.target.value; $("#vdenv", d).textContent = st.den[st.mode].toFixed(2); };
   $("[data-go]", d).onclick = async () => {
     const body = { filename: cur.filename, subfolder: cur.subfolder || "", start: +st.start.toFixed(2), end: +st.end.toFixed(2), mode: st.mode,
-      prompt: $("#vprompt", d).value.trim(), ref: st.ref, denoise: st.denoise };
+      prompt: $("#vprompt", d).value.trim(), denoise: st.den[st.mode] };
     if (st.mode !== "face" && !body.prompt) return toast("Say what should happen in the marked part", true);
     close();
     try { await videoJob("/manny/api/video/fix", body, st.mode === "face" ? "Face fix" : "Fix"); } catch (e) { toast(e.message.slice(0, 260), true); }
@@ -1437,14 +1433,13 @@ function videoExtendDialog(cur, prompt) {
   };
 }
 
-/* ---- keyframe shot: pictures pinned at chosen seconds, LTX-2.5 (two passes) or MiniMax H3 */
+/* ---- keyframe shot: pictures pinned at chosen seconds, LTX-2.5 (two passes) */
 function keyframeDialog() {
   const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
   const st = store.get("kf", { engine: "ltx", seconds: 8, aspect: "16:9", keys: [], prompt: "" });
   const AS = { "16:9": [1280, 704], "9:16": [704, 1280], "1:1": [960, 960], "21:9": [1344, 576] };
   const d = h(`<div class="dialog kfd"><div class="row" style="justify-content:space-between"><h2>✦ Keyframe shot</h2><button class="icon" data-x>✕</button></div>
     <p class="hint" style="margin:0">Give 2 or more pictures and when each should appear. The model moves between them in one continuous shot. Pictures that could plausibly be the same scene give a smooth move; very different ones give a cut.</p>
-    <div><label class="lbl">Engine</label><div class="chips" id="kfe"><div class="chip" data-v="ltx">LTX-2.5 (up to 8 pictures, sharp 2-pass)</div><div class="chip" data-v="h3">MiniMax H3 (up to 6, with sound)</div></div></div>
     <div><label class="lbl">Pictures and when they appear</label><div class="kfkeys"></div><button class="ghost" data-add>＋ Add a picture</button><input type="file" accept="image/*" multiple hidden></div>
     <div><label class="lbl">The shot</label><textarea id="kfp" rows="4" placeholder="Photoreal music video, a woman walks down an endless mirrored corridor, slow dolly forward…"></textarea></div>
     <div class="row" style="gap:18px;flex-wrap:wrap"><div><label class="lbl">Length</label><div class="chips" id="kfs">${[5, 8, 10, 12, 15].map(x => `<div class="chip" data-v="${x}">${x} s</div>`).join("")}</div></div>
@@ -1464,7 +1459,7 @@ function keyframeDialog() {
       $("button", el).onclick = () => { st.keys.splice(n, 1); draw(); };
       box.append(el);
     });
-    const max = st.engine === "h3" ? 6 : 8;
+    const max = 8;
     $("[data-add]", d).classList.toggle("hidden", st.keys.length >= max);
   };
   const fi = $("input[type=file]", d);
@@ -1476,12 +1471,12 @@ function keyframeDialog() {
     }
     fi.value = ""; draw();
   };
-  chips("kfe", "engine"); chips("kfs", "seconds", true); chips("kfa", "aspect"); draw();
+  chips("kfs", "seconds", true); chips("kfa", "aspect"); draw();
   $("[data-go]", d).onclick = async () => {
     if (st.keys.length < 2) return toast("Add at least two pictures", true);
     if (!(st.prompt || "").trim()) return toast("Describe the shot", true);
     const [w, hh] = AS[st.aspect] || AS["16:9"];
-    const body = { engine: st.engine, keys: st.keys.map((k, n) => ({ image: k.image, at: n === 0 ? 0 : k.at })), prompt: st.prompt.trim(), seconds: st.seconds, width: w, height: hh };
+    const body = { keys: st.keys.map((k, n) => ({ image: k.image, at: n === 0 ? 0 : k.at })), prompt: st.prompt.trim(), seconds: st.seconds, width: w, height: hh };
     close();
     try { await videoJob("/manny/api/video/keyframes", body, "Keyframe shot"); } catch (e) { toast(e.message.slice(0, 260), true); }
   };
@@ -3118,7 +3113,7 @@ function setIncog(on, quiet) {
   document.body.classList.toggle("incog", S.incog);
   $$(".incog-btn").forEach(b => b.classList.toggle("on", S.incog));
   S.gallery = []; S.compare = null;
-  if (!quiet) { loadChars().then(() => route()); }
+  if (!quiet) { loadChars().then(() => route()); if (S.incog) setTimeout(checkUnfinished, 800); }
 }
 function migrateLocalValues() {
   // Studio's earlier settings belonged to what is now the private space.
@@ -3159,6 +3154,42 @@ const bump = () => { clearTimeout(idleT); idleT = setTimeout(async () => { if (S
 ["click", "keydown", "touchstart", "scroll"].forEach(ev => document.addEventListener(ev, bump, { passive: true })); bump();
 
 /* ------------------------------------------------------------ boot */
+
+/* ---- unfinished queue from before a shutdown or restart */
+async function checkUnfinished() {
+  let r; try { r = await api("/manny/api/queue/unfinished"); } catch { return; }
+  const items = r.items || []; if (!items.length || $("#modal .dialog")) return;
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const sel = new Set(items.map(i => i.prompt_id));
+  const d = h(`<div class="dialog"><div class="row" style="justify-content:space-between"><h2>⏯ Continue the unfinished queue?</h2><button class="icon" data-x>✕</button></div>
+    <p class="hint" style="margin:0">ComfyUI stopped with ${items.length} render${items.length > 1 ? "s" : ""} not done. Studio kept a copy. Untick any you don't want, then continue.</p>
+    <div class="uq">${items.map(i => `<label class="row" style="gap:8px;align-items:flex-start;margin:6px 0"><input type="checkbox" checked data-id="${esc(i.prompt_id)}">
+      <span><b>${esc(i.label || "Render")}</b>${i.private ? ' <small>🕶 Incognito</small>' : ""}${i.running ? ' <small>— was rendering when it stopped</small>' : ""}
+      ${i.note ? `<br><small class="hint">${esc(i.note)}</small>` : ""}</span></label>`).join("")}</div>
+    <p class="hint" style="margin:0">If the PC froze or crashed during the one marked "was rendering", untick it.</p>
+    <div class="foot"><button class="ghost" data-later>Ask me later</button><button class="ghost" data-drop>Discard all</button><button class="btn primary" data-go>Continue</button></div></div>`);
+  m.append(d);
+  const close = () => { m.classList.add("hidden"); m.innerHTML = ""; };
+  $$("[data-x],[data-later]", d).forEach(x => x.onclick = close);
+  $$("input[data-id]", d).forEach(c => c.onchange = () => c.checked ? sel.add(c.dataset.id) : sel.delete(c.dataset.id));
+  $("[data-drop]", d).onclick = async () => {
+    if (!confirm("Forget all " + items.length + " unfinished renders?")) return;
+    close(); try { await api("/manny/api/queue/unfinished/discard", { method: "POST", body: JSON.stringify({}) }); toast("Discarded"); } catch (e) { toast(e.message, true); }
+  };
+  $("[data-go]", d).onclick = async () => {
+    const go = [...sel], drop = items.map(i => i.prompt_id).filter(id => !sel.has(id));
+    close();
+    try {
+      if (drop.length) await api("/manny/api/queue/unfinished/discard", { method: "POST", body: JSON.stringify({ ids: drop }) });
+      if (!go.length) return toast("Nothing continued");
+      const r2 = await api("/manny/api/queue/unfinished/resume", { method: "POST", body: JSON.stringify({ ids: go }) });
+      toast(`Queued ${r2.sent} render${r2.sent === 1 ? "" : "s"} again` + (r2.failed?.length ? ` — ${r2.failed.length} couldn't be sent` : ""), !!r2.failed?.length);
+      if (r2.failed?.length) console.warn("unfinished resume", r2.failed);
+      pollQueue();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
 (async function boot() {
   try { S.apps = await api("/manny/api/apps"); } catch (e) { toast("Couldn't load apps: " + e.message, true); }
   S.apps = S.apps.filter(a => !a.error);
@@ -3172,5 +3203,6 @@ const bump = () => { clearTimeout(idleT); idleT = setTimeout(async () => { if (S
   setInterval(serverProgress, 3000);
   loadSchedule(); setInterval(loadSchedule, 30000);
   route();
+  setTimeout(checkUnfinished, 1500);
 })();
 })();
