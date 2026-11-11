@@ -25,9 +25,9 @@ WORKERS = [{"label": "mac-vega-a", "host": "127.0.0.1", "port": 8188}, {"label":
 APP = "Studio - Remove background.app.json"
 MEMBERS = ["manny_run", "finish", "sound:music", "sound:voice", "schedule", "mcp", "keyframes", "paint3d", "mcp:keyframes",
            "video:fix-part", "video:fix-face", "video:extend", "video:keyframes", "mcp:fix-video", "mcp:extend-video", "mcp:keyframe-shot"]
-VIDEO = [m for m in MEMBERS if "video" in m or m == "mcp:keyframe-shot"]
 if os.environ.get("MEMBERS"):      # LIVE=1 MEMBERS=keyframes,paint3d: only those paths
     MEMBERS = [m for m in MEMBERS if m in os.environ["MEMBERS"].split(",")]
+VIDEO = [m for m in MEMBERS if "video" in m or m == "mcp:keyframe-shot"]
 
 # the mutations used by --mutants: (member, file, original, replacement) — each removes that path's target.
 # Scheduled renders and MCP go through /manny/api/run, so breaking manny_run must break them too.
