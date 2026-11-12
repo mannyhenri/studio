@@ -7,7 +7,9 @@ Only this PC and the hosts in workers.json (every address they resolve to) may c
 Files are found only through folder_paths, so nothing outside the model folders is reachable, and nothing in
 the Incognito space is ever served even if a model path points there."""
 import asyncio
+import hashlib
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -104,6 +106,37 @@ def _sha(path):
         return m.group(1).lower() if m else None
     except OSError:
         return None
+
+
+def _hash_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def sha256_of(path):
+    """The file's sha256, so a GPU machine can check every byte it was sent: a <file>.sha256 sidecar if there is
+    one, else computed once and remembered in Studio's data folder (by path, size and mtime), never next to the model."""
+    sha = _sha(path)
+    if sha:
+        return sha
+    st = os.stat(path)
+    key = f"{os.path.realpath(path)}|{st.st_size}|{int(st.st_mtime)}"
+    cache = os.path.join(H["_data_dir"](), "model_sha256.json")
+    try:
+        with open(cache, encoding="utf-8") as f:
+            known = json.load(f)
+    except Exception:
+        known = {}
+    if key not in known:
+        known[key] = _hash_file(path)
+        tmp = cache + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(known, f)
+        os.replace(tmp, cache)
+    return known[key]
 
 
 def _index(folder):

@@ -112,6 +112,28 @@ async def main():
     await studio._put_back({"prompt_id": "never-moved", "worker": "mac-vega-a", "status": "failed", "error": "x"})
     check(len(posted) == n, "a job that wasn't moved here is never queued here")
 
+    # --- G1: this PC restarts while a moved job is waiting on a card in a state resume() can't follow on
+    # (still downloading/being sent a model, or its card was removed): the original must still come back
+    remote.save_workers(studio._data_dir(), [{"label": "mac-vega-a", "host": "127.0.0.1", "port": 1}])
+    for private in (False, True):
+        for status, worker in (("fetching", "mac-vega-a"), ("running", "gone-card"), ("queued", "gone-card")):
+            k += 1
+            pid = f"restart-{k}"
+            orig = {"1": {"class_type": "KSampler", "inputs": {}}, "n": k}
+            studio._moved_put(pid, orig, {"client_id": "browser-9", "manny_app": "Manny Studio - Image.app.json"}, private)
+            json.dump([{"prompt_id": pid, "worker": worker, "status": status, "queued_at": 0, "inputs": [], "outputs": [], "private": private}],
+                      open(remote.state_file(), "w"))
+            remote.JOBS.pop(pid, None)
+            n = len(posted)
+            remote.resume(studio._dirs(), studio.INCOMING, studio._moved_done)
+            for _ in range(50):
+                if len(posted) > n:
+                    break
+                await asyncio.sleep(0.05)
+            back = posted[n:]
+            check(len(back) == 1 and back[0].get("prompt") == orig and back[0].get("front") is True and pid not in studio._moved_load(private),
+                  f"restart, {'Incognito' if private else 'normal'} moved job {status} on {worker}: back at the front of this PC's queue ({len(back)} post)")
+
     # --- V20: three jobs needing one file at once -> one push
     calls = []
     real = remote._push_file
