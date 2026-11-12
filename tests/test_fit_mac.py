@@ -283,19 +283,47 @@ async def main():
     check(wire <= {"present", "downloading", "failed", "unavailable"} and {"present", "failed", "unavailable"} <= handled,
           f"C3 statuses on the wire {sorted(wire)} are all handled by Studio ({sorted(handled)})")
     mac_src = open(os.path.join(MAC, "comfy_nodes", "mac_fetch.py"), encoding="utf-8").read()
-    # EVERY status literal the Mac's code can put in a reply (not just those this run happened to see), after answer()'s
-    # mapping: the terminal ones are acted on, the rest are waits, each with its own words on Studio's queue line
-    in_src = {x for pair in re.findall(r'"status":\s*"(\w+)"(?:\s+if\b[^,]*?\belse\s+"(\w+)")?', mac_src) for x in pair if x}
-    on_wire = {sent.get(x, x) for x in in_src}
-    words = {x: (remote._show_fetch({"label": "mac-vega-b"}, j := {}, [{"value": "m.safetensors", "status": x}]), j["step"])[1]
-             for x in on_wire - {"present", "failed", "unavailable"}}
-    check({"present", "failed", "unavailable"} <= handled and len(set(words.values())) == len(words) and "receiving" in on_wire,
-          f"C3 every status in mac_fetch.py {sorted(in_src)} -> on the wire {sorted(on_wire)}: terminal ones handled, each wait "
-          f"worded apart on the queue line {words}")
-    reads = set(re.findall(r'(?:x|f|e)\.get\("(\w+)"\)', src[src.index("def _fetch("):src.index("async def _fetch_then_send")]))
-    mac_keys = set(re.findall(r'"(\w+)":', mac_src)) | {"value", "status"}
-    check(reads <= mac_keys, f"C3 the keys Studio reads from a reply {sorted(reads)} are keys the Mac sends (missing {sorted(reads - mac_keys)})")
 
+    def c3(mac_src, src):
+        """What does not fit between what mac_fetch.py can put in a /mac/fetch reply and what remote.py does with it,
+        all derived from the two sources (no hand-kept list): [] when it fits."""
+        def body(name):
+            i = src.index(f"def {name}(")
+            j = min((k for k in (src.find("\ndef ", i + 1), src.find("\nasync def ", i + 1)) if k > 0), default=len(src))
+            return src[i:j]
+        # every status the Mac can write: dict literals, an if/else literal, and assignments (p["status"] = "x")
+        in_src = {x for pair in re.findall(r'"status":\s*"(\w+)"(?:\s+if\b[^,]*?\belse\s+"(\w+)")?', mac_src) for x in pair if x}
+        in_src |= set(re.findall(r'\["status"\]\s*=\s*"(\w+)"', mac_src))
+        on_wire = {sent.get(x, x) for x in in_src}
+        loop = body("_fetch_then_send")
+        acted = set(re.findall(r'status"\)\s*==\s*"(\w+)"', loop))        # the ones the fetch loop acts on
+        out = [f"Studio acts on {x!r}, which the Mac never sends" for x in sorted(acted - on_wire)]
+        if "present" not in acted:
+            out.append("the fetch loop never acts on 'present': a job could never leave it")
+        words = {}
+        for x in sorted(on_wire - acted):                                      # the rest are waits: each its own words
+            j = {}
+            remote._show_fetch({"label": "mac-vega-b"}, j, [{"value": "m.safetensors", "status": x}])
+            words.setdefault(j["step"], []).append(x)
+        out += [f"waits {xs} read the same on the queue line ({w!r})" for w, xs in words.items() if len(xs) > 1]
+        # every key Studio reads from an entry, in the four functions that handle them, is one the Mac writes
+        # (_fetch only reads the gate's refusals and returns the reply whole; f / x are reply entries, w the worker)
+        reads = set().union(*(re.findall(r'\b[fx]\.get\("(\w+)"', body(n)) + re.findall(r'\b[fx]\["(\w+)"\]', body(n))
+                              for n in ("_pushable", "_show_fetch", "_fetch_then_send")))
+        writes = set(re.findall(r'"(\w+)":', mac_src)) | set(re.findall(r'\[\s*"(\w+)"\s*\]\s*=', mac_src))
+        out += [f"Studio reads {k!r}, which the Mac never writes" for k in sorted(reads - writes)]
+        return out, sorted(in_src), sorted(on_wire), sorted(acted), sorted(reads)
+
+    bad, in_src, on_wire, acted, reads = c3(mac_src, src)
+    check(not bad and "receiving" in on_wire,
+          f"C3 every status mac_fetch.py can write {in_src} -> on the wire {on_wire}: Studio acts on {acted}, waits on the "
+          f"rest, each worded apart; keys read {reads} all written: {bad or 'fits'}")
+    # and C3 can't pass on a rename: a status added in each form the Mac's code uses, or a key renamed, is caught
+    mutants = {"a new status by assignment": mac_src + '\n    p["status"] = "queuedx"\n',
+               "a new status in a dict": mac_src + '\n    x = {"status": "parkedx"}\n',
+               "a key Studio reads renamed": mac_src.replace('"done"', '"gotx"').replace("done=", "gotx=")}
+    caught = {k: bool(c3(m, src)[0]) for k, m in mutants.items()}
+    check(all(caught.values()), f"C3 catches each mutant of mac_fetch.py: {caught}")
     # C11: the pack a missing node comes from: Studio's name_packs (from the PC's python_module) == comfy-mac's WAITING
     tree = ast.parse(open(os.path.join(MAC, "test_videotools_mac.py"), encoding="utf-8").read())
     waiting = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "WAITING")

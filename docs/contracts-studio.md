@@ -5,9 +5,9 @@ checked from both repos' source by comfy-mac's `test_contracts.py`. This page is
 
 | Contract | Studio side | Studio proof |
 |---|---|---|
-| `/mac/fetch` statuses + keys | `remote.py` `_fetch`, `_pushable`, `_show_fetch`, `_fetch_then_send` | `test_fit_mac` C3 (every status literal in mac_fetch.py), `test_entrypoints` FETCH=1 (11 scenarios incl. push-shared 423) |
-| `HEAD/PUT /mac/models` | `remote.py` `_push_file` (201 done, 423 wait, 202/416 re-HEAD, stall → fail) | `test_fit_mac` R1, `test_entrypoints` push-*, live `test_push_live`, `test_ph3_live` |
-| `/mac/info` | `remote.py` `caps`, `pick`; `dispatch.py` (queue_remaining); `web/app.js` `cardMem`, te_for | `test_pair`, `test_pair_live` |
+| `/mac/fetch` statuses + keys | `remote.py` `_fetch`, `_pushable`, `_show_fetch`, `_fetch_then_send` | `test_fit_mac` C3 (every status mac_fetch.py can write, in dict, if/else or assignment form; the statuses Studio acts on and the keys it reads derived from remote.py; 3 mutants caught), `test_entrypoints` FETCH=1 (11 scenarios incl. push-shared 423) |
+| `HEAD/PUT /mac/models` | `remote.py` `_push_file` (201 done, 423 wait, 202/416 re-HEAD; fails after `PUSH_STALL` = 600 s without new bytes. The Mac ends an idle PUT after 120 s and keeps its `.part`; Studio then re-HEADs and resumes) | `test_fit_mac` R1, `test_entrypoints` push-*, live `test_push_live`, `test_ph3_live` |
+| `/mac/info` | `remote.py` `caps`, `pick`; `dispatch.py` (queue_remaining); `web/app.js` `cardMem` (vram_usable / vram_in_use / vram_cached, device.vram_total), te_for, device.name | `test_pair`, `test_pair_live` |
 | Model share | `modelshare.py` `_send_file`, `_allowed_ips`, 403 | `test_model_share`, `test_share_big`, `test_share_resolve`, `test_fit_mac` C5/C12 |
 | Workers | `remote.py` `load_workers` | comfy-mac `test_contracts` 7 |
 | Gate / respell | `remote.py` `gate`, `_spelled`, `respell` | `test_mac_choices` (261 rows) |
@@ -35,5 +35,5 @@ test_share_resolve: 9 PASS, 0 FAIL -> all passed
 test_entrypoints FETCH=1 LIVE=0: 1093 PASS, 0 FAIL -> all passed
 ```
 Not run here: the live tests that render on the cards (`test_remote`, `test_run_route`, `test_revise`, `test_push_live`,
-`test_ph3_live`, `test_fetch_live`) while comfy-mac's render matrix holds them. Not provable live yet: the PC side of the
+`test_ph3_live`, `test_fetch_live`) while comfy-mac's render matrix holds them. Known limit: a Mac file with the same name but different content (409 "already here with another size") is taken as present and never compared by sha. Not provable live yet: the PC side of the
 model share and allow-list, until the PC runs studio ≥ 68b02d8.
