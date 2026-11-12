@@ -30,7 +30,7 @@ from aiohttp import web, ClientSession
 
 H = {}
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
-SIZES = {"draft": (1024, 448), "final": (1344, 576)}       # ~2.39:1, /32
+SIZES = {"draft": (1280, 512), "final": (1536, 640)}      # ~2.4:1; /128, so the half-size depth guide of each LTX pass stays /32
 MAX_SECONDS = 15.0
 
 
@@ -184,9 +184,12 @@ def import_folder(folder, name=None, outfit_refs=None):
         sid_key = seg.replace(" ", "_")
         t_in, t_out = _tc(r.get("In")), _tc(r.get("Out"))
         dur = float(r.get("Dur (s)") or (t_out - t_in))
-        if m.group(3):           # a final-chorus face: 5 s each, played one after another inside the final chorus
+        if m.group(3):           # a final-chorus face: the chorus window shared equally between the faces, one after another
             k = int(m.group(3)[2:]) - 1
-            t_in, dur = t_in + 5.0 * k, 5.0
+            nfc = sum(1 for x in rows if re.search(r"FC\d", x.get("Segment") or "")) or 1
+            win = _tc(r.get("Out")) - _tc(r.get("In"))
+            dur = win / nfc
+            t_in = t_in + dur * k
         t_out = t_in + dur
         segdir = _find(seg_root, (rf"^SEG{m.group(1)}_" if not m.group(3) else r"FinalChorus_PerFace"), dirs=True) if seg_root else None
         start = None
@@ -201,12 +204,12 @@ def import_folder(folder, name=None, outfit_refs=None):
         if not oref:
             missing.add(outfit)
         # the song for exactly this stretch (and the lead vocal), cut once
-        mix = os.path.join(dest, f"{sid_key}_mix.wav")
+        mix = os.path.join(dest, f"{sid_key}_mix_{t_in:.2f}.wav")
         if not os.path.exists(mix):
             _cut_audio(song, t_in, dur, mix)
         voc = ""
         if vocal:
-            vp = os.path.join(dest, f"{sid_key}_vocal.wav")
+            vp = os.path.join(dest, f"{sid_key}_vocal_{t_in:.2f}.wav")
             if not os.path.exists(vp):
                 _cut_audio(vocal, t_in, dur, vp)
             voc = inp(vp)
@@ -233,20 +236,124 @@ def import_folder(folder, name=None, outfit_refs=None):
     return b, sorted(x for x in missing if x)
 
 
-def perform_api(image, audio, prompt, W, Hh, seconds, seed, prefix):
-    """LTX-2.5 two passes from a first frame, hearing `audio` (frozen) for lip-sync and timing."""
+UNION_LORA = "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"
+
+
+def perform_api(image, audio, prompt, W, Hh, seconds, seed, prefix, depth=None, depth_strength=0.9, audio_start=0.0,
+                depth_pass2=False):
+    """LTX-2.5 two passes from a first frame, hearing `audio` (frozen) for lip-sync and timing.
+    depth: a depth video of the shot rendered from the Blender camera (input file). With it the Union Control IC-LoRA
+    makes LTX follow the exact camera move, the set's geometry and her blocking; the first frame sets the look."""
     vt = H["_videotools"]
     api = vt.ltx_keyframes_api([(image, 0.0)], prompt, None, W, Hh, seconds, seed)
     n = int(round(seconds * 24 / 8.0)) * 8 + 1
     api["la"] = {"class_type": "LoadAudio", "inputs": {"audio": audio}}
-    api["at"] = {"class_type": "TrimAudioDuration", "inputs": {"audio": ["la", 0], "start_index": 0.0, "duration": round(n / 24.0, 3)}}
+    api["at"] = {"class_type": "TrimAudioDuration", "inputs": {"audio": ["la", 0], "start_index": float(audio_start), "duration": round(n / 24.0, 3)}}
     api["ae"] = {"class_type": "LTXVAudioVAEEncode", "inputs": {"audio": ["at", 0], "audio_vae": ["va", 0]}}
     api["ea"] = {"class_type": "LTXVFreezeLatent", "inputs": {"latent": ["ae", 0]}}
     api["mg"] = {"class_type": "LTXVModalityGuidance", "inputs": {"model": ["um", 0], "modality_scale": 3.0, "start_percent": 0.0, "end_percent": 1.0}}
     for g in ("gd1", "gd2"):
         api[g]["inputs"]["model"] = ["mg", 0]
+    if depth:
+        w1, h1 = api["el"]["inputs"]["width"], api["el"]["inputs"]["height"]
+        api["icl"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["um", 0], "lora_name": UNION_LORA, "strength_model": 1.0}}
+        api["mg"]["inputs"]["model"] = ["icl", 0]
+        api["icp"] = {"class_type": "GetICLoRAParameters", "inputs": {"iclora_model": ["icl", 0]}}
+        api["dv"] = {"class_type": "LoadVideo", "inputs": {"file": depth}}
+        api["dc"] = {"class_type": "GetVideoComponents", "inputs": {"video": ["dv", 0]}}
+        api["dn"] = {"class_type": "ImageFromBatch", "inputs": {"image": ["dc", 0], "batch_index": 0, "length": n}}
+        for k, (ww, hh) in (("1", (w1 // 2, h1 // 2)), ("2", (W // 2, Hh // 2))):     # the reference is half the size of its pass
+            api["ds" + k] = {"class_type": "ImageScale", "inputs": {"image": ["dn", 0], "upscale_method": "bilinear",
+                                                                    "width": max(32, ww // 32 * 32), "height": max(32, hh // 32 * 32), "crop": "center"}}
+        # pass 1: first frame, then the depth guide
+        api["ic1"] = {"class_type": "LTXVAddGuide", "inputs": {"positive": ["cond", 0], "negative": ["cond", 1], "vae": ["vv", 0],
+                                                               "latent": ["i1", 0], "image": ["ds1", 0], "frame_idx": 0,
+                                                               "strength": float(depth_strength), "iclora_parameters": ["icp", 0]}}
+        api["av1"]["inputs"]["video_latent"] = ["ic1", 2]
+        for nid in ("gd1", "crop1"):
+            api[nid]["inputs"]["positive"], api[nid]["inputs"]["negative"] = ["ic1", 0], ["ic1", 1]
+        # pass 2 (full size) only refines 3 steps; the depth guide there costs ~20 GB more RAM at full size, so it is off
+        # unless asked for: pass 1 already fixed the camera move and the set's geometry.
+    if depth and depth_pass2:
+        api["ic2"] = {"class_type": "LTXVAddGuide", "inputs": {"positive": ["crop1", 0], "negative": ["crop1", 1], "vae": ["vv", 0],
+                                                               "latent": ["i2", 0], "image": ["ds2", 0], "frame_idx": 0,
+                                                               "strength": float(depth_strength), "iclora_parameters": ["icp", 0]}}
+        api["av2"]["inputs"]["video_latent"] = ["ic2", 2]
+        for nid in ("gd2", "crop2"):
+            api[nid]["inputs"]["positive"], api[nid]["inputs"]["negative"] = ["ic2", 0], ["ic2", 1]
     api["sv"]["inputs"]["filename_prefix"] = prefix
     return api
+
+
+PH3 = {"unet": "p-h3-image_w4a8.safetensors", "te": "p-h3-image_text_encoder_w4a8.safetensors", "vae": "p-h3-image_vae_int8_convrot.safetensors",
+       "sigmas": "1.0, 0.984753, 0.967905, 0.951688, 0.925372, 0.881923, 0.810083, 0.528718, 0.0"}
+
+
+def ph3_frame_api(pictures, prompt, W, Hh, seed, prefix):
+    """P-H3 Image: edit <Picture 1> (the Blender camera frame) using the other pictures as references (sheets, plates)."""
+    api = {
+        "m": {"class_type": "UNETLoader", "inputs": {"unet_name": PH3["unet"], "weight_dtype": "default"}},
+        "ms": {"class_type": "MiniMaxH3SigmaShift", "inputs": {"model": ["m", 0], "shift_video": 1.0, "shift_audio": 1.0}},
+        "te": {"class_type": "CLIPLoader", "inputs": {"clip_name": PH3["te"], "type": "minimax", "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": PH3["vae"]}},
+    }
+    cond = {"clip": ["te", 0], "prompt": prompt, "width": int(W), "height": int(Hh), "vae": ["vae", 0]}
+    for k, pic in enumerate(pictures[:9], start=1):
+        api[f"p{k}"] = {"class_type": "LoadImage", "inputs": {"image": pic}}
+        cond[f"images.image_{k}"] = [f"p{k}", 0]
+    api["c"] = {"class_type": "PH3ImageConditioning", "inputs": cond}
+    api["g"] = {"class_type": "BasicGuider", "inputs": {"model": ["ms", 0], "conditioning": ["c", 0]}}
+    api["nz"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}}
+    api["ks"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+    api["sg"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": PH3["sigmas"]}}
+    api["sa"] = {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["nz", 0], "guider": ["g", 0], "sampler": ["ks", 0],
+                                                                    "sigmas": ["sg", 0], "latent_image": ["c", 1]}}
+    api["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sa", 0], "vae": ["vae", 0]}}
+    api["sv"] = {"class_type": "SaveImage", "inputs": {"images": ["dec", 0], "filename_prefix": prefix}}
+    return api
+
+
+BL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blender", "studio_mv_shot.py")
+
+
+async def blender_shot(blend, camera, f0, f1, W, Hh, dest_dir, job, far=45.0):
+    """Renders the shot's first frame and its depth video from the .blend's own camera; returns (first.png, depth.mp4) paths."""
+    import tempfile
+    exe = H["_previs"].blender_exe()
+    if not exe:
+        raise RuntimeError("Blender isn't installed")
+    tmp = tempfile.mkdtemp(prefix="studio_mv_")
+    spec = {"camera": camera, "f0": int(f0), "f1": int(f1), "w": int(W), "h": int(Hh), "dw": int(W) // 2, "dh": int(Hh) // 2,
+            "near": 0.3, "far": float(far), "out": tmp, "frame_at": int(f0)}
+    sp = os.path.join(tmp, "spec.json")
+    json.dump(spec, open(sp, "w", encoding="utf-8"))
+    flags = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = await asyncio.create_subprocess_exec(exe, "-b", blend, "--factory-startup", "-P", BL_SCRIPT, "--", sp,
+                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, creationflags=flags)
+    tail = []
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+        t = line.decode("utf-8", "ignore").rstrip()
+        tail = (tail + [t])[-30:]
+        if t.startswith("[studio]"):
+            job["stage"] = "Blender: " + t[9:]
+    await proc.wait()
+    rp = os.path.join(tmp, "result.json")
+    res = json.load(open(rp)) if os.path.isfile(rp) else {"ok": False, "error": " | ".join(tail[-6:])}
+    if not res.get("ok"):
+        raise RuntimeError("Blender: " + str(res.get("error"))[-500:])
+    os.makedirs(dest_dir, exist_ok=True)
+    first = os.path.join(dest_dir, "blender_first.png")
+    shutil.copy2(os.path.join(tmp, "first.png"), first)
+    depth = os.path.join(dest_dir, "depth.mp4")
+    r = subprocess.run([_ff(), "-y", "-framerate", "24", "-i", os.path.join(tmp, "depth", "d_%04d.png"), "-c:v", "libx264", "-crf", "12",
+                        "-pix_fmt", "yuv420p", depth], capture_output=True, creationflags=NO_WINDOW)
+    if r.returncode != 0:
+        raise RuntimeError("ffmpeg: " + (r.stderr or b"").decode("utf-8", "ignore")[-300:])
+    shutil.rmtree(tmp, ignore_errors=True)
+    return first, depth, res
 
 
 def setup(ns):
@@ -326,6 +433,81 @@ def setup(ns):
             return {"image": j["result"]["value"], "output": j["result"].get("output")}
         asyncio.ensure_future(ns["_ai_job"](job, run))
         return web.json_response({"id": job["id"]})
+
+    @routes.post("/manny/api/musicvideo/shot")
+    async def mv_shot(request):
+        """One cut of the video, the full process. Body: {board, name, camera, f0, f1 (frames of the .blend), song_in (s),
+        blend, pictures: [outfit sheet, set plate, crew sheet...] (input files), frame_prompt, prompt, q, depth_strength,
+        steps: ["blender","frame","render"] (default all), seed}. Makes a shot on the board and fills it step by step."""
+        _local(request)
+        body = await request.json()
+        import folder_paths
+        root = folder_paths.get_input_directory()
+        boards = H["_load_boards"]()
+        b = next((x for x in boards if x.get("id") == body["board"]), None)
+        if not b:
+            raise web.HTTPNotFound(text="No such board")
+        slug = (b.get("musicvideo") or {}).get("slug") or "musicvideo"
+        key = _slug(body["name"])
+        sh = next((x for x in b["shots"] if x.get("mv_key") == key), None)
+        if not sh:
+            sh = {"id": uuid.uuid4().hex[:8], "mv_key": key, "takes": [], "pick": None}
+            b["shots"].append(sh)
+        q = "final" if body.get("q") == "final" else "draft"
+        W, Hh = SIZES[q]
+        f0, f1 = int(body["f0"]), int(body["f1"])
+        n = max(9, ((f1 - f0 + 1) - 1) // 8 * 8 + 1)
+        f1 = f0 + n - 1
+        sh.update(name=body["name"], camera=body.get("camera_words", ""), blender_camera=body["camera"], f0=f0, f1=f1,
+                  seconds=round(n / 24.0, 3), song_in=float(body.get("song_in", (f0 - 1) / 24.0)), engine="perform",
+                  prompt=body.get("prompt") or sh.get("prompt") or "", frame_prompt=body.get("frame_prompt") or sh.get("frame_prompt") or "",
+                  pictures=body.get("pictures") or sh.get("pictures") or [])
+        b["updated"] = time.time()
+        H["_save_boards"](boards)
+        steps = body.get("steps") or ["blender", "frame", "render"]
+        seed = int(body.get("seed") or int(time.time()) % 2 ** 31)
+        shot_dir = os.path.join(root, "musicvideo", slug, "shots", key)
+        job = ns["_new_job"](False, kind="mvshot")
+
+        def rel(p):
+            return os.path.relpath(p, root).replace("\\", "/")
+
+        async def run():
+            res = {}
+            if "blender" in steps:
+                job["stage"] = "Blender: opening the set"
+                first, depth, info = await blender_shot(body["blend"], body["camera"], f0, f1, *SIZES["final"], shot_dir, job,
+                                                        float(body.get("far") or 45.0))
+                _update_shot(b["id"], sh["id"], blender_first=rel(first), depth=rel(depth))
+                res["blender"] = {"first": rel(first), "depth": rel(depth), "info": info}
+            _bb, _b, s = _shot(b["id"], sh["id"])
+            if "frame" in steps:
+                pics = [s["blender_first"]] + list(s.get("pictures") or [])
+                api = ph3_frame_api(pics, s["frame_prompt"], 1536, 640, seed, f"Images/Music video/{slug}/{key} frame")
+                job["stage"] = "P-H3: painting the start frame"
+                out = await H["_videotools"]._render(job, api, f"{s['name']} start frame", "P-H3: painting the start frame", body.get("target"))
+                dst = os.path.join(shot_dir, f"frame_{seed}.png")
+                os.makedirs(shot_dir, exist_ok=True)
+                shutil.copy2(out, dst)
+                _update_shot(b["id"], sh["id"], image=rel(dst), frames=(s.get("frames") or []) + [rel(dst)])
+                res["frame"] = rel(dst)
+            _bb, _b, s = _shot(b["id"], sh["id"])
+            if "render" in steps:
+                audio = os.path.join(shot_dir, f"song_{s['song_in']:.3f}.wav")
+                if not os.path.exists(audio):
+                    src = os.path.join(root, b["musicvideo"]["song"]) if b.get("musicvideo") else None
+                    await asyncio.to_thread(_cut_audio, src, s["song_in"], s["seconds"] + 0.5, audio)
+                api = perform_api(s["image"], rel(audio), s["prompt"], W, Hh, s["seconds"], seed,
+                                  f"Videos/Music video/{slug}/{key} {q}", depth=s.get("depth") if body.get("depth", True) else None,
+                                  depth_strength=float(body.get("depth_strength") or 0.9), depth_pass2=bool(body.get("depth_pass2")))
+                out = await H["_videotools"]._render(job, api, f"{s['name']} ({q})", f"LTX: rendering the {q}", body.get("target"))
+                vroot = ns["_root"](False)
+                r2 = os.path.relpath(out, vroot).replace("\\", "/")
+                H["_pipeline"].attach(b["id"], sh["id"], os.path.basename(out), os.path.dirname(r2), "take", f"{q} · seed {seed}")
+                res["video"] = {"filename": os.path.basename(out), "subfolder": os.path.dirname(r2)}
+            return res
+        asyncio.ensure_future(ns["_ai_job"](job, run))
+        return web.json_response({"id": job["id"], "shot": sh["id"], "frames": [f0, f1], "seconds": round(n / 24.0, 3), "seed": seed})
 
     @routes.post("/manny/api/musicvideo/{bid}/{sid}/render")
     async def mv_render(request):
