@@ -82,16 +82,30 @@ async def main():
     for app in studio._list_apps():
         d = studio._describe_app(app)
         choices = [i for i in d["inputs"] if i["kind"] == "choice" and i.get("options")]
+        toggles = [i for i in d["inputs"] if i["kind"] == "toggle"]
+        variants = [None] + toggles          # every graph-changing toggle on, one at a time (Uncensored, Enhance prompt, ...)
         for inp in choices or [None]:
-            for opt in (inp["options"] if inp else [None]):
+          for opt in (inp["options"] if inp else [None]):
+            off = None
+            for tg in variants:
                 rows += 1
                 vals = {inp["key"]: opt} if inp else {}
-                tag = f"{os.path.basename(app)[:-9]} [{opt}]" if inp else os.path.basename(app)[:-9]
+                if tg:
+                    vals[tg["key"]] = True
+                tag = (f"{os.path.basename(app)[:-9]} [{opt}]" if inp else os.path.basename(app)[:-9]) + (f" + {tg['label']}" if tg else "")
                 try:
                     _wf, api = await studio._build_prompt(app, vals)
                 except Exception as e:
                     check(False, f"{tag}: Studio can't build it ({str(e)[:80]})")
                     continue
+                if tg is None:
+                    off = {n.get("class_type") for n in api.values()}
+                elif "enhance prompt" in tg["label"].lower() and off is not None:     # the prompt LLM: where does it run?
+                    added = sorted({n.get("class_type") for n in api.values()} - off)
+                    where = ["CPU encoder" if (n.get("class_type"), k) in model_plan.CPU_LOADERS else "card"
+                             for n in api.values() if n.get("class_type") in added for k in (n.get("inputs") or {})
+                             if (n.get("class_type"), k) in model_plan.FOLDERS]
+                    notes.append(f"{tag}: adds {added}; its model loads on the {', '.join(sorted(set(where))) or 'no model loader'}")
                 why = remote.gate(api, mac_oi, mac_sv)
                 bad, how = [], []
                 for x in why:
