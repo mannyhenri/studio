@@ -365,7 +365,9 @@ function renderForm(form, app) {
     const rs = h(`<div class="fsec"><label class="lbl">${app.kind === "video" ? "References · images & voices" : "Reference"}</label><div class="refs"></div></div>`);
     const box = $(".refs", rs);
     L.refs.forEach(r => box.append(refTile(app, r, v, set)));
-    if (L.refs.strength) rs.append(control(app, L.refs.strength, v, set));
+    // P-H3 decides on its own how much of the reference it keeps: no slider (it would do nothing)
+    const noStrength = L.model && /^P-H3/i.test(v[L.model.key] || "");
+    if (L.refs.strength && !noStrength) rs.append(control(app, L.refs.strength, v, set));
     const optional = L.refs.every(r => r.toggle);
     if (optional && !isTool(app)) {
       const on = L.refs.filter(r => v[r.toggle.key]).length;
@@ -3246,7 +3248,8 @@ async function machinesMon() {
   const mon = $("#mon");
   if (document.hidden || !mon || getComputedStyle(mon).display === "none") return;
   try {
-    const [ws, rj, q, m] = await Promise.all([api("/manny/api/workers"), api("/manny/api/remote_jobs"), api("/queue"), api("/manny/api/sysmon")]);
+    const [ws, rj, q, m, ds] = await Promise.all([api("/manny/api/workers"), api("/manny/api/remote_jobs"), api("/queue"), api("/manny/api/sysmon"),
+      api("/manny/api/dispatch").catch(() => null)]);
     let box = $("#m-mach");
     if (ws.length < 2) { if (box) box.remove(); return; }       // only this PC: nothing to add
     if (!box) { box = h(`<div id="m-mach" class="mmach"><div class="mmh">MACHINES</div><div class="mml"></div></div>`); mon.append(box); }
@@ -3276,6 +3279,19 @@ async function machinesMon() {
       return `<div class="mmr ${state}" title="${esc(w.label + (dev ? " · " + dev : "") + (mem ? " · " + mem : "") + (w.error ? " · " + w.error : ""))}"><i></i><span>${esc(prettyWorker(w.label))}</span><b>${esc(txt)}</b></div>`;
     }).join("");
     $(".mml", box).innerHTML = rows;
+    if (ds) {
+      let sw = $(".mmauto", box);
+      if (!sw) {
+        sw = h(`<label class="mmauto" title="While this PC renders, a waiting job goes to a free machine that already has its models (Incognito jobs too)."><input type="checkbox"> Share waiting jobs with free machines</label>`);
+        box.append(sw);
+        $("input", sw).onchange = async e => {
+          try { await api("/manny/api/dispatch", { method: "POST", body: JSON.stringify({ enabled: e.target.checked }) }); }
+          catch (err) { toast(String(err.message || err)); }
+        };
+      }
+      const cb = $("input", sw);
+      if (document.activeElement !== cb) cb.checked = !!ds.enabled;
+    }
   } catch { }
 }
 async function sysStats() {

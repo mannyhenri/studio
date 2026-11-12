@@ -316,15 +316,35 @@ def ph3_frame_api(pictures, prompt, W, Hh, seed, prefix):
 BL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blender", "studio_mv_shot.py")
 
 
-async def blender_shot(blend, camera, f0, f1, W, Hh, dest_dir, job, far=45.0):
-    """Renders the shot's first frame and its depth video from the .blend's own camera; returns (first.png, depth.mp4) paths."""
+def _stretch_depth(folder):
+    """Use the whole grey range: stretch the shot's real near..far and lift the far end (like a Depth Anything map)."""
+    import numpy as np
+    from PIL import Image
+    names = sorted(f for f in os.listdir(folder) if f.endswith(".png"))
+    fr = [np.asarray(Image.open(os.path.join(folder, n)).convert("L"), dtype=np.float32) / 255 for n in names]
+    if not fr:
+        return
+    st = np.stack(fr)
+    valid = st[st > 0.004]
+    if valid.size == 0:
+        return
+    lo, hi = np.percentile(valid, 1.0), np.percentile(valid, 99.5)
+    for n, f in zip(names, fr):
+        g = np.clip((f - lo) / max(1e-6, hi - lo), 0, 1) ** 0.55
+        g = np.where(f > 0.004, 0.06 + 0.94 * g, 0.0)
+        Image.fromarray((g * 255 + 0.5).astype(np.uint8)).save(os.path.join(folder, n))
+
+
+async def blender_shot(blend, camera, f0, f1, W, Hh, dest_dir, job, far=45.0, people=True):
+    """Renders the shot's first frame and its depth video from the .blend's own camera; returns (first.png, depth.mp4) paths.
+    people=False: the set alone (performers hidden), saved as blender_set.png / depth_set.mp4."""
     import tempfile
     exe = H["_previs"].blender_exe()
     if not exe:
         raise RuntimeError("Blender isn't installed")
     tmp = tempfile.mkdtemp(prefix="studio_mv_")
     spec = {"camera": camera, "f0": int(f0), "f1": int(f1), "w": int(W), "h": int(Hh), "dw": int(W) // 2, "dh": int(Hh) // 2,
-            "near": 0.3, "far": float(far), "out": tmp, "frame_at": int(f0)}
+            "near": 0.3, "far": float(far), "out": tmp, "frame_at": int(f0), "people": bool(people)}
     sp = os.path.join(tmp, "spec.json")
     json.dump(spec, open(sp, "w", encoding="utf-8"))
     flags = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -345,9 +365,10 @@ async def blender_shot(blend, camera, f0, f1, W, Hh, dest_dir, job, far=45.0):
     if not res.get("ok"):
         raise RuntimeError("Blender: " + str(res.get("error"))[-500:])
     os.makedirs(dest_dir, exist_ok=True)
-    first = os.path.join(dest_dir, "blender_first.png")
+    first = os.path.join(dest_dir, "blender_first.png" if people else "blender_set.png")
     shutil.copy2(os.path.join(tmp, "first.png"), first)
-    depth = os.path.join(dest_dir, "depth.mp4")
+    depth = os.path.join(dest_dir, "depth.mp4" if people else "depth_set.mp4")
+    await asyncio.to_thread(_stretch_depth, os.path.join(tmp, "depth"))
     r = subprocess.run([_ff(), "-y", "-framerate", "24", "-i", os.path.join(tmp, "depth", "d_%04d.png"), "-c:v", "libx264", "-crf", "12",
                         "-pix_fmt", "yuv420p", depth], capture_output=True, creationflags=NO_WINDOW)
     if r.returncode != 0:
@@ -438,7 +459,8 @@ def setup(ns):
     async def mv_shot(request):
         """One cut of the video, the full process. Body: {board, name, camera, f0, f1 (frames of the .blend), song_in (s),
         blend, pictures: [outfit sheet, set plate, crew sheet...] (input files), frame_prompt, prompt, q, depth_strength,
-        steps: ["blender","frame","render"] (default all), seed}. Makes a shot on the board and fills it step by step."""
+        steps: ["blender","frame","render"] (default all), seed, people (default true; false = the set alone in Blender's
+        frame and depth, so the performers come only from the start frame and can't double up with a stand-in)}. Makes a shot on the board and fills it step by step."""
         _local(request)
         body = await request.json()
         import folder_paths
@@ -476,13 +498,18 @@ def setup(ns):
             res = {}
             if "blender" in steps:
                 job["stage"] = "Blender: opening the set"
+                people = body.get("people", True) is not False
                 first, depth, info = await blender_shot(body["blend"], body["camera"], f0, f1, *SIZES["final"], shot_dir, job,
-                                                        float(body.get("far") or 45.0))
-                _update_shot(b["id"], sh["id"], blender_first=rel(first), depth=rel(depth))
+                                                        float(body.get("far") or 45.0), people)
+                if people:
+                    _update_shot(b["id"], sh["id"], blender_first=rel(first), depth=rel(depth))
+                else:       # set-only: the render follows the camera and the set; the start frame gives the performers
+                    _update_shot(b["id"], sh["id"], blender_set=rel(first), depth=rel(depth))
                 res["blender"] = {"first": rel(first), "depth": rel(depth), "info": info}
             _bb, _b, s = _shot(b["id"], sh["id"])
             if "frame" in steps:
-                pics = [s["blender_first"]] + list(s.get("pictures") or [])
+                base = s.get("blender_set") if body.get("people", True) is False and s.get("blender_set") else s["blender_first"]
+                pics = [base] + list(s.get("pictures") or [])
                 api = ph3_frame_api(pics, s["frame_prompt"], 1536, 640, seed, f"Images/Music video/{slug}/{key} frame")
                 job["stage"] = "P-H3: painting the start frame"
                 out = await H["_videotools"]._render(job, api, f"{s['name']} start frame", "P-H3: painting the start frame", body.get("target"))

@@ -22,10 +22,11 @@ from .mconv.workflow_to_api import convert_ui_to_api
 from .appwf import combo_options as _combo_options, apply_values as _apply_values, fix_custom_combos as _fix_custom_combos, prune_switches as _prune_switches
 from . import auth
 from . import remote as _remote
+from . import refpatch as _refpatch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-VERSION = "1.25.0"
+VERSION = "1.26.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -211,7 +212,12 @@ async def _build_prompt(app_id, values):
     except Exception:
         oi = await _get_object_info(force=True)
         api = convert_ui_to_api(wf, oi)
-    return wf, _prune_switches(_fix_custom_combos(api, wf), oi)
+    api = _prune_switches(_fix_custom_combos(api, wf), oi)
+    try:        # reference picture + strength for every model (refpatch.py)
+        api = _refpatch.patch(api, wf, _describe_app(app_id)["inputs"])
+    except Exception as e:
+        print("[Studio] reference patch skipped:", e)
+    return wf, api
 
 
 # ---------------------------------------------------------------- pages
@@ -333,10 +339,9 @@ async def manny_run(request):
                 except Exception as e:
                     return web.json_response({"error": str(e), "worker": worker["label"], "queued": results}, status=502)
                 continue
-            async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=payload) as r:
-                data = await r.json()
-                if r.status != 200:
-                    return web.json_response({"error": data, "queued": results}, status=400)
+            status, data = await _post_prompt_split(s, payload, private)
+            if status != 200:
+                return web.json_response({"error": data, "queued": results}, status=400)
             if data.get("node_errors"):     # queued for the outputs that validated: the picture would be missing
                 async with s.post(f"http://127.0.0.1:{_port()}/queue", json={"delete": [data.get("prompt_id")]}):
                     pass
@@ -468,13 +473,16 @@ async def _put_back(job):
         _moved_save(private, d)
         if job.get("status") != "failed":
             return
+        try:
+            _dispatch.failed(job.get("worker"), item["prompt"], job.get("error"))
+        except Exception as e:
+            print("[Studio] auto-share: could not note the failure:", e)
         extra = dict(item["extra"] or {})
         cid = extra.pop("client_id", None) or "studio-moved-back"
         body = {"prompt": item["prompt"], "client_id": cid, "extra_data": extra, "front": True}
         try:
             async with ClientSession() as s:
-                async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=body) as r:
-                    data = await r.json()
+                _st, data = await _post_prompt_split(s, body, private)
             if data.get("prompt_id"):
                 if private:
                     _pending_private.add(data["prompt_id"])
@@ -492,6 +500,66 @@ def _moved_done(job):
         asyncio.ensure_future(_put_back(job))
 
 
+async def _move_one(pid, worker, may_private=False, auto=False):
+    """Move one waiting job from this PC's queue to worker. Returns ("moved", info) or ("kept", reason)."""
+    q = PromptServer.instance.prompt_queue
+    get = getattr(q, "get_current_queue_volatile", None) or q.get_current_queue
+    _running, pending = get()
+    t = next((x for x in pending if x[1] == pid), None)
+    if not t:
+        return "kept", "it isn't waiting any more (already rendering or done)"
+    prompt, extra = t[2], dict(t[3] or {})
+    if extra.get("manny_prompt_step"):
+        return "kept", "this is the prompt step of a render: move the render itself"
+    recall = {n["inputs"].get("key") for n in prompt.values() if isinstance(n, dict) and n.get("class_type") == "StudioRecall"}
+    if recall:
+        if not isinstance(extra.get("manny_whole"), dict):
+            return "kept", "its prompt is read on this PC first; it can't move"
+        prompt = extra["manny_whole"]       # the worker reads the prompt itself
+    extra.pop("manny_whole", None)
+    if extra.get("client_id") in _PC_ONLY_CLIENTS:
+        return "kept", "a Studio tool (video fix, music…) is waiting for this one on this PC"
+    private = _queuekeep._is_private(pid, prompt)
+    if private and not may_private:
+        return "kept", "Incognito job: unlock Incognito first" if not auto else "Incognito jobs stay on this PC"
+    if auto:
+        why = _dispatch.unfit(worker, prompt)
+        if why:
+            return "kept", why
+    cid = extra.pop("client_id", None)
+    extra = {k: v for k, v in extra.items() if not any(x in k.lower() for x in ("api_key", "auth_token"))}
+    extra.setdefault("manny_app", "queue-move")      # a node-editor job too: the worker's stale-job net keys on it
+    if auto:
+        extra["manny_auto_moved"] = True
+    payload_extra = {"client_id": cid, "extra_data": extra}
+    try:
+        # "auto" never downloads: it only sends what the worker can run as it is
+        if auto:
+            why = await _remote.check(worker, prompt)
+            if why:
+                return "kept", "; ".join(x.get("reason", "") for x in why)[:300] or "the worker can't run it"
+        r = await _remote.submit(worker, json.loads(json.dumps(prompt)), payload_extra, _dirs(), private, INCOMING,
+                                 on_done=_moved_done, fetch=not auto)
+    except _remote.GateRefused as e:
+        return "kept", "; ".join(x.get("reason", "") for x in e.why) or str(e)
+    except Exception as e:
+        return "kept", str(e)[:300]
+    # take it off this PC's queue; if it started here in the meantime, take it back off the worker
+    gone = q.delete_queue_item(lambda a, _p=pid: a[1] == _p)
+    if not gone:
+        try:
+            await _remote.cancel(worker, r["prompt_id"])
+        except Exception:
+            pass
+        return "kept", "it started rendering here before it could move"
+    if recall:      # its prompt step isn't needed here any more
+        q.delete_queue_item(lambda a, _r=recall: (a[3] or {}).get("manny_prompt_step") and any(
+            isinstance(n, dict) and n.get("class_type") == "StudioKeep" and n["inputs"].get("key") in _r for n in a[2].values()))
+    _pending_private.discard(pid)
+    _moved_put(r["prompt_id"], prompt, {k: v for k, v in (t[3] or {}).items() if k != "manny_whole"}, private)
+    return "moved", {"from": pid, "to": r["prompt_id"], "worker": worker["label"], "fetching": r.get("fetching"), "prompt": prompt}
+
+
 @routes.post("/manny/api/queue/move")
 async def manny_queue_move(request):
     """Move waiting jobs from this PC's queue to a GPU worker. Body: {"prompt_ids": [...], "target": label}.
@@ -501,49 +569,15 @@ async def manny_queue_move(request):
         worker = _remote.find(_data_dir(), body.get("target") or "")
     except KeyError as e:
         return web.json_response({"error": str(e)}, status=400)
-    q = PromptServer.instance.prompt_queue
-    get = getattr(q, "get_current_queue_volatile", None) or q.get_current_queue
-    _running, pending = get()
-    by_id = {t[1]: t for t in pending}
+    may_private = auth.is_local(request) or auth.unlocked(request)
     moved, kept = [], []
     for pid in body.get("prompt_ids") or []:
-        t = by_id.get(pid)
-        if not t:
-            kept.append({"prompt_id": pid, "reason": "it isn't waiting any more (already rendering or done)"})
-            continue
-        prompt, extra = t[2], dict(t[3] or {})
-        if extra.get("client_id") in _PC_ONLY_CLIENTS:
-            kept.append({"prompt_id": pid, "reason": "a Studio tool (video fix, music…) is waiting for this one on this PC"})
-            continue
-        private = _queuekeep._is_private(pid, prompt)
-        if private and not (auth.is_local(request) or auth.unlocked(request)):
-            kept.append({"prompt_id": pid, "reason": "Incognito job: unlock Incognito first"})
-            continue
-        cid = extra.pop("client_id", None)
-        extra = {k: v for k, v in extra.items() if not any(x in k.lower() for x in ("api_key", "auth_token"))}
-        extra.setdefault("manny_app", "queue-move")      # a node-editor job too: the worker's stale-job net keys on it
-        payload_extra = {"client_id": cid, "extra_data": extra}
-        try:
-            r = await _remote.submit(worker, json.loads(json.dumps(prompt)), payload_extra, _dirs(), private, INCOMING,
-                                     on_done=_moved_done, fetch=True)
-        except _remote.GateRefused as e:
-            kept.append({"prompt_id": pid, "reason": "; ".join(x.get("reason", "") for x in e.why) or str(e)})
-            continue
-        except Exception as e:
-            kept.append({"prompt_id": pid, "reason": str(e)[:300]})
-            continue
-        # take it off this PC's queue; if it started here in the meantime, take it back off the worker
-        gone = q.delete_queue_item(lambda a, _p=pid: a[1] == _p)
-        if not gone:
-            try:
-                await _remote.cancel(worker, r["prompt_id"])
-            except Exception:
-                pass
-            kept.append({"prompt_id": pid, "reason": "it started rendering here before it could move"})
-            continue
-        _pending_private.discard(pid)
-        _moved_put(r["prompt_id"], prompt, dict(t[3] or {}), private)
-        moved.append({"from": pid, "to": r["prompt_id"], "worker": worker["label"], "fetching": r.get("fetching")})
+        res, v = await _move_one(pid, worker, may_private)
+        if res == "moved":
+            v.pop("prompt", None)
+            moved.append(v)
+        else:
+            kept.append({"prompt_id": pid, "reason": v})
     return web.json_response({"moved": moved, "kept": kept})
 
 
@@ -1127,9 +1161,9 @@ async def _queue_app(app, values, private, label, target=None):
 
 async def _choose(api, target, private=False):
     """The worker dict that should run api, or None for this PC. target: "local"/None, "auto" or a worker label.
-    Incognito never goes to another machine on its own ("auto" keeps it here); a machine picked by name still works.
+    Incognito goes to other machines like any job (its results come back into the private space).
     Raises KeyError for an unknown label and remote.GateRefused when "auto" finds no machine that can run it."""
-    if not target or target == _remote.LOCAL or (private and target == _remote.AUTO):
+    if not target or target == _remote.LOCAL:
         return None
     if target != _remote.AUTO:
         return _remote.find(_data_dir(), target)
@@ -1145,6 +1179,41 @@ async def _choose(api, target, private=False):
     return None if label == _remote.LOCAL else _remote.find(_data_dir(), label)
 
 
+async def _post_prompt_split(s, body, private):
+    """POST a prompt to this PC's queue as two steps when it reads a prompt with a text encoder or an LLM: first the
+    prompt step (which frees every model when it ends), then the render (promptstep.py). Returns (status, data) of the
+    render's POST, like a plain POST would."""
+    pre, main = (None, body["prompt"])
+    try:
+        pre, main = _promptstep.split(body["prompt"], private)
+    except Exception as e:
+        print("[Studio] prompt step: left as one step:", e)
+    if pre is not None:
+        extra = dict(body.get("extra_data") or {})
+        extra["manny_label"] = "Reading the prompt · " + str(extra.get("manny_label") or extra.get("manny_app") or "render")
+        extra["manny_prompt_step"] = True
+        extra.pop("extra_pnginfo", None)
+        ppid = str(uuid.uuid4())
+        if private:
+            _pending_private.add(ppid)          # before it's queued: the queue keeper must never write it to normal storage
+        pb = dict(body, prompt=pre, extra_data=extra, prompt_id=ppid)
+        async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=pb) as r:
+            pdata = await r.json()
+        if r.status != 200 or pdata.get("node_errors"):
+            if pdata.get("prompt_id"):
+                async with s.post(f"http://127.0.0.1:{_port()}/queue", json={"delete": [pdata["prompt_id"]]}):
+                    pass
+            print("[Studio] prompt step refused, queued as one step:", json.dumps(pdata)[:300])
+            main = body["prompt"]
+        elif private:
+            _pending_private.add(pdata.get("prompt_id"))
+    if main is not body["prompt"]:
+        # the whole graph rides along, so the render can still be moved to a Mac (which runs it in one step)
+        body = dict(body, extra_data=dict(body.get("extra_data") or {}, manny_whole=body["prompt"]))
+    async with s.post(f"http://127.0.0.1:{_port()}/prompt", json=dict(body, prompt=main)) as r:
+        return r.status, await r.json()
+
+
 async def _queue_api(api, extra, private, target=None, client_id="studio"):
     """Queue an API prompt (already privatized when private) on this PC, a worker or "auto"; returns its prompt_id.
     _wait_output follows either kind. A 200 with node_errors is refused everywhere: it would run without the picture."""
@@ -1153,10 +1222,9 @@ async def _queue_api(api, extra, private, target=None, client_id="studio"):
         return (await _remote.submit(worker, api, {"client_id": client_id, "extra_data": extra}, _dirs(), private, INCOMING,
                                      on_done=_remote_done, fetch=target != _remote.AUTO))["prompt_id"]
     async with ClientSession() as s:
-        async with s.post(f"http://127.0.0.1:{_port()}/prompt", json={"prompt": api, "client_id": client_id, "extra_data": extra}) as r:
-            data = await r.json()
-            if r.status != 200:
-                raise RuntimeError(json.dumps(data.get("node_errors") or data.get("error") or data)[:600])
+        status, data = await _post_prompt_split(s, {"prompt": api, "client_id": client_id, "extra_data": extra}, private)
+        if status != 200:
+            raise RuntimeError(json.dumps(data.get("node_errors") or data.get("error") or data)[:600])
         if data.get("node_errors"):
             async with s.post(f"http://127.0.0.1:{_port()}/queue", json={"delete": [data.get("prompt_id")]}):
                 pass
@@ -1461,6 +1529,9 @@ async def _llm(job, prompt, images, private, max_length=700):
                 for o in (h.get("outputs") or {}).values():
                     t = o.get("text")
                     if t:
+                        # the LLM is done: unload it before whatever renders next (prompt first, then the picture)
+                        async with s.post(f"http://127.0.0.1:{_port()}/free", json={"unload_models": True, "free_memory": True}):
+                            pass
                         return t[0] if isinstance(t, list) else str(t)
                 if st.get("completed"):
                     raise RuntimeError("The AI returned nothing")
@@ -2826,6 +2897,12 @@ _musicvideo.setup(globals())
 # ---------------------------------------------------------------- keep the queue across shutdowns
 from . import queuekeep as _queuekeep  # noqa: E402
 _queuekeep.setup(globals())
+
+from . import promptstep as _promptstep  # noqa: E402
+_promptstep.setup(globals())
+
+from . import dispatch as _dispatch  # noqa: E402
+_dispatch.setup(globals())
 
 # ---------------------------------------------------------------- share model files with the GPU machines (a Mac fetches what HF lacks)
 from . import modelshare as _modelshare  # noqa: E402

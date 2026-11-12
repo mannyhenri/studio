@@ -2,7 +2,9 @@
 
 blender -b <file.blend> --factory-startup -P studio_mv_shot.py -- spec.json
 spec: {"camera": "G_LowHero_18mm", "f0": 1, "f1": 105, "w": 1344, "h": 576, "dw": 672, "dh": 288,
-       "near": 0.3, "far": 45.0, "out": "<folder>", "frame_at": 1}
+       "near": 0.3, "far": 45.0, "out": "<folder>", "frame_at": 1, "people": true}
+people false: performers are hidden (armatures, what they drive, hair, character collections): the set and the camera
+move alone, so the video model animates the people from the start frame instead of fighting a stand-in.
 Writes <out>/first.png (the shot's first frame, the file's own look, EEVEE), <out>/depth/d_####.png
 (near = white, far = black, every frame of the shot) and <out>/result.json. The .blend is never saved."""
 import json
@@ -53,8 +55,39 @@ def depth_material(near, far):
     return m
 
 
+CHAR_WORDS = ("vixen", "char", "hair", "dancer", "crew", "rival", "singer", "body", "rig", "metarig")
+
+
+def _people():
+    """Every object that is a person: armatures, what they drive or carry, hair, and anything in a character collection."""
+    arms = {o for o in bpy.data.objects if o.type == "ARMATURE"}
+    out = set(arms)
+    for o in bpy.data.objects:
+        p, chain = o.parent, []
+        while p is not None:
+            chain.append(p)
+            p = p.parent
+        if any(c in arms for c in chain):
+            out.add(o)
+        if any(m.type == "ARMATURE" for m in getattr(o, "modifiers", [])):
+            out.add(o)
+        if o.type in ("CURVES", "HAIR"):
+            out.add(o)
+        cols = [c.name.lower() for c in o.users_collection]
+        if any(w in n for n in cols for w in CHAR_WORDS) or any(w in o.name.lower() for w in CHAR_WORDS):
+            if o.type not in ("CAMERA", "LIGHT"):
+                out.add(o)
+    return out
+
+
 def main():
     scene = bpy.context.scene
+    hidden = []
+    if not SPEC.get("people", True):            # the set alone: camera + geometry, no performers
+        for o in _people():
+            o.hide_render = True
+            hidden.append(o.name)
+        log(f"set only: hid {len(hidden)} objects")
     cam = bpy.data.objects.get(SPEC["camera"])
     if not cam or cam.type != "CAMERA":
         raise RuntimeError(f"No camera called {SPEC['camera']}")
@@ -104,7 +137,7 @@ def main():
         n += 1
         log(f"render depth {n}/{int(SPEC['f1']) - int(SPEC['f0']) + 1}")
     lens = cam.data.lens
-    json.dump({"ok": True, "engine": eng, "frames": n, "lens": lens, "fps": scene.render.fps}, open(os.path.join(OUT, "result.json"), "w"))
+    json.dump({"ok": True, "engine": eng, "frames": n, "lens": lens, "fps": scene.render.fps, "hidden": hidden[:200]}, open(os.path.join(OUT, "result.json"), "w"))
 
 
 try:

@@ -206,7 +206,7 @@ def _ltx_v2v(api, images, n, prompt, denoise, seed, guides=(), audio=None):
     api["sep"] = {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["sa", 0]}}
     api["crop"] = {"class_type": "LTXVCropGuides", "inputs": {"positive": pos, "negative": neg, "latent": ["sep", 0]}}
     api["dec"] = {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["crop", 2], "vae": ["vv", 0], "tile_size": 512, "overlap": 64,
-                                                             "temporal_size": 64, "temporal_overlap": 16}}
+                                                             "temporal_size": 32, "temporal_overlap": 8}}
     return ["dec", 0]
 
 
@@ -333,7 +333,7 @@ def ltx_extend_api(path, prompt, seconds, seed, W, H, src_dur):
         "sep2": {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["sa2", 0]}},
         "crop2": {"class_type": "LTXVCropGuides", "inputs": {"positive": ["g2", 0], "negative": ["g2", 1], "latent": ["sep2", 0]}},
         "dec": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["crop2", 2], "vae": ["vv", 0], "tile_size": 512, "overlap": 64,
-                                                           "temporal_size": 64, "temporal_overlap": 16}},
+                                                           "temporal_size": 32, "temporal_overlap": 8}},
         "dau": {"class_type": "LTXVAudioVAEDecode", "inputs": {"samples": ["sep2", 1], "audio_vae": ["va", 0]}},
     }
     _save(api, ["dec", 0], ["dau", 0], "Videos/_work/extend_ltx")
@@ -425,7 +425,7 @@ def ltx_keyframes_api(keys, prompt, negative, W, H, seconds, seed):
     api["sep2"] = {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["sa2", 0]}}
     api["crop2"] = {"class_type": "LTXVCropGuides", "inputs": {"positive": pos, "negative": neg, "latent": ["sep2", 0]}}
     api["dec"] = {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["crop2", 2], "vae": ["vv", 0], "tile_size": 512, "overlap": 64,
-                                                             "temporal_size": 64, "temporal_overlap": 16}}
+                                                             "temporal_size": 32, "temporal_overlap": 8}}
     api["dau"] = {"class_type": "LTXVAudioVAEDecode", "inputs": {"samples": ["sep2", 1], "audio_vae": ["va", 0]}}
     _save(api, ["dec", 0], ["dau", 0], "Videos/Keyframes/LTX keyframes")
     return api
