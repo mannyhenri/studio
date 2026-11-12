@@ -120,12 +120,12 @@ SITES = {
     "sub": {("__init__.py", "manny_run"): "manny_run", ("__init__.py", "_queue_app"): "finish", ("__init__.py", "_finish"): "finish",
             ("projects.py", "run"): "keyframes + mcp:keyframes", ("previs.py", "run"): "paint3d",
             ("videotools.py", "_queue"): "video tools (fix part/face, extend, keyframes) + their MCP tools",
-            ("__init__.py", "manny_queue_move"): "queue:move (Send to… a waiting PC job)",
+            ("__init__.py", "_move_one"): "queue:move (Send to… a waiting PC job) + dispatch.py's auto-share",
             ("__init__.py", "_queue_api"): "(routing: Finish, music, voice)", ("sound.py", "_queue"): "sound:music + sound:voice"},
     "run": {("schedule.py", "_fire"): "schedule", ("studio_mcp.py", "call"): "mcp"},
-    "local": {("__init__.py", "manny_run"): "(manny_run: this PC)", ("__init__.py", "_queue_api"): "(_queue_api: this PC)",
+    "local": {("__init__.py", "_post_prompt_split"): "this PC's queue, as prompt step + render: manny_run, _queue_api, and "
+                                                       "_put_back (a moved job that failed on a card comes back, by design)",
               ("__init__.py", "_llm"): "AI review / AI prompt help: PC-only",
-              ("__init__.py", "_put_back"): "a moved job that failed on a card goes back in this PC's queue (by design)",
               },
 }
 WEB = os.path.join(os.path.dirname(PKG), "ComfyUI-MannyStudio", "web", "app.js") if os.environ.get("STUDIO_PKG") else os.path.join(PKG, "web", "app.js")
@@ -861,7 +861,7 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
 
 def fetch_mutants():
     """Drop the download on each call site in turn: exactly the entry points through it must fail."""
-    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("manny_queue_move", {"queue:move"}), ("_queue_api", {"finish", "sound:music", "sound:voice", "keyframes", "paint3d", "mcp:keyframes", *VIDEO})]
+    sites = [("manny_run", {"manny_run", "schedule", "mcp"}), ("_move_one", {"queue:move"}), ("_queue_api", {"finish", "sound:music", "sound:voice", "keyframes", "paint3d", "mcp:keyframes", *VIDEO})]
     bad = 0
     for fn_name, members in sites:
         d = tempfile.mkdtemp(prefix="studio-mutant-")

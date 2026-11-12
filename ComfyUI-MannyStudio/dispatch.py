@@ -1,5 +1,6 @@
 """Share the queue on its own: while this PC is rendering, a job waiting in its queue goes to any GPU machine that is
-free and can run it as it is (nodes and models already there, model small enough for its card).
+free and can run it as it is (nodes and models already there). Not its size: the Vegas run models bigger than the card
+  (fp8 kept in RAM and sent a layer at a time, text encoders on the CPU or the other card; confer c301a683).
 
 - Only jobs that are waiting move; this PC keeps what it's rendering. When this PC is idle it takes the next job itself.
 - Incognito jobs move too (their results come back into the private space). Never moved automatically: Studio tools that wait for their result on this PC
@@ -20,7 +21,6 @@ H = {}
 EVERY = 10                  # seconds between looks
 RETRY_AFTER = 600           # a job a machine turned down is asked about again after this long
 AVOID_DAYS = 7
-FIT = 0.8                   # the model files may use this share of the card's memory
 MODEL_EXT = (".safetensors", ".gguf", ".ckpt", ".pt", ".pth", ".bin", ".sft")
 MODEL_KINDS = ("diffusion_models", "unet", "checkpoints", "vae", "loras", "upscale_models", "latent_upscale_models", "model_patches")
 _turned_down = {}           # (worker, prompt_id) -> time
@@ -81,25 +81,6 @@ def failed(worker, prompt, error=None):
         json.dump(d[-200:], fh, indent=1)
 
 
-def _model_bytes(prompt):
-    try:
-        import folder_paths
-    except Exception:
-        return 0
-    total = 0
-    for name in _models(prompt):
-        for kind in MODEL_KINDS:
-            try:
-                p = folder_paths.get_full_path(kind, name)
-            except Exception:
-                p = None
-            if p and os.path.isfile(p):
-                total += os.path.getsize(p)
-                break
-    return total
-
-
-_vram = {}
 
 
 def unfit(worker, prompt):
@@ -108,11 +89,7 @@ def unfit(worker, prompt):
     for x in _avoid_load():
         if x.get("worker") == worker["label"] and x.get("sig") == s:
             return f"a job with these models failed on {worker['label']} before" + (f" ({x['why'][:80]})" if x.get("why") else "")
-    vram = _vram.get(worker["label"]) or (worker.get("device") or {}).get("vram_total") or 0
-    need = _model_bytes(prompt)
-    if vram and need > FIT * vram:
-        return f"its models ({need / 1e9:.0f} GB) are too big for {worker['label']}'s card ({vram / 1e9:.0f} GB)"
-    return None
+    return None                 # never its size: what doesn't run comes back (put-back) and lands in the list above
 
 
 async def _tick():
@@ -140,9 +117,6 @@ async def _tick():
             continue
         if nfo.get("queue_remaining"):
             continue
-        dev = nfo.get("device") or {}
-        if dev.get("vram_total"):
-            _vram[w["label"]] = dev["vram_total"]
         _r, pending = get()
         for t in sorted(pending, key=lambda x: x[0]):
             pid = t[1]
