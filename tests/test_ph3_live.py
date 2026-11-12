@@ -6,7 +6,8 @@
 
 First run (2026-11-12): push PASS (13.4 GB in 78 s, 3.6 in 22, 3.1 in 18); render FAIL on the card, "Trying to convert
 Float8_e4m3fn to the MPS backend": the w4a8 files keep their weight scales (*.weight_s_rel) as F8_E4M3, which comfy-mac
-has to upcast before they reach MPS.
+has to upcast before they reach MPS. After comfy-mac's fix (weight_s_rel fp8 -> fp32 at load): PASS, 1344x768,
+26.9 s/step, peak vram_in_use 19.3 GB, 383 s.
 
 Studio is the dispatcher here, with PH3_DIR as "this PC's" model folders. The Image app's P-H3 choice is built and
 sent by name to mac-vega-b through Studio's own path: the card lacks the files, /mac/fetch answers push, Studio PUTs
@@ -115,6 +116,7 @@ async def main():
     per_step = None
     if len(steps) > 1:
         per_step = (steps[-1][0] - steps[0][0]) / max(1, len(steps) - 1)
+    print("picture:", job["outputs"][0]["path"] if job.get("outputs") else None)
     out = job["outputs"][0]["path"] if job.get("outputs") else ""
     size, lo, hi = 0, 0, 0
     if out and os.path.isfile(out):
@@ -122,7 +124,10 @@ async def main():
         im = Image.open(out)
         size = im.size
         lo, hi = im.convert("L").getextrema()
-    check(bool(pushes) and all(f in FOLDERS for f, *_ in pushes), f"Studio pushed the P-H3 files the card lacked: {pushes}")
+    on_card = {f"{d}/{n}": urllib.request.urlopen(urllib.request.Request(f"{remote.base(W)}/mac/models/{d}/{n}", method="HEAD")).status
+               for d in FOLDERS for n in os.listdir(os.path.join(PH3, d)) if n.endswith(".safetensors")}
+    check(all(f in FOLDERS for f, *_ in pushes) and on_card and all(c == 200 for c in on_card.values()),
+          f"the card has every P-H3 file ({on_card}); Studio pushed the ones it lacked: {pushes or 'none needed'}")
     ok = job["status"] == "done" and size and hi - lo > 10
     check(ok, f"P-H3 on {W['label']}: {job['status']} {job.get('error') or ''} | picture {size} | "
               f"{per_step and round(per_step, 1)} s/step | peak vram_in_use {peak / 1e9:.1f} GB | {time.time() - t0:.0f} s total")
