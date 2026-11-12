@@ -215,7 +215,14 @@ async def main():
     pdirs = {f: os.path.join(tmp, "pushed", f) for f in FOLDERS}
     for d in pdirs.values():
         os.makedirs(d, exist_ok=True)
-    papp = web.Application()
+    puts_seen = []
+
+    @web.middleware
+    async def record(q, handler):           # what Studio sends with each PUT
+        if q.method == "PUT":
+            puts_seen.append((q.path, q.headers.get("X-Studio-SHA256")))
+        return await handler(q)
+    papp = web.Application(middlewares=[record])
     proutes = web.RouteTableDef()
     mac_push.add_routes(proutes, lambda: pdirs, mac_fetch.Fetcher(os.path.join(tmp, "plocks"), "mac-vega-b"), lambda: 10 ** 13)
     papp.add_routes(proutes)
@@ -240,6 +247,30 @@ async def main():
             err = str(e)
         got = open(dst, "rb").read() if os.path.isfile(dst) else b""
         check(got == want and not err, f"C15 push {folder}/{name}{' (resumed)' if name.startswith('SDXL') else ''}: {len(got)}/{len(want)} bytes, identical {got == want} {err}")
+    # R1: every push carries the file's sha256 (computed once, cached), so the Mac verifies every byte
+    import hashlib
+    want = {hashlib.sha256(d).hexdigest() for d in DATA.values()}
+    shas = [h for _p, h in puts_seen]
+    check(puts_seen and all(shas) and set(shas) <= want, f"R1 every push carries the file's sha256 ({sum(1 for h in shas if h)}/{len(shas)} PUTs)")
+    share = sys.modules["studio.modelshare"]
+    calls = []
+    real_hash = share._hash_file
+    share._hash_file = lambda p: (calls.append(p), real_hash(p))[1]
+    f0 = remote.LOCAL_MODEL(FILES[0][0], FILES[0][1])
+    a1, a2 = share.sha256_of(f0), share.sha256_of(f0)
+    check(a1 == a2 == hashlib.sha256(DATA[(FILES[0][0], FILES[0][1])]).hexdigest() and len(calls) <= 1, f"R1 a file is hashed once, then cached ({len(calls)} hashes)")
+    share._hash_file = real_hash
+    keep_sha = remote.LOCAL_SHA
+    remote.LOCAL_SHA = lambda p: "0" * 64          # what a byte flipped in transit looks like to the Mac
+    folder, name, _l = FILES[1]
+    os.remove(os.path.join(pdirs[folder], *re.split(r"[\\/]", name)))
+    try:
+        await remote._push(pmac, {}, folder, name)
+        err = ""
+    except Exception as e:
+        err = str(e)
+    check("422" in err, f"R1 a sha mismatch is refused by the Mac, not stored: {err[:120]}")
+    remote.LOCAL_SHA = keep_sha
     remote.LOCAL_MODEL = keep
     await pr.cleanup()
 
