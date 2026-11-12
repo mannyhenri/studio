@@ -82,6 +82,7 @@ $PY tests/test_fit_return.py   # a job moved to a Mac that fails there goes back
 $PY tests/test_pair.py         # a Vega encoding the other card's prompt counts as busier for Any free GPU
 $PY tests/test_pair_live.py    # live: both Vegas report their memory and prompt lending; Settings and Any free GPU use exactly that
 $PY tests/test_mac_choices.py  # every model choice of every app reaches a Mac card: runs as is, or its files come from HF or this PC
+$PY tests/test_fit_pair.py     # no Studio code calls the Macs' /mac/te; a card's failure text reaches the job unchanged
 $PY tests/test_model_share.py # model sharing: every folder x file, Range, index, 403 for others, no escapes (no workers needed)
 ```
 `RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).
