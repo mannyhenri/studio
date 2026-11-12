@@ -655,3 +655,6 @@ details.fold .lorasec .lblrow{justify-content:flex-end}
 /* move a waiting job to another GPU */
 .qitem select.qmove{margin-left:auto;margin-right:6px;max-width:150px;font-size:11px;padding:3px 6px;border-radius:8px;background:var(--bg2);color:var(--text);border:1px solid var(--line)}
 .qitem.qmoveall{border-style:dashed}
+
+.mmauto{display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;opacity:.8;cursor:pointer}
+.mmauto input{margin:0}
