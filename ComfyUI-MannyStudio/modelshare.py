@@ -23,6 +23,7 @@ H = {}
 TTL = 60                                 # seconds a worker's resolved addresses are trusted
 NOT_MODELS = {"custom_nodes", "configs"}  # folder keys that aren't model files
 _cache = {"key": None, "at": 0, "ips": frozenset()}
+_known = {}                               # host -> its last addresses a lookup found
 
 
 CHUNK = 4 << 20
@@ -92,8 +93,11 @@ def _resolve(host):
 async def _allowed_ips(workers):
     key = tuple(sorted({w["host"].lower() for w in workers}))
     if _cache["key"] != key or time.time() - _cache["at"] > TTL:
-        found = await asyncio.gather(*(asyncio.to_thread(_resolve, h) for h in key))
-        _cache.update(key=key, at=time.time(), ips=frozenset().union(*found))
+        found = await asyncio.gather(*(asyncio.to_thread(_resolve, h) for h in key), return_exceptions=True)
+        for h, ips in zip(key, found):   # a lookup that finds nothing (mDNS on Windows, now and then) keeps the last good
+            if ips and not isinstance(ips, BaseException):
+                _known[h] = frozenset(ips)
+        _cache.update(key=key, at=time.time(), ips=frozenset().union(*(_known.get(h, ()) for h in key)))
     return _cache["ips"]
 
 

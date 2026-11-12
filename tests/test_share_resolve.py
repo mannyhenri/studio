@@ -6,8 +6,13 @@ Live: Studio on the Windows PC answered 403 to Mannys-Mac-Pro.local, from its IP
 IPv6. Windows resolves a .local name asked without a family to IPv6 only, so the Mac's IPv4 never got into the
 allow-list. For EVERY way a resolver can answer (IPv6 only unless asked for IPv4; IPv4 only unless asked for IPv6;
 both; a family that errors), modelshare._resolve must return the union of what either family gives.
+
+Live, later: a 16 GB pull from the Mac ran for minutes, then every piece came back 403 (with the Mac's address unchanged).
+The PC looks the workers up again every TTL, and a .local (mDNS) lookup on Windows sometimes finds nothing; one empty
+answer emptied the allow-list. For EVERY sequence of lookups (good then empty; good then failing; good then a new
+address), _allowed_ips must keep the host's last good addresses while a lookup finds none, and take the new ones when found.
 """
-import importlib, os, socket, sys, types
+import asyncio, importlib, os, socket, sys, types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 fp = types.ModuleType("folder_paths")
@@ -47,5 +52,36 @@ for name, answers in RESOLVERS.items():
     want = {str(share._ip(x[4][0])) for fam in (0, socket.AF_INET, socket.AF_INET6) for x in (answers.get(fam) or [])}
     check(got == want, f"{name}: allows {sorted(got)} (want {sorted(want)})")
 socket.getaddrinfo = real
+
+NEW = "192.168.4.41"
+SEQUENCES = {   # name -> what each successive lookup of the Mac finds, and what must be allowed after each
+    "good, then empty": [({V4}, {V4}), (set(), {V4}), (set(), {V4})],
+    "good, then failing": [({V4}, {V4}), (None, {V4})],
+    "good, then a new address": [({V4}, {V4}), ({NEW}, {NEW})],
+    "never found": [(set(), set()), (None, set())],
+}
+W = [{"label": "mac-vega-a", "host": "Mannys-Mac-Pro.local"}, {"label": "pc-box", "host": "other.local"}]
+real_resolve = share._resolve
+for name, seq in SEQUENCES.items():
+    share._cache.update(key=None, at=0, ips=frozenset())
+    share._known.clear() if hasattr(share, "_known") else None
+    got_all, want_all = [], []
+    for found, want in seq:
+        def res(h, _f=found):
+            if h != "mannys-mac-pro.local":
+                return {share._ip("10.0.0.9")}
+            if _f is None:
+                raise OSError("lookup failed")
+            return {share._ip(x) for x in _f}
+        share._resolve = res
+        share._cache["at"] = 0                 # the TTL has passed: look up again
+        try:
+            ips = asyncio.run(share._allowed_ips(W))
+        except Exception as e:
+            ips = {f"error {e}"}
+        got_all.append(sorted(str(x) for x in ips if str(x) != "10.0.0.9"))
+        want_all.append(sorted(want))
+    check(got_all == want_all, f"{name}: allowed after each lookup {got_all} (want {want_all})")
+share._resolve = real_resolve
 print(f"\n{len(fails)} failed" if fails else "\nall passed")
 sys.exit(1 if fails else 0)
