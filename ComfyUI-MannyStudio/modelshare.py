@@ -41,10 +41,15 @@ def _ip(s):
 
 
 def _resolve(host):
-    try:
-        return {a for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM) if (a := _ip(info[4][0]))}
-    except Exception:
-        return set()                     # a host that doesn't resolve contributes nothing
+    """Every address host resolves to, asked per family: Windows answers a .local name asked without a family with
+    IPv6 only, so a Mac connecting over IPv4 would be refused."""
+    out = set()
+    for fam in (0, socket.AF_INET, socket.AF_INET6):
+        try:
+            out |= {a for info in socket.getaddrinfo(host, None, family=fam, type=socket.SOCK_STREAM) if (a := _ip(info[4][0]))}
+        except Exception:
+            pass                         # a family that doesn't resolve contributes nothing
+    return out
 
 
 async def _allowed_ips(workers):
