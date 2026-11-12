@@ -15,7 +15,7 @@ them, the job is gated again and renders. Reported either way: pass with the pic
 the card's exact error; plus seconds per step and the card's peak vram_in_use while it ran. The pushed files stay on
 the Mac (real models it can use again).
 """
-import asyncio, glob, importlib.util, json, os, shutil, sys, tempfile, time, types, urllib.request
+import asyncio, glob, random, importlib.util, json, os, shutil, sys, tempfile, time, types, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PKG = os.path.join(ROOT, "ComfyUI-MannyStudio")
@@ -84,6 +84,12 @@ async def main():
     model = next(i for i in d["inputs"] if i["kind"] == "choice" and any("P-H3" in o for o in i["options"]))
     vals = {model["key"]: next(o for o in model["options"] if "P-H3" in o)}
     _wf, api = await studio._build_prompt(app, vals)
+    seeded = 0
+    for n in api.values():             # a fresh seed: the same prompt again comes back from ComfyUI's cache in seconds
+        for k in ("seed", "noise_seed"):
+            if isinstance((n.get("inputs") or {}).get(k), int):
+                n["inputs"][k], seeded = random.randrange(2**32), seeded + 1
+    check(seeded > 0, f"a fresh seed on {seeded} sampler input(s), so the run renders")
     used = sorted({v for n in api.values() for v in (n.get("inputs") or {}).values() if isinstance(v, str) and "p-h3" in v.lower()})
     print("P-H3 job uses:", used)
     pushes, real_push = [], remote._push_file
@@ -128,7 +134,7 @@ async def main():
                for d in FOLDERS for n in os.listdir(os.path.join(PH3, d)) if n.endswith(".safetensors")}
     check(all(f in FOLDERS for f, *_ in pushes) and on_card and all(c == 200 for c in on_card.values()),
           f"the card has every P-H3 file ({on_card}); Studio pushed the ones it lacked: {pushes or 'none needed'}")
-    ok = job["status"] == "done" and size and hi - lo > 10
+    ok = job["status"] == "done" and size and hi - lo > 10 and len(steps) >= 2    # stepped: rendered, not cached
     check(ok, f"P-H3 on {W['label']}: {job['status']} {job.get('error') or ''} | picture {size} | "
               f"{per_step and round(per_step, 1)} s/step | peak vram_in_use {peak / 1e9:.1f} GB | {time.time() - t0:.0f} s total")
     print(f"\n{len(fails)} failed" if fails else "\nall passed")

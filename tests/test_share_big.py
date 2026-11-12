@@ -10,7 +10,7 @@ a Range from the start, one ending at the last byte, an open "from X" range, and
 """
 import asyncio, hashlib, importlib.util, os, sys, tempfile, types
 
-from aiohttp import web, ClientSession
+from aiohttp import web, ClientSession, ClientTimeout
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PKG = os.environ.get("STUDIO_PKG") or os.path.join(ROOT, "ComfyUI-MannyStudio")
@@ -102,6 +102,19 @@ async def main():
             ok = code == (206 if rng else 200) and n == b - a + 1 and h.hexdigest() == want(a, b) and cl == str(b - a + 1) \
                 and (not rng or (cr or "").startswith(f"bytes {a}-{b}/{SIZE}"))
             check(ok, f"{name}: {code}, {n} of {b - a + 1} bytes, Content-Range {cr}")
+        # a file that shrinks while it is sent (replaced, truncated): the client must see an error, never a clean short body
+        share = sys.modules["studio.modelshare"]
+        real_size = share.os.path.getsize
+        share.os.path.getsize = lambda p: real_size(p) + 5 * 2**20 if p == big else real_size(p)
+        n, err = 0, None
+        try:
+            async with s.get(url, headers={"Range": "bytes=0-"}, timeout=ClientTimeout(total=None, sock_read=30)) as r:
+                async for chunk in r.content.iter_chunked(1 << 22):
+                    n += len(chunk)
+        except Exception as e:
+            err = type(e).__name__
+        share.os.path.getsize = real_size
+        check(err == "ClientPayloadError", f"file shrank mid-send: client got {n} bytes and {'error ' + err if err else 'NO error (a silent short file)'}")
         async with s.head(url) as r:
             check(r.status == 200 and r.headers.get("Content-Length") == str(SIZE), f"HEAD: {r.status}, Content-Length {r.headers.get('Content-Length')}")
     await run.cleanup()

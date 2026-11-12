@@ -82,6 +82,19 @@ for name, seq in SEQUENCES.items():
         got_all.append(sorted(str(x) for x in ips if str(x) != "10.0.0.9"))
         want_all.append(sorted(want))
     check(got_all == want_all, f"{name}: allowed after each lookup {got_all} (want {want_all})")
+# a last good address is kept for KNOWN_MAX at most: past that, a host whose lookups keep failing is no longer allowed
+share._cache.update(key=None, at=0, ips=frozenset())
+share._known.clear()
+real_time, now = share.time.time, [1_000_000.0]
+share.time.time = lambda: now[0]
+got = []
+for dt, found in ((0, {V4}), (3600, None), (25 * 3600, None), (60, {NEW})):
+    now[0] += dt
+    share._resolve = lambda h, _f=found: (_ for _ in ()).throw(OSError("lookup failed")) if _f is None else {share._ip(x) for x in _f}
+    share._cache["at"] = 0
+    got.append(sorted(str(x) for x in asyncio.run(share._allowed_ips(W[:1]))))
+share.time.time = real_time
+check(got == [[V4], [V4], [], [NEW]], f"last good kept 1 h, dropped after 24 h of failed lookups, new one taken: {got}")
 share._resolve = real_resolve
 print(f"\n{len(fails)} failed" if fails else "\nall passed")
 sys.exit(1 if fails else 0)

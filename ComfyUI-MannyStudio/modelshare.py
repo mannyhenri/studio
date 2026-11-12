@@ -23,7 +23,8 @@ H = {}
 TTL = 60                                 # seconds a worker's resolved addresses are trusted
 NOT_MODELS = {"custom_nodes", "configs"}  # folder keys that aren't model files
 _cache = {"key": None, "at": 0, "ips": frozenset()}
-_known = {}                               # host -> its last addresses a lookup found
+_known = {}                               # host -> (its last addresses a lookup found, when)
+KNOWN_MAX = 24 * 3600                     # how long those stand in for lookups that find nothing (a moved DHCP lease)
 
 
 CHUNK = 4 << 20
@@ -61,8 +62,9 @@ async def _send_file(request, path, headers):
         left = stop - start
         while left:
             chunk = await asyncio.to_thread(f.read, min(left, CHUNK))
-            if not chunk:
-                break
+            if not chunk:     # it shrank while sent: drop the connection so the client errors, not a short "whole" file
+                request.transport and request.transport.close()
+                raise ConnectionResetError(f"{os.path.basename(path)} ended {left} bytes short while it was sent")
             await resp.write(chunk)
             left -= len(chunk)
     await resp.write_eof()
@@ -94,10 +96,13 @@ async def _allowed_ips(workers):
     key = tuple(sorted({w["host"].lower() for w in workers}))
     if _cache["key"] != key or time.time() - _cache["at"] > TTL:
         found = await asyncio.gather(*(asyncio.to_thread(_resolve, h) for h in key), return_exceptions=True)
+        now = time.time()
         for h, ips in zip(key, found):   # a lookup that finds nothing (mDNS on Windows, now and then) keeps the last good
             if ips and not isinstance(ips, BaseException):
-                _known[h] = frozenset(ips)
-        _cache.update(key=key, at=time.time(), ips=frozenset().union(*(_known.get(h, ()) for h in key)))
+                _known[h] = (frozenset(ips), now)
+            elif h in _known and now - _known[h][1] > KNOWN_MAX:
+                del _known[h]
+        _cache.update(key=key, at=now, ips=frozenset().union(*(_known[h][0] for h in key if h in _known)))
     return _cache["ips"]
 
 

@@ -574,7 +574,9 @@ def _show_fetch(w, job, files):
     done = sum(x.get("done") or 0 for x in left)
     unit, div = ("GB", 1e9) if size >= 1e9 else ("MB", 1e6)
     more = f" (+{len(left) - 1} more)" if len(left) > 1 else ""
-    job["step"] = f"Downloading model {f.get('value')}{more} on {w['label']}" + (f": {done / div:.1f}/{size / div:.1f} {unit}" if size else "")
+    what = (f"Sending model {f.get('value')}{more} to {w['label']}" if f.get("status") == "receiving"   # a PC is pushing it
+            else f"Downloading model {f.get('value')}{more} on {w['label']}")
+    job["step"] = what + (f": {done / div:.1f}/{size / div:.1f} {unit}" if size else "")
     job["progress"] = done / size if size else 0.0
     notes = [x["note"] for x in files if x.get("note")]
     if notes:

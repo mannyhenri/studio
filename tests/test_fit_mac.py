@@ -282,8 +282,17 @@ async def main():
     handled = set(re.findall(r'status"\) (?:==|!=) "(\w+)"', src)) | set(re.findall(r'f\.get\("status"\) == "(\w+)"', src))
     check(wire <= {"present", "downloading", "failed", "unavailable"} and {"present", "failed", "unavailable"} <= handled,
           f"C3 statuses on the wire {sorted(wire)} are all handled by Studio ({sorted(handled)})")
-    reads = set(re.findall(r'(?:x|f|e)\.get\("(\w+)"\)', src[src.index("def _fetch("):src.index("async def _fetch_then_send")]))
     mac_src = open(os.path.join(MAC, "comfy_nodes", "mac_fetch.py"), encoding="utf-8").read()
+    # EVERY status literal the Mac's code can put in a reply (not just those this run happened to see), after answer()'s
+    # mapping: the terminal ones are acted on, the rest are waits, each with its own words on Studio's queue line
+    in_src = {x for pair in re.findall(r'"status":\s*"(\w+)"(?:\s+if\b[^,]*?\belse\s+"(\w+)")?', mac_src) for x in pair if x}
+    on_wire = {sent.get(x, x) for x in in_src}
+    words = {x: (remote._show_fetch({"label": "mac-vega-b"}, j := {}, [{"value": "m.safetensors", "status": x}]), j["step"])[1]
+             for x in on_wire - {"present", "failed", "unavailable"}}
+    check({"present", "failed", "unavailable"} <= handled and len(set(words.values())) == len(words) and "receiving" in on_wire,
+          f"C3 every status in mac_fetch.py {sorted(in_src)} -> on the wire {sorted(on_wire)}: terminal ones handled, each wait "
+          f"worded apart on the queue line {words}")
+    reads = set(re.findall(r'(?:x|f|e)\.get\("(\w+)"\)', src[src.index("def _fetch("):src.index("async def _fetch_then_send")]))
     mac_keys = set(re.findall(r'"(\w+)":', mac_src)) | {"value", "status"}
     check(reads <= mac_keys, f"C3 the keys Studio reads from a reply {sorted(reads)} are keys the Mac sends (missing {sorted(reads - mac_keys)})")
 
