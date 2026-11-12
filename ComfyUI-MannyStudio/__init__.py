@@ -25,7 +25,7 @@ from . import remote as _remote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
-VERSION = "1.24.0"
+VERSION = "1.25.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -2819,6 +2819,10 @@ _poses.setup(globals())
 from . import videotools as _videotools  # noqa: E402
 _videotools.setup(globals())
 
+# ---------------------------------------------------------------- music video: a planned video as one storyboard, rendered in time with the song
+from . import musicvideo as _musicvideo  # noqa: E402
+_musicvideo.setup(globals())
+
 # ---------------------------------------------------------------- keep the queue across shutdowns
 from . import queuekeep as _queuekeep  # noqa: E402
 _queuekeep.setup(globals())
@@ -2826,7 +2830,6 @@ _queuekeep.setup(globals())
 # ---------------------------------------------------------------- share model files with the GPU machines (a Mac fetches what HF lacks)
 from . import modelshare as _modelshare  # noqa: E402
 _modelshare.setup(globals())
-_remote.LOCAL_MODEL, _remote.LOCAL_SHA = _modelshare.local_model, _modelshare._sha     # a Mac that can't pull gets it pushed
 
 
 try:   # carry on with Civitai downloads that a restart interrupted
