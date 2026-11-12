@@ -50,8 +50,9 @@ FETCH_TIMEOUT = 60      # seconds one /mac/fetch ask may take
 FETCH_TRIES = 3         # a download that fails this many times in a row (each ask resumes it) fails the job
 LOCAL_INFO = None       # async () -> this PC's /object_info, set by Studio: says which pack a node the worker lacks comes from
 LOCAL_MODEL = None      # (folder, value) -> this PC's file for a model, or None; set by Studio (modelshare's own rules)
-LOCAL_SHA = None        # path -> a sha256 already known for it, or None
+LOCAL_SHA = None        # path -> its sha256 (sidecar or computed once and cached); sent with every push
 PUSH_CHUNK = 1 << 20
+PUSH_STALL = LOST_AFTER  # a push that gains no bytes for this long (dropped line, 202 with nothing taken, a lock) fails
 _PUSHES = {}            # (worker, folder, value) -> the task pushing it, so jobs needing one file send it once
 
 
@@ -102,10 +103,12 @@ def resume(dirs, incoming=".private_incoming", on_done=None):
         w = workers.get(job.get("worker"))
         if not w:
             job.update(status="failed", error=f"{job.get('worker')} is no longer set up", finished_at=time.time())
+            _ended(job, on_done)        # a moved job comes back to this PC's queue
             continue
         if job["status"] == "fetching":     # the prompt isn't kept on disk, so it can't be sent once the model lands
             job.update(status="failed", finished_at=time.time(),
                        error=f"Studio restarted while {w['label']} was downloading a model; send it again (the download carries on)")
+            _ended(job, on_done)
             continue
         if job["status"] == "cancelling":
             job["task"] = asyncio.ensure_future(_quiet(cancel(w, job["prompt_id"])))
@@ -114,6 +117,14 @@ def resume(dirs, incoming=".private_incoming", on_done=None):
         n += 1
     _persist()
     return n
+
+
+def _ended(job, on_done):
+    if on_done:
+        try:
+            on_done(job)
+        except Exception as e:
+            print("[Studio] remote on_done:", e)
 
 
 async def _quiet(coro):
@@ -501,14 +512,25 @@ async def _push_file(w, folder, value, path, job):
     import urllib.parse
     url = f"{base(w)}/mac/models/{folder}/{urllib.parse.quote(value.replace(chr(92), '/'), safe='/')}"
     size = os.path.getsize(path)
-    sha = LOCAL_SHA(path) if LOCAL_SHA else None
-    stuck = 0
+    sha = await asyncio.to_thread(LOCAL_SHA, path) if LOCAL_SHA else None     # the worker checks every byte against it
+    from aiohttp import ClientError
+    best, since = -1, time.time()       # progress = what the worker says it has; a network error just asks again
     async with ClientSession() as s:
         while True:
-            async with s.head(url, timeout=ClientTimeout(total=30)) as r:
-                if r.status == 200:
-                    return
-                have = int(r.headers.get("X-Mac-Have") or 0)
+            try:
+                async with s.head(url, timeout=ClientTimeout(total=30)) as r:
+                    if r.status == 200:
+                        return
+                    have = int(r.headers.get("X-Mac-Have") or 0)
+            except (ClientError, asyncio.TimeoutError) as e:
+                if time.time() - since > PUSH_STALL:
+                    raise RuntimeError(f"Lost the connection to {w['label']} while sending {value} ({type(e).__name__})")
+                await asyncio.sleep(FETCH_POLL)
+                continue
+            if have > best:
+                best, since = have, time.time()
+            elif time.time() - since > PUSH_STALL:
+                raise RuntimeError(f"{w['label']} isn't taking {value}: still {have} of {size} bytes after {PUSH_STALL:.0f} s")
 
             async def body(start=have):
                 done = start
@@ -527,17 +549,16 @@ async def _push_file(w, folder, value, path, job):
                 hd["Content-Range"] = f"bytes {have}-{size - 1}/{size}"
             if sha:
                 hd["X-Studio-SHA256"] = sha
-            async with s.put(url, data=body(), headers=hd, timeout=ClientTimeout(total=None, sock_read=300)) as r:
-                if r.status == 201:
-                    return
-                if r.status in (202, 416):      # cut short, or out of step: ask what it has and go on from there
-                    stuck = stuck + 1 if r.status == 416 else 0
-                elif r.status == 423:           # it's already pulling or being sent this file
-                    await asyncio.sleep(FETCH_POLL)
-                else:
-                    raise RuntimeError(f"{w['label']} wouldn't take {value}: HTTP {r.status} {(await r.text())[:200]}")
-            if stuck >= 3:
-                raise RuntimeError(f"{w['label']} and this PC disagree on how much of {value} it has")
+            try:
+                async with s.put(url, data=body(), headers=hd, timeout=ClientTimeout(total=None, sock_read=300)) as r:
+                    if r.status == 201:
+                        return
+                    if r.status == 423:         # it's already pulling or being sent this file
+                        await asyncio.sleep(FETCH_POLL)
+                    elif r.status not in (202, 416):     # 202 cut short / 416 out of step: ask what it has, go on
+                        raise RuntimeError(f"{w['label']} wouldn't take {value}: HTTP {r.status} {(await r.text())[:200]}")
+            except (ClientError, asyncio.TimeoutError):
+                await asyncio.sleep(FETCH_POLL)     # the line dropped mid-file: the worker keeps the .part
 
 
 def _unavailable(bad):
