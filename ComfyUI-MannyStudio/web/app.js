@@ -3080,7 +3080,7 @@ function remoteState(j) {
 function cardMem(info) {
   const gb = n => (n / 1e9).toFixed(1);
   if (!info) return "";
-  if (info.vram_usable) return `${gb(info.vram_in_use || 0)}/${gb(info.vram_usable)} GB in use` + (info.vram_cached ? ` · ${gb(info.vram_cached)} GB kept from the last job` : "");
+  if (info.vram_usable) return `${gb(info.vram_in_use || 0)}/${gb(info.vram_usable)} GB in use` + (info.vram_cached >= 1e8 ? ` · ${gb(info.vram_cached)} GB kept from the last job` : "");
   const t = info.device && info.device.vram_total;
   return t ? `${(t / 1e9).toFixed(0)} GB card` : "";
 }
