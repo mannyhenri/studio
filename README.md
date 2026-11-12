@@ -84,6 +84,7 @@ $PY tests/test_pair_live.py    # live: both Vegas report their memory and prompt
 $PY tests/test_mac_choices.py  # every model choice x toggle is accepted by a Mac card, or will be once its files arrive (HF or this PC); a gate check, not a render
 $PY tests/test_fit_pair.py     # no Studio code calls the Macs' /mac/te; a card's failure text reaches the job unchanged
 $PY tests/test_share_resolve.py # the PC allows its Mac by IPv4 and IPv6 (Windows answers .local with IPv6 unless asked)
+$PY tests/test_share_big.py     # model files of 2 GiB+ go out whole and by Range even where sendfile can't (Windows: 2 GiB per call)
 $PY tests/test_model_share.py # model sharing: every folder x file, Range, index, 403 for others, no escapes (no workers needed)
 ```
 `RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).
