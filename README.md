@@ -82,6 +82,7 @@ $PY tests/test_entrypoints.py --fetch-mutants   # drop the download on each call
 $PY tests/test_fit_mac.py       # comfy-mac's real fetch code against Studio's real model-share server (needs ~/code/comfy-mac)
 $PY tests/test_push_live.py     # live: a model only this PC has is pushed to mac-vega-b (it can't pull), then the job renders
 $PY tests/test_fit_return.py   # a job moved to a Mac that fails there goes back to the front of this PC's queue; one push per file
+$PY tests/test_pair.py         # a Vega encoding the other card's prompt counts as busier for Any free GPU
 $PY tests/test_model_share.py # model sharing: every folder x file, Range, index, 403 for others, no escapes (no workers needed)
 ```
 `RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).
