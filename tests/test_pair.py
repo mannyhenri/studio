@@ -5,7 +5,7 @@
 comfy-mac runs a job's text encoder on the OTHER card when it's idle (/mac/te) and reports it in /mac/info as "te_for"
 (the worker whose prompt it encodes). For EVERY combination of states of two cards (idle, lending its GPU to the other's
 text encoder, running one of our jobs, both) "auto" must pick the least busy card, a lending card counting one job
-busier, ties to the card listed first; and an older worker without the field is treated as not lending.
+busier (half a job: an encode takes seconds), ties to the card listed first; and an older worker without the field is treated as not lending.
 """
 import asyncio, importlib, itertools, os, sys, types
 
@@ -29,7 +29,7 @@ STATES = {   # name -> (/mac/info extras, queue_remaining)
     "busy+lending": ({"te_for": "other"}, 1),
     "old-worker": (None, 0),          # no te_for field at all
 }
-WEIGHT = {"idle": 0, "lending": 1, "busy": 1, "busy+lending": 2, "old-worker": 0}
+WEIGHT = {"idle": 0, "lending": 0.5, "busy": 1, "busy+lending": 1.5, "old-worker": 0}   # lending lasts seconds: half a job
 
 
 async def main():
