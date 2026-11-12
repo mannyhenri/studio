@@ -23,12 +23,50 @@ H = {}
 TTL = 60                                 # seconds a worker's resolved addresses are trusted
 NOT_MODELS = {"custom_nodes", "configs"}  # folder keys that aren't model files
 _cache = {"key": None, "at": 0, "ips": frozenset()}
+_known = {}                               # host -> its last addresses a lookup found
 
 
-class _Plain(web.FileResponse):
-    """The model file itself, never a <file>.gz/.br sibling that aiohttp would pick for a client accepting gzip/br."""
-    def _get_file_path_stat_encoding(self, accept_encoding):
-        return super()._get_file_path_stat_encoding("")
+CHUNK = 4 << 20
+
+
+async def _send_file(request, path, headers):
+    """The model file itself, streamed in pieces, with Range (206) for resume. Not web.FileResponse: it hands the file
+    to the loop's sendfile, and on Windows TransmitFile takes at most 2**31-1 bytes per call, so any response of 2 GiB
+    or more (most models) went out empty. It could also pick a <file>.gz/.br sibling for a client accepting gzip."""
+    size = os.path.getsize(path)
+    start, stop, status = 0, size, 200
+    if request.headers.get("Range"):
+        try:
+            rng = request.http_range
+        except ValueError:
+            rng = None
+        if rng is not None:
+            a = rng.start if rng.start is not None else 0
+            b = rng.stop if rng.stop is not None else size
+            if a < 0:                      # "bytes=-N": the last N bytes
+                a, b = max(0, size + a), size
+            start, stop, status = a, min(b, size), 206
+        if rng is None or start >= size or start >= stop:
+            raise web.HTTPRequestRangeNotSatisfiable(headers={"Content-Range": f"bytes */{size}"})
+    resp = web.StreamResponse(status=status, headers=headers)
+    resp.content_length = stop - start
+    resp.content_type = "application/octet-stream"
+    if status == 206:
+        resp.headers["Content-Range"] = f"bytes {start}-{stop - 1}/{size}"
+    await resp.prepare(request)
+    if request.method == "HEAD":
+        return resp
+    with open(path, "rb") as f:
+        f.seek(start)
+        left = stop - start
+        while left:
+            chunk = await asyncio.to_thread(f.read, min(left, CHUNK))
+            if not chunk:
+                break
+            await resp.write(chunk)
+            left -= len(chunk)
+    await resp.write_eof()
+    return resp
 
 
 def _ip(s):
@@ -55,8 +93,11 @@ def _resolve(host):
 async def _allowed_ips(workers):
     key = tuple(sorted({w["host"].lower() for w in workers}))
     if _cache["key"] != key or time.time() - _cache["at"] > TTL:
-        found = await asyncio.gather(*(asyncio.to_thread(_resolve, h) for h in key))
-        _cache.update(key=key, at=time.time(), ips=frozenset().union(*found))
+        found = await asyncio.gather(*(asyncio.to_thread(_resolve, h) for h in key), return_exceptions=True)
+        for h, ips in zip(key, found):   # a lookup that finds nothing (mDNS on Windows, now and then) keeps the last good
+            if ips and not isinstance(ips, BaseException):
+                _known[h] = frozenset(ips)
+        _cache.update(key=key, at=time.time(), ips=frozenset().union(*(_known.get(h, ()) for h in key)))
     return _cache["ips"]
 
 
@@ -183,7 +224,7 @@ def setup(ns):
         sha = await asyncio.to_thread(_sha, p)
         if sha:
             hd["X-Studio-SHA256"] = sha
-        return _Plain(p, headers=hd)
+        return await _send_file(request, p, hd)
 
     @routes.get("/manny/api/models/index")
     async def model_index(request):
