@@ -2960,7 +2960,7 @@ async function pageSettings(main) {
     const box = $("#wkbox", p); await loadWorkers();
     const others = S.workers.slice(1);
     box.innerHTML = `<p class="muted">Other computers running ComfyUI that Studio can send renders to (like the Mac Pro's two GPUs). Pick one under Generate, or “Any free GPU”. A job only goes where every model it needs is installed.</p>
-      ${others.map((w, k) => `<div class="row"><span><b>${esc(w.label)}</b> <small class="muted">${esc(w.host)}:${w.port} · ${w.online ? esc(((w.info || {}).device || {}).name || "online") + ` · ${(w.info || {}).queue_remaining || 0} waiting` : "offline: " + esc((w.error || "").slice(0, 120))}</small></span><button class="ghost danger sm" data-rm="${k}">Remove</button></div>`).join("") || `<p class="muted">None yet.</p>`}
+      ${others.map((w, k) => `<div class="row"><span><b>${esc(w.label)}</b> <small class="muted">${esc(w.host)}:${w.port} · ${w.online ? esc(((w.info || {}).device || {}).name || "online") + ` · ${(w.info || {}).queue_remaining || 0} waiting` + (cardMem(w.info) ? " · " + esc(cardMem(w.info)) : "") : "offline: " + esc((w.error || "").slice(0, 120))}</small></span><button class="ghost danger sm" data-rm="${k}">Remove</button></div>`).join("") || `<p class="muted">None yet.</p>`}
       <div class="row"><input id="wkl" placeholder="Name (mac-vega-a)"><input id="wkh" placeholder="Host (Mannys-Mac-Pro.local)"><input id="wkp" placeholder="Port" style="max-width:80px"><button class="btn" id="wka">Add</button></div>`;
     const save = async list => { try { await post("/manny/api/workers", { workers: list.map(({ label, host, port, device }) => ({ label, host, port, device })) }); } catch (e) { toast(e.message, true); } wkDraw(); };
     $$("[data-rm]", box).forEach(b => b.onclick = () => save(others.filter((_, k) => k !== +b.dataset.rm)));
@@ -3074,6 +3074,15 @@ function remoteName(j) { const a = S.apps.find(x => x.id === j.app); return a ? 
 function remoteState(j) {
   return { fetching: j.step || "Downloading the model", queued: "Waiting", running: j.step ? `${Math.round(j.progress * 100)}% · ${j.step}` : "Rendering", downloading: "Copying to this PC",
            cancelling: "Stopping…", done: "Done", failed: "Failed: " + (j.error || "").slice(0, 140), cancelled: "Stopped" + (j.note ? " · " + j.note : "") }[j.status] || j.status;
+}
+/* a GPU machine's memory as it really is: what a job holds now, what's only kept loaded from the last job (freed when
+   the next one needs it), out of what the card can use. Older workers report only the card's size. */
+function cardMem(info) {
+  const gb = n => (n / 1e9).toFixed(1);
+  if (!info) return "";
+  if (info.vram_usable) return `${gb(info.vram_in_use || 0)}/${gb(info.vram_usable)} GB in use` + (info.vram_cached ? ` · ${gb(info.vram_cached)} GB kept from the last job` : "");
+  const t = info.device && info.device.vram_total;
+  return t ? `${(t / 1e9).toFixed(0)} GB card` : "";
 }
 function runTarget() { return S.workers.length > 1 && (S.target === "auto" || S.workers.some(w => w.label === S.target)) ? S.target : "local"; }
 function runOptions() {
@@ -3258,9 +3267,13 @@ async function machinesMon() {
         else if (n) { state = "busy"; txt = `Busy · ${n} job${n > 1 ? "s" : ""} (not from Studio)`; }
         if (n && (run || fet) && n > 1) txt += ` · ${n - 1} waiting`;
         else if (mine.length && !run && !fet && !dl) { state = "busy"; txt = `Waiting · ${n} ahead`; }
+        const te = w.info && w.info.te_for;
+        if (te && state !== "busy") { state = "busy"; txt = `Encoding a prompt for ${prettyWorker(te)}`; }
+        else if (te) txt += ` · also encoding for ${prettyWorker(te)}`;
       }
       const dev = w.label === "local" ? "" : ((w.info && w.info.device && w.info.device.name) || "");
-      return `<div class="mmr ${state}" title="${esc(w.label + (dev ? " · " + dev : "") + (w.error ? " · " + w.error : ""))}"><i></i><span>${esc(prettyWorker(w.label))}</span><b>${esc(txt)}</b></div>`;
+      const mem = cardMem(w.info);
+      return `<div class="mmr ${state}" title="${esc(w.label + (dev ? " · " + dev : "") + (mem ? " · " + mem : "") + (w.error ? " · " + w.error : ""))}"><i></i><span>${esc(prettyWorker(w.label))}</span><b>${esc(txt)}</b></div>`;
     }).join("");
     $(".mml", box).innerHTML = rows;
   } catch { }
