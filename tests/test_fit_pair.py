@@ -32,6 +32,9 @@ FAILURES = [
     "MPS backend out of memory (MPS allocated: 26.46 GiB, other allocations: 5.46 GiB, max allowed: 30.39 GiB). Tried to allocate 128.00 KiB",
     "Invalid buffer size: 4.83 GiB",
     "Cannot execute because node H3FaceTrackCrop does not exist.",
+    # a long one (an MPS error with its allocator detail): its END must arrive too, not just its first 400 chars
+    "MPS backend out of memory (MPS allocated: 29.79 GiB, other allocations: 0.61 GiB, max allowed: 30.39 GiB). " + "x" * 700
+    + " Tried to allocate 1.47 GiB on private pool. END-OF-MESSAGE",
 ]
 
 
