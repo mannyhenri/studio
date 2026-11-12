@@ -550,6 +550,7 @@ SCENARIOS = {
     "push-flaky": ["push"],         # ... and the connection drops in the middle of the first PUT: resume
     "push-stuck": ["push"],         # ... and the Mac answers 202 without taking any bytes: give up with a reason
     "push-locked": ["push"],        # ... and the Mac keeps answering 423 (a stale lock): give up with a reason
+    "push-shared": ["push"],        # ... another push of the file is running (423) and its bytes keep arriving: wait, then render
 }
 REFUSED = {"unavailable": UNAVAILABLE, "noroute": "can't download models", "push-stuck": "isn't taking", "push-locked": "isn't taking"}   # what the caller must be told
 
@@ -642,6 +643,11 @@ async def fake_macs(remote, labels, real_oi, sv):
             have, _w = st["pushed"].get(v, (b"", None))
             scen = st["scenario"]
             if scen == "push-locked":
+                return web.Response(status=423)
+            if scen == "push-shared":                  # the other pusher's bytes land meanwhile; done after a few asks
+                total = int(q.headers.get("Content-Range", "x/0").split("/")[-1]) or int(q.headers.get("Content-Length", 0))
+                grown = have + b"x" * max(1, total // 3)
+                st["pushed"][v] = (grown[:total], total)
                 return web.Response(status=423)
             if scen == "push-stuck":
                 await q.read()
@@ -812,7 +818,7 @@ async def fetch_matrix(studio, remote, drive, reached, said, local_posts, base):
                 check(len(posts) == 1 and len(jobs) == 1 and posts[0]["prompt_id"] == jobs[0]["prompt_id"] and posts[0]["worker"] == w["label"],
                       f"{tag} queued once on {w['label']} under the id it got at once: posts {[(p['worker'], p['prompt_id']) for p in posts]} jobs {[j['prompt_id'] for j in jobs]}")
                 check(len(done) == 1, f"{tag} rendered and came back: {[(j['status'], j.get('error')) for j in jobs]}")
-                want = {"present": 1, "downloading": 3, "failed": 3, "slow": 1, "push": 2, "push-flaky": 2}[scen]
+                want = {"present": 1, "downloading": 3, "failed": 3, "slow": 1, "push": 2, "push-flaky": 2, "push-shared": 2}[scen]
                 if scen in ("push", "push-flaky"):
                     vals = sorted({v for _l, vs in fetches for v in vs if MODEL.search(v or "")})
                     same = all(st["pushed"].get(v, (b"", 0))[0] == open(local[v], "rb").read() for v in vals if v in local)
