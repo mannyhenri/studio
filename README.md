@@ -48,16 +48,13 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 
 Each video dialog has its own **Run on** menu (the same remembered choice as next to Generate). With **Any free GPU** the machine is picked first: if it's this PC, the tool renders exactly as before (it reads the clip in place and frees memory first). If this PC's ComfyUI restarts while a Mac is rendering a video tool, the render still comes back (into the output folder), but the step that cuts it into your clip doesn't run again: run the tool again for the finished clip.
 
-**Models on the Mac.** A choice runs on the Mac only once its model files are there. Most come from Hugging Face: the Mac downloads them by itself the first time you pick it by name for a job that needs them (see above). Voices can't run on the Mac (its Chatterbox node isn't installed there). These exist only on this PC, so copy them yourself into `~/code/comfy-mac/ComfyUI/models/<folder>/` on the Mac. Both workers see them at once, no restart needed:
-
-| File | Folder | Unlocks |
-|---|---|---|
-| `anime_desire_illustrious_v3_fp16` | `checkpoints` | Image · Anime Desire |
-| `flux3-image-klein-int8-convrot` | `diffusion_models` | Image and Edit · FLUX 3 Klein (needs `qwen3vl_4b_int8_convrot` from HF too) |
-| `anima-base-v1.0` | `diffusion_models` | Image · Anima (with `qwen_3_06b_base`) |
-| `qwen_3_06b_base` | `text_encoders` | Image · Anima |
-| `p-h3-image_vae_int8_convrot` | `vae` | Image · P-H3 |
-| `moss_image_nsfw_uncensored_lora`, `qwen_image_2.1_nsfw_lora` | `loras` | the Uncensored toggles |
+**Models on the Mac.** Nothing needs copying by hand. A Mac gets a model it lacks from Hugging Face, or this PC sends it (see below): Civitai LoRAs and checkpoints, and the files only this PC has (`anime_desire_illustrious_v3_fp16`, `flux3-image-klein-int8-convrot`, `anima-base-v1.0`, `qwen_3_06b_base`, `p-h3-image_vae_int8_convrot`, the Uncensored LoRAs).
+- **Formats.** bf16/fp16, int8 (convrot) and GGUF models run as they are. **fp8 models are converted exactly to bf16 as they load**, so they run too (Krea 2 Turbo: 24.4 GB, fully on one card, 951 s). nvfp4, w4a8, GPTQ and AWQ text encoders run on the Mac's CPU encoder. w4a8 image models (P-H3) are still being tested on the cards.
+- **Size.** Each Vega II is a 32 GB card (34.4 GB); 32.6 GB of it is usable (30.4 GiB, the rest is kept back so the card never spills into RAM). A model bigger than that is partly kept in RAM, so no choice is refused for being too big. Settings → GPU machines shows each card's real memory: in use, usable, and what's only kept from the last job (freed when the next job needs it).
+- **Both Vegas on one job.** A job's prompt (its text encoder) is encoded on the other Vega when that card is free, instead of on the CPU: Gemma 12B (LTX) takes 24 s on a card against 56 s on the CPU. A small encoder (4B) can be slower the first time on a card than on the already-warm CPU; the card keeps it loaded, so repeats are fast. Settings shows the lending card as "Encoding a prompt for …", and **Any free GPU** counts it as half a job busier (an encode takes seconds). A card that encoded a big prompt model (over 8 GB) for the other one frees it right after, so it doesn't crowd that card's own next job. **Enhance prompt** (Image) runs its prompt LLM on the job's own card, since it has to write text, not just encode it.
+- **LoRAs on compressed models.** A LoRA on an int8 model no longer needs a second copy of the model on the card: the Mac loads part of it and patches the rest layer by layer as it runs (H3 + its turbo LoRA: 8.3 GB on the card + 11.7 GB in RAM, same speed as the pre-merged model; it used to run out of memory while loading).
+- Wan 2.2 (fp8) now downloads to the Mac instead of being refused; its first render there is still to come.
+- Voices can't run on the Mac (its Chatterbox node isn't installed there).
 
 **This PC shares its model files with the Macs.** Studio serves its model folders over the LAN so a Mac can download a file that isn't on Hugging Face (Civitai LoRAs and checkpoints, the PC-only files above): when the Mac's `/mac/fetch` can't find a model on HF, it downloads it from here instead. If the Mac can't reach this PC (macOS blocks its background workers from opening LAN connections until Local Network is allowed: "No route to host"), **this PC sends the file to the Mac itself** over the connection jobs already use (`PUT /mac/models/…`, resumable, sha256 checked when known). The queue shows "Sending model … to mac-vega-a: x/y GB", then the job renders. A file several jobs need is sent once. Nothing needs to be allowed on the Mac for this. Measured live from this PC: two Qwen LoRAs (159 MB and 614 MB, one in `Civitai\Qwen\`) reached Mac · Vega A in about 2.5 min, then the job was checked again and started there. **Known limits:** that Qwen job uses a Civitai LoKr LoRA (`Qwen_Snofs_1_3`) whose keys the Mac's ComfyUI 0.44 can't apply. The Mac now refuses such a job at load ("it would render only part of the LoRA, unlike the PC"), and it comes back to the front of this PC's queue. The same graph once ran out of memory on Vega A, while the identical graph rendered on Vega B (961 s at 1088×1856); that out-of-memory isn't explained yet.
 - `GET`/`HEAD /manny/api/models/file/<folder>/<name>`: the file, exactly as ComfyUI lists it (`loras/style/x.safetensors`; `/` or `\` both work). Range requests resume a cut download (206). `X-Studio-SHA256` is sent only when a `<file>.sha256` sits next to the file; nothing is hashed on request.
@@ -82,6 +79,11 @@ $PY tests/test_entrypoints.py --fetch-mutants   # drop the download on each call
 $PY tests/test_fit_mac.py       # comfy-mac's real fetch code against Studio's real model-share server (needs ~/code/comfy-mac)
 $PY tests/test_push_live.py     # live: a model only this PC has is pushed to mac-vega-b (it can't pull), then the job renders
 $PY tests/test_fit_return.py   # a job moved to a Mac that fails there goes back to the front of this PC's queue; one push per file
+$PY tests/test_pair.py         # a Vega encoding the other card's prompt counts as busier for Any free GPU
+$PY tests/test_pair_live.py    # live: both Vegas report their memory and prompt lending; Settings and Any free GPU use exactly that
+$PY tests/test_mac_choices.py  # every model choice x toggle is accepted by a Mac card, or will be once its files arrive (HF or this PC); a gate check, not a render
+$PY tests/test_fit_pair.py     # no Studio code calls the Macs' /mac/te; a card's failure text reaches the job unchanged
+$PY tests/test_share_resolve.py # the PC allows its Mac by IPv4 and IPv6 (Windows answers .local with IPv6 unless asked)
 $PY tests/test_model_share.py # model sharing: every folder x file, Range, index, 403 for others, no escapes (no workers needed)
 ```
 `RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).

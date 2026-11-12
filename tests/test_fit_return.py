@@ -58,6 +58,8 @@ sys.modules["studio"] = studio
 spec.loader.exec_module(studio)
 remote = sys.modules["studio.remote"]
 
+# what Studio's own startup must wire up (a commit made from an older copy once dropped it: push silently off)
+WIRING = {"LOCAL_MODEL": "local_model", "LOCAL_SHA": "sha256_of", "LOCAL_INFO": None}
 ENDINGS = [   # (status, error) a moved job can end with on a card
     ("done", None),
     ("cancelled", None),
@@ -82,6 +84,13 @@ async def main():
     site = web.TCPSite(run, "127.0.0.1", 0)
     await site.start()
     ps.port = site._server.sockets[0].getsockname()[1]
+
+    # --- startup wiring: push, the push sha and pack names come from Studio's real modules
+    share = sys.modules["studio.modelshare"]
+    for name, fn in WIRING.items():
+        got = getattr(remote, name)
+        ok = got is not None and (fn is None or got is getattr(share, fn))
+        check(ok, f"Studio's startup wires remote.{name} ({getattr(got, '__name__', got)})")
 
     # --- V17: every ending x both spaces
     k = 0

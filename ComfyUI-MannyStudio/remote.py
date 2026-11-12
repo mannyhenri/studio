@@ -310,6 +310,7 @@ async def pick(workers, api, local_busy, local_ok=True, timeout=15):
             nfo = await asyncio.wait_for(info(w), timeout)
             busy = nfo.get("queue_remaining") or 0
             busy += JOBS_UPLOADING.get(w["label"], 0)
+            busy += 0.5 if nfo.get("te_for") else 0   # its GPU is encoding another job's prompt: seconds, so half a job
             # one of our jobs has held this card for >10 min (an LTX video, an upscale): count it as busier
             busy += sum(1 for j in JOBS.values() if j["worker"] == w["label"] and j["status"] == "running"
                         and time.time() - (j.get("started_at") or time.time()) > LONG_JOB)
@@ -768,7 +769,7 @@ async def _follow(w, job, dirs, incoming, on_done, poll=2, opened=None):
                     st = h.get("status") or {}
                     if st.get("status_str") == "error":
                         msgs = [m[1].get("exception_message", "") for m in st.get("messages", []) if m and m[0] == "execution_error"]
-                        raise RuntimeError(f"{w['label']}: the render failed. " + " ".join(msgs)[:400])
+                        raise RuntimeError(f"{w['label']}: the render failed. " + " ".join(msgs)[:1000])
                     if st.get("completed") or st.get("status_str") == "success":
                         break
                 await asyncio.sleep(poll)
