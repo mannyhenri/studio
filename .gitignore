@@ -9,3 +9,9 @@ favorites.json
 loras.json
 cache/
 .claude/worktrees/
+# the offline sandbox (scripts/sandbox.py): its Python, its ComfyUI folders, jobs and generated media
+.venv/
+node_modules/
+sandbox/run/
+sandbox/jobs/
+sandbox/media/

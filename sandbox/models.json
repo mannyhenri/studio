@@ -1,0 +1,85 @@
+{
+ "background_removal": [
+  "birefnet.safetensors"
+ ],
+ "checkpoints": [
+  "anime_desire_illustrious_v3_fp16.safetensors"
+ ],
+ "clip_vision": [
+  "clip_vision_h.safetensors"
+ ],
+ "diffusion_models": [
+  "MiniMax-H3-encoder-Q4_K_M.gguf",
+  "acestep_v1.5_xl_turbo_bf16.safetensors",
+  "anima-base-v1.0.safetensors",
+  "control_v11p_sd15_openpose_fp16.safetensors",
+  "controlnet-openpose-noobai-illustrious.safetensors",
+  "controlnet-openpose-sdxl-xinsir.safetensors",
+  "flux3-image-klein-int8-convrot.safetensors",
+  "krea2_turbo_fp8_scaled.safetensors",
+  "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+  "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+  "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+  "minimax_music3_dav.safetensors",
+  "minimax_music3_dit_fp16.safetensors",
+  "moodyKrea2Mix_v3-Global-FP8.safetensors",
+  "moss_image_sft_int8_convrot.safetensors",
+  "p-h3-image_w4a8.safetensors",
+  "qwen_0.6b_ace15.safetensors",
+  "qwen_4b_ace15.safetensors",
+  "qwen_image_2.1_turbo_int8_convrot.safetensors",
+  "seedvr2_3b_int8_convrot.safetensors",
+  "seedvr2_7b_int8_convrot.safetensors",
+  "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+  "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+  "wan_animate_2_distill_int8_convrot.safetensors",
+  "z_image_turbo_int8_convrot.safetensors"
+ ],
+ "frame_interpolation": [
+  "film_net_fp16.safetensors"
+ ],
+ "latent_upscale_models": [
+  "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+ ],
+ "loras": [
+  "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+  "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+  "moss_image_nsfw_uncensored_lora.safetensors",
+  "qwen_image_2.1_nsfw_lora.safetensors",
+  "wan2.2_i2v_general_nsfw_high_noise.safetensors",
+  "wan2.2_i2v_general_nsfw_low_noise.safetensors",
+  "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+  "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+ ],
+ "text_encoders": [
+  "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+  "gemma4_e2b_it_int8_convrot.safetensors",
+  "minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+  "p-h3-image_text_encoder_w4a8.safetensors",
+  "qwen3.5_9b_w4a8_gptq.safetensors",
+  "qwen3VL4BAbliteratedComfyui_FP8.safetensors",
+  "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+  "qwen3vl_4b_fp8_scaled.safetensors",
+  "qwen3vl_4b_int8_convrot.safetensors",
+  "qwen3vl_8b_int8_convrot.safetensors",
+  "qwen_3_06b_base.safetensors",
+  "qwen_3_4b_fp8_mixed.safetensors",
+  "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+ ],
+ "vae": [
+  "Wan2_1_VAE_bf16.safetensors",
+  "ace_1.5_vae.safetensors",
+  "ae.safetensors",
+  "flux2-vae.safetensors",
+  "flux2-vae_small.safetensors",
+  "ltx-2.5-audio-vae-bf16.safetensors",
+  "ltx-2.5-video-vae-bf16.safetensors",
+  "minimax_h3_audio_vae_fp32.safetensors",
+  "minimax_h3_video_vae_int8_convrot.safetensors",
+  "p-h3-image_vae_int8_convrot.safetensors",
+  "qwen_image_2.1_vae_bf16.safetensors",
+  "qwen_image_vae.safetensors",
+  "seedvr2_ema_vae_fp16.safetensors",
+  "wan_2.1_vae.safetensors"
+ ]
+}

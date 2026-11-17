@@ -1,0 +1,22 @@
+[project]
+name = "studio"
+version = "0"
+description = "Studio: a studio app on top of a local ComfyUI (this file only configures pytest and ruff)."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/sandbox"]
+python_files = ["test_*.py"]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 160
+extend-exclude = [".venv", "sandbox/run", "sandbox/jobs", "sandbox/media", "patches", "ComfyUI-Studio/mconv", "ComfyUI-Studio/blender"]
+
+[tool.ruff.lint]
+# Errors that mean broken code: syntax errors, undefined names, misused comparisons, unused or shadowed imports.
+select = ["E9", "F63", "F7", "F82", "F401", "F811"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/live/*" = ["F401"]

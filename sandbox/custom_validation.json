@@ -1,0 +1,56 @@
+{
+ "ComfySoftSwitchNode": [
+  "on_false",
+  "on_true",
+  "switch"
+ ],
+ "CustomCombo": [
+  "choice",
+  "index",
+  "**"
+ ],
+ "FluxProUltraImageNode": [
+  "aspect_ratio"
+ ],
+ "HeyGenImageToVideoNode": [
+  "**"
+ ],
+ "HeyGenReferenceToVideoNode": [
+  "**"
+ ],
+ "Kling4EditVideoNode": [
+  "**"
+ ],
+ "Load3D": [
+  "model_file",
+  "**"
+ ],
+ "Load3DAdvanced": [
+  "model_file",
+  "**"
+ ],
+ "LoadAudio": [
+  "audio"
+ ],
+ "LoadImage": [
+  "image"
+ ],
+ "LoadLatent": [
+  "latent"
+ ],
+ "LoadVideo": [
+  "file"
+ ],
+ "ModelAttentionBackend": [
+  "attention"
+ ],
+ "SelectCLIPDevice": [
+  "device"
+ ],
+ "SelectModelDevice": [
+  "device"
+ ],
+ "SelectVAEDevice": [
+  "device"
+ ]
+}

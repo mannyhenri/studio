@@ -1,0 +1,248 @@
+{
+ "FL_ChatterboxTTS": {
+  "input": {
+   "required": {},
+   "optional": {}
+  },
+  "input_order": {
+   "required": [],
+   "optional": []
+  },
+  "output": [
+   "AUDIO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "AUDIO"
+  ],
+  "name": "FL_ChatterboxTTS",
+  "display_name": "FL_ChatterboxTTS",
+  "description": "Custom node pack 'ComfyUI_Fill-ChatterBox' (not in any registry). Inputs are not declared here: the sandbox accepts any.",
+  "python_module": "custom_nodes.ComfyUI_Fill-ChatterBox",
+  "category": "sandbox/custom",
+  "output_node": false
+ },
+ "H3ConcatAV": {
+  "input": {
+   "required": {},
+   "optional": {}
+  },
+  "input_order": {
+   "required": [],
+   "optional": []
+  },
+  "output": [
+   "IMAGE",
+   "AUDIO"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "AUDIO"
+  ],
+  "name": "H3ConcatAV",
+  "display_name": "H3ConcatAV",
+  "description": "Custom node pack 'comfyui-h3-multishot' (not in any registry). Inputs are not declared here: the sandbox accepts any.",
+  "python_module": "custom_nodes.comfyui-h3-multishot",
+  "category": "sandbox/custom",
+  "output_node": false
+ },
+ "H3LastFrame": {
+  "input": {
+   "required": {},
+   "optional": {}
+  },
+  "input_order": {
+   "required": [],
+   "optional": []
+  },
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "name": "H3LastFrame",
+  "display_name": "H3LastFrame",
+  "description": "Custom node pack 'comfyui-h3-multishot' (not in any registry). Inputs are not declared here: the sandbox accepts any.",
+  "python_module": "custom_nodes.comfyui-h3-multishot",
+  "category": "sandbox/custom",
+  "output_node": false
+ },
+ "H3LoadVideoPath": {
+  "input": {
+   "required": {},
+   "optional": {}
+  },
+  "input_order": {
+   "required": [],
+   "optional": []
+  },
+  "output": [
+   "*"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "*"
+  ],
+  "name": "H3LoadVideoPath",
+  "display_name": "H3LoadVideoPath",
+  "description": "Custom node pack 'comfyui-h3-multishot' (not in any registry). Inputs are not declared here: the sandbox accepts any.",
+  "python_module": "custom_nodes.comfyui-h3-multishot",
+  "category": "sandbox/custom",
+  "output_node": false
+ },
+ "H3VideoFrames": {
+  "input": {
+   "required": {},
+   "optional": {}
+  },
+  "input_order": {
+   "required": [],
+   "optional": []
+  },
+  "output": [
+   "IMAGE",
+   "AUDIO",
+   "FLOAT"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "AUDIO",
+   "FLOAT"
+  ],
+  "name": "H3VideoFrames",
+  "display_name": "H3VideoFrames",
+  "description": "Custom node pack 'comfyui-h3-multishot' (not in any registry). Inputs are not declared here: the sandbox accepts any.",
+  "python_module": "custom_nodes.comfyui-h3-multishot",
+  "category": "sandbox/custom",
+  "output_node": false
+ },
+ "MiniMaxH3MotionContext": {
+  "input": {
+   "required": {},
+   "optional": {}
+  },
+  "input_order": {
+   "required": [],
+   "optional": []
+  },
+  "output": [
+   "CONDITIONING",
+   "INT",
+   "LATENT"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "CONDITIONING",
+   "INT",
+   "LATENT"
+  ],
+  "name": "MiniMaxH3MotionContext",
+  "display_name": "MiniMaxH3MotionContext",
+  "description": "Custom node pack 'comfyui-h3-multishot' (not in any registry). Inputs are not declared here: the sandbox accepts any.",
+  "python_module": "custom_nodes.comfyui-h3-multishot",
+  "category": "sandbox/custom",
+  "output_node": false
+ },
+ "MiniMaxH3MotionContextTrim": {
+  "input": {
+   "required": {},
+   "optional": {}
+  },
+  "input_order": {
+   "required": [],
+   "optional": []
+  },
+  "output": [
+   "IMAGE",
+   "AUDIO"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "AUDIO"
+  ],
+  "name": "MiniMaxH3MotionContextTrim",
+  "display_name": "MiniMaxH3MotionContextTrim",
+  "description": "Custom node pack 'comfyui-h3-multishot' (not in any registry). Inputs are not declared here: the sandbox accepts any.",
+  "python_module": "custom_nodes.comfyui-h3-multishot",
+  "category": "sandbox/custom",
+  "output_node": false
+ },
+ "H3FaceTrackCrop": {
+  "input": {
+   "required": {},
+   "optional": {}
+  },
+  "input_order": {
+   "required": [],
+   "optional": []
+  },
+  "output": [
+   "IMAGE",
+   "*"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "*"
+  ],
+  "name": "H3FaceTrackCrop",
+  "display_name": "H3FaceTrackCrop",
+  "description": "Custom node pack 'ComfyUI-H3-FaceRefine' (not in any registry). Inputs are not declared here: the sandbox accepts any.",
+  "python_module": "custom_nodes.ComfyUI-H3-FaceRefine",
+  "category": "sandbox/custom",
+  "output_node": false
+ },
+ "H3FaceStitch": {
+  "input": {
+   "required": {},
+   "optional": {}
+  },
+  "input_order": {
+   "required": [],
+   "optional": []
+  },
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "name": "H3FaceStitch",
+  "display_name": "H3FaceStitch",
+  "description": "Custom node pack 'ComfyUI-H3-FaceRefine' (not in any registry). Inputs are not declared here: the sandbox accepts any.",
+  "python_module": "custom_nodes.ComfyUI-H3-FaceRefine",
+  "category": "sandbox/custom",
+  "output_node": false
+ }
+}

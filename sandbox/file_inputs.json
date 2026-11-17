@@ -1,0 +1,247 @@
+{
+"CheckpointLoaderSimple": {
+"ckpt_name": [
+"checkpoints"
+]
+},
+"VAELoader": {
+"vae_name": [
+"vae"
+]
+},
+"LoadImage": {
+"image": [
+"image"
+]
+},
+"LoadImageMask": {
+"image": [
+"image"
+]
+},
+"LoraLoader": {
+"lora_name": [
+"loras"
+]
+},
+"CLIPLoader": {
+"clip_name": [
+"text_encoders"
+]
+},
+"UNETLoader": {
+"unet_name": [
+"diffusion_models"
+]
+},
+"DualCLIPLoader": {
+"clip_name1": [
+"text_encoders"
+],
+"clip_name2": [
+"text_encoders"
+]
+},
+"ControlNetLoader": {
+"control_net_name": [
+"controlnet"
+]
+},
+"DiffControlNetLoader": {
+"control_net_name": [
+"controlnet"
+]
+},
+"StyleModelLoader": {
+"style_model_name": [
+"style_models"
+]
+},
+"CLIPVisionLoader": {
+"clip_name": [
+"clip_vision"
+]
+},
+"unCLIPCheckpointLoader": {
+"ckpt_name": [
+"checkpoints"
+]
+},
+"GLIGENLoader": {
+"gligen_name": [
+"gligen"
+]
+},
+"CheckpointLoader": {
+"config_name": [
+"configs"
+],
+"ckpt_name": [
+"checkpoints"
+]
+},
+"LoraLoaderModelOnly": {
+"lora_name": [
+"loras"
+]
+},
+"HypernetworkLoader": {
+"hypernetwork_name": [
+"hypernetworks"
+]
+},
+"UpscaleModelLoader": {
+"model_name": [
+"upscale_models"
+]
+},
+"ImageOnlyCheckpointLoader": {
+"ckpt_name": [
+"checkpoints"
+]
+},
+"TrainLoraNode": {
+"existing_lora": [
+"loras"
+]
+},
+"PhotoMakerLoader": {
+"photomaker_model_name": [
+"photomaker"
+]
+},
+"ConditioningLoader": {
+"conditioning_name": [
+"embeddings"
+]
+},
+"LoadAudio": {
+"audio": [
+"audio",
+"video"
+]
+},
+"TripleCLIPLoader": {
+"clip_name1": [
+"text_encoders"
+],
+"clip_name2": [
+"text_encoders"
+],
+"clip_name3": [
+"text_encoders"
+]
+},
+"LatentUpscaleModelLoader": {
+"model_name": [
+"latent_upscale_models"
+]
+},
+"LTXVAudioVAELoader": {
+"ckpt_name": [
+"checkpoints"
+]
+},
+"LTXAVTextEncoderLoader": {
+"text_encoder": [
+"text_encoders"
+],
+"ckpt_name": [
+"checkpoints"
+]
+},
+"CreateHookLora": {
+"lora_name": [
+"loras"
+]
+},
+"CreateHookLoraModelOnly": {
+"lora_name": [
+"loras"
+]
+},
+"CreateHookModelAsLora": {
+"ckpt_name": [
+"checkpoints"
+]
+},
+"CreateHookModelAsLoraModelOnly": {
+"ckpt_name": [
+"checkpoints"
+]
+},
+"LoadVideo": {
+"file": [
+"video"
+]
+},
+"QuadrupleCLIPLoader": {
+"clip_name1": [
+"text_encoders"
+],
+"clip_name2": [
+"text_encoders"
+],
+"clip_name3": [
+"text_encoders"
+],
+"clip_name4": [
+"text_encoders"
+]
+},
+"ModelPatchLoader": {
+"name": [
+"model_patches"
+]
+},
+"AudioEncoderLoader": {
+"audio_encoder_name": [
+"audio_encoders"
+]
+},
+"LoraLoaderBypass": {
+"lora_name": [
+"loras"
+]
+},
+"LoraLoaderBypassModelOnly": {
+"lora_name": [
+"loras"
+]
+},
+"LoadBackgroundRemovalModel": {
+"bg_removal_name": [
+"background_removal"
+]
+},
+"FrameInterpolationModelLoader": {
+"model_name": [
+"frame_interpolation"
+]
+},
+"OpticalFlowLoader": {
+"model_name": [
+"optical_flow"
+]
+},
+"LoadMoGeModel": {
+"model_name": [
+"geometry_estimation"
+]
+},
+"LoadMediaPipeFaceLandmarker": {
+"model_name": [
+"detection"
+]
+},
+"LoadDA3Model": {
+"model_name": [
+"geometry_estimation"
+]
+},
+"SAM3DBody_Loader": {
+"model_file": [
+"detection"
+]
+}
+}

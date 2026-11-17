@@ -1,0 +1,11 @@
+# The sandbox's own Python environment (scripts/setup-linux.sh installs it into .venv). No torch, no GPU.
+aiohttp>=3.9
+numpy>=1.26
+pillow>=10.0
+av>=12.0
+psutil>=5.9
+pyyaml>=6.0
+simpleeval>=1.0
+certifi
+pytest>=8.0
+ruff>=0.6

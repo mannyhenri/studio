@@ -1,27 +1,41 @@
 # Studio
 
-A studio app on top of a local ComfyUI: pictures, shots, storyboards and reels from your own models, with no node graphs in sight. Open `http://<this-pc>:8188/manny` (or `/studio`) on the PC, another computer or a phone.
+A studio app on top of a local ComfyUI: pictures, shots, storyboards and reels from your own models, with no node graphs in sight. Open `http://<this-pc>:8188/studio` on the PC, another computer or a phone.
 
 ## What's here
 
 | Folder | What it is |
 |---|---|
-| `ComfyUI-MannyStudio/` | The Studio custom node pack: the web app (`web/`), its server routes (`__init__.py`), the Incognito lock (`auth.py`) and a vendored UI→API workflow converter (`mconv/`, from comfy-cli, GPL-3.0). |
+| `ComfyUI-Studio/` | The Studio custom node pack: the web app (`web/`), its server routes (`__init__.py`), the Incognito lock (`auth.py`), a vendored UI→API workflow converter (`mconv/`, from comfy-cli, GPL-3.0) and three.js for Previz (`web/vendor/three/`, MIT, rebuilt by `scripts/vendor-three.sh`). |
 | `workflows/` | The ComfyUI App-mode workflows Studio runs (`*.app.json`) plus the editable graph versions. |
 | `builders/` | Python scripts that generate those workflows (`wf.py` is the small builder library). |
+| `3D sets/` | Sets to try Previz with (Previz › Add a .glb): `Squared V2.glb` (with its cameras, lights and characters) and `Squared Sets.glb` (the same set exported without cameras, for the camera-rig fallback). |
+| `screenplays/` | The Glass Harbour as a PDF and as a Fountain file: try Projects › Import a screenplay with either (the tests use both). |
 | `patches/seedvr2-xpu/` | Patch that adds Intel Arc (XPU) support to the `seedvr2_videoupscaler` node pack 2.5.24. |
+
+## Try it in the offline sandbox (Linux, no GPU)
+
+```sh
+npm run sandbox
+```
+
+That one command sets everything up the first time (a Python environment in `.venv`, ffmpeg, sample media), starts Studio
+inside a stand-in ComfyUI with demo data (the pictures and 3 short clips of a small piece of the film “The Glass Harbour”,
+nothing else: import its screenplay from `screenplays/` in Projects) and opens `http://localhost:8188/studio`. Every job is checked like ComfyUI checks it, saved to
+`sandbox/jobs/` and answered with a grey picture, clip or sound of the right size. Nothing renders, downloads or reaches the
+internet. See [docs/sandbox.md](docs/sandbox.md); tests: `python3 scripts/sandbox.py check`.
 
 ## Install on a PC
 
-1. Copy `ComfyUI-MannyStudio` into `ComfyUI/custom_nodes/`.
+1. Copy `ComfyUI-Studio` into `ComfyUI/custom_nodes/`.
 2. Copy `workflows/*.app.json` into `ComfyUI/user/default/workflows/`.
-3. Restart ComfyUI and open `/manny`.
+3. Restart ComfyUI and open `/studio`.
 
-Private data (password hash, characters, storyboards, favorites, LoRA notes, Civitai key) stays in `ComfyUI/user/default/manny_studio/` and is never part of this repo.
+Private data (password hash, characters, storyboards, favorites, LoRA notes, Civitai key) stays in `ComfyUI/user/default/studio_data/` and is never part of this repo.
 
 ## Features
 
-Create (Image, Video and tools: Edit, Inpaint, Upscale, Upscale video, Remove background, Smooth motion) · Gallery with fast cached previews · Compare models · Characters · Storyboard with takes, pick, final-quality re-render, compare/wipe, continue from last frame, finish (1080p, 48/60 fps, sound) · Film editor (trims, crossfades, titles, captions, music bed) · Reel cut to the beat · AI review of a take and AI prompt help (local Qwen3-VL) · LoRA browser for Civitai (your own key) · Incognito private space · Mobile layout.
+Projects from a screenplay (import a PDF, Final Draft .fdx or Fountain file, or write it) · A screenwriting app on the Hollywood standard page: Enter and Tab pick the element the place calls for (the next speaker after a speech, a parenthetical at the end of a cue), SmartType (characters, INT./EXT., places, times, transitions, extensions), Alt+1…0 elements, dual dialogue, emphasis, notes, a scene navigator and index cards (drag to reorder), find and replace, rename a character, reports, locked scene numbers, drafts with compare, restore and revision marks, focus mode, the local AI's writing help; exported as PDF (with revision marks), Final Draft, Fountain or plain text · Broken down into scenes and numbered shots like a breakdown sheet, again at every save; a cast and locations that follow the screenplay as it's written (a new place or speaking part joins, each location with its form and reference picture); a storyboard organized as Film Engine's (a frame per shot with its card, filters, versions, print, lock); takes that follow the screenplay (what each change did to each shot, in words; frames and takes made from an earlier text; a cut shot keeps its takes), and the film inside the project · Create (Image, Video and tools: Edit, Inpaint, Upscale, Upscale video, Remove background, Smooth motion) · Gallery with fast cached previews · Compare models · Characters · Storyboard (in each project) with takes, pick, final-quality re-render, compare/wipe, continue from last frame, finish (1080p, 48/60 fps, sound) · Film editor (trims, crossfades, titles, captions, music bed) · Previz: add a 3D set (.glb), or start from a quick scene, and direct it in the browser: its cameras or your own, shot sizes, camera heights and angles, camera moves that play with the set's animation, lighting setups, stand-ins and props · Reel cut to the beat · AI review of a take and AI prompt help (local Qwen3-VL) · LoRA browser for Civitai (your own key) · Incognito private space · Mobile layout.
 
 ## Render on other GPUs (the Mac Pro)
 
@@ -29,7 +43,7 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 
 **Set up**
 1. On the Mac: start both workers and the LAN gate (`lan_gate.py --allow <this-pc>.local --ports 8188 8189`). ComfyUI has no password, so the gate only lets this PC in.
-2. In Studio, on this PC (or with Incognito unlocked): **Settings → GPU machines**, add `mac-vega-a` · `Mannys-Mac-Pro.local` · `8188` and `mac-vega-b` · `Mannys-Mac-Pro.local` · `8189`. They're kept in `manny_studio/workers.json` (comfy-mac's `mac-workers.json` also works pasted as is).
+2. In Studio, on this PC (or with Incognito unlocked): **Settings → GPU machines**, add `mac-vega-a` · `studio-mac.local` · `8188` and `mac-vega-b` · `studio-mac.local` · `8189`. They're kept in `studio_data/workers.json` (comfy-mac's `mac-workers.json` also works pasted as is).
 3. Under **Generate** a "Run on" menu appears: **This PC**, **Any free GPU**, or one machine. The same choice is used by Finish, Music, Voices, Compare, Storyboard, project keyframes, 3D frame paint and the video tools. Over MCP, `studio_generate`, `studio_project_keyframes` and the video tools take `run_on`.
 
 **How a job is sent**
@@ -40,7 +54,7 @@ Studio can send a render to another computer running ComfyUI. Today that's the M
 - **Incognito** jobs never go to another machine on "Any free GPU"; they run here unless you pick a Mac by name. If you do, the job crosses your network over plain HTTP and is wiped from the Mac when it's done.
 - The input files (pictures, videos, sounds) are uploaded with the job, into a folder of their own. The result is copied into this PC's output folder under the next free name (it never replaces a file here). Then the Mac deletes the job's outputs, uploads and history (`/mac/forget`). A failed job is cleaned up the same way.
 - Cancel (✕ in the queue drawer) takes the job out of the Mac's queue or stops it, then cleans up the same way. A Mac that restarts mid-job fails the job ("restarted and lost the job"); one that stops answering for 10 min does too.
-- Jobs on other machines survive a restart of this PC's ComfyUI: they're kept in `manny_studio/remote_jobs.json` and followed again at startup. As a safety net the Mac clears Studio jobs that finished more than 24 h ago, so a result that waits longer than a day for this PC to come back is lost (the job shows as failed).
+- Jobs on other machines survive a restart of this PC's ComfyUI: they're kept in `studio_data/remote_jobs.json` and followed again at startup. As a safety net the Mac clears Studio jobs that finished more than 24 h ago, so a result that waits longer than a day for this PC to come back is lost (the job shows as failed).
 
 **What stays on this PC:** AI review and AI prompt help (their result is text, not a file) and Topaz in Finish.
 
@@ -57,36 +71,36 @@ Each video dialog has its own **Run on** menu (the same remembered choice as nex
 - Voices can't run on the Mac (its Chatterbox node isn't installed there).
 
 **This PC shares its model files with the Macs.** Studio serves its model folders over the LAN so a Mac can download a file that isn't on Hugging Face (Civitai LoRAs and checkpoints, the PC-only files above): when the Mac's `/mac/fetch` can't find a model on HF, it downloads it from here instead. If the Mac can't reach this PC (macOS blocks its background workers from opening LAN connections until Local Network is allowed: "No route to host"), **this PC sends the file to the Mac itself** over the connection jobs already use (`PUT /mac/models/…`, resumable, sha256 checked when known). The queue shows "Sending model … to mac-vega-a: x/y GB", then the job renders. A file several jobs need is sent once. Nothing needs to be allowed on the Mac for this. Measured live from this PC: two Qwen LoRAs (159 MB and 614 MB, one in `Civitai\Qwen\`) reached Mac · Vega A in about 2.5 min, then the job was checked again and started there. **Known limits:** that Qwen job uses a Civitai LoKr LoRA (`Qwen_Snofs_1_3`) whose keys the Mac's ComfyUI 0.44 can't apply. The Mac now refuses such a job at load ("it would render only part of the LoRA, unlike the PC"), and it comes back to the front of this PC's queue. The same graph once ran out of memory on Vega A, while the identical graph rendered on Vega B (961 s at 1088×1856); that out-of-memory isn't explained yet.
-- `GET`/`HEAD /manny/api/models/file/<folder>/<name>`: the file, exactly as ComfyUI lists it (`loras/style/x.safetensors`; `/` or `\` both work). Range requests resume a cut download (206). `X-Studio-SHA256` is sent only when a `<file>.sha256` sits next to the file; nothing is hashed on request.
-- `GET /manny/api/models/index?folder=<folder>`: `{"files": [{"name", "size", "mtime"}]}`.
+- `GET`/`HEAD /studio/api/models/file/<folder>/<name>`: the file, exactly as ComfyUI lists it (`loras/style/x.safetensors`; `/` or `\` both work). Range requests resume a cut download (206). `X-Studio-SHA256` is sent only when a `<file>.sha256` sits next to the file; nothing is hashed on request.
+- `GET /studio/api/models/index?folder=<folder>`: `{"files": [{"name", "size", "mtime"}]}`.
 - Who can reach it: this PC, and the GPU machines in **Settings → GPU machines** (each host's addresses, looked up again every minute). Any other device on the network gets 403, with or without Incognito unlocked; there's no password or token. Only model folders are served (found through ComfyUI's own folder list, never `custom_nodes`), `..` and absolute names are refused, and nothing in the Incognito space is ever served even if a model path points there.
 - ComfyUI on this PC must listen on the network (`--listen`) for the Mac to reach it.
 
-**If Settings shows a Mac "offline"** although its workers run: the Mac's LAN gate only lets in the PC it was started for (`lan-gate.sh` allows `desktop-mggcgsg.local`). On the Mac, `ping <this-pc>.local` must answer; if it doesn't, start the gate with this PC's IP (`GATE_ALLOW=192.168.x.y ./lan-gate.sh`). Windows tries the Mac's IPv6 address first, and the gate listens on both.
+**If Settings shows a Mac "offline"** although its workers run: the Mac's LAN gate only lets in the PC it was started for (`lan-gate.sh` allows `studio-pc.local`). On the Mac, `ping <this-pc>.local` must answer; if it doesn't, start the gate with this PC's IP (`GATE_ALLOW=192.168.x.y ./lan-gate.sh`). Windows tries the Mac's IPv6 address first, and the gate listens on both.
 
-Check which choices a machine can run with `POST /manny/api/workers/check {"app": "<app id>", "values": {...}}`.
+Check which choices a machine can run with `POST /studio/api/workers/check {"app": "<app id>", "values": {...}}`.
 
-**Tests** (need the workers running; comfy-mac's venv has aiohttp and simpleeval):
+**Live tests** (in `tests/live`; they need the workers running; comfy-mac's venv has aiohttp and simpleeval; `STUDIO_LIVE=1 python -m pytest tests/live` runs them all, and the sandbox skips them):
 ```sh
 PY=~/code/comfy-mac/.venv/bin/python
-$PY tests/test_prune.py       # every app x every choice: trimmed job == what ComfyUI runs
-$PY tests/test_remote.py      # check == each worker's own validation, real renders, cleanup
-$PY tests/test_run_route.py   # Studio's routes: Run on, Any free GPU, cancel, Finish/Music/Voice paths
-$PY tests/test_revise.py      # no overwrites, shared references, failed/lost/restarted jobs, resume after restart
-$PY tests/test_entrypoints.py # every render entry point reaches the GPU it was asked for (--mutants: each path's target is checked)
-FETCH=1 $PY tests/test_entrypoints.py   # a Mac missing the model: every entry point x {present, downloading, failed, unavailable}
-$PY tests/test_entrypoints.py --fetch-mutants   # drop the download on each call site: exactly its entry points fail
-$PY tests/test_fit_mac.py       # comfy-mac's real fetch code against Studio's real model-share server (needs ~/code/comfy-mac)
-$PY tests/test_push_live.py     # live: a model only this PC has is pushed to mac-vega-b (it can't pull), then the job renders
-$PY tests/test_fit_return.py   # a job moved to a Mac that fails there goes back to the front of this PC's queue; one push per file
-$PY tests/test_pair.py         # a Vega encoding the other card's prompt counts as busier for Any free GPU
-$PY tests/test_pair_live.py    # live: both Vegas report their memory and prompt lending; Settings and Any free GPU use exactly that
-$PY tests/test_mac_choices.py  # every model choice x toggle is accepted by a Mac card, or will be once its files arrive (HF or this PC); a gate check, not a render
-$PY tests/test_fit_pair.py     # no Studio code calls the Macs' /mac/te; a card's failure text reaches the job unchanged
-$PY tests/test_share_resolve.py # the PC allows its Mac by IPv4 and IPv6 (Windows answers .local with IPv6 unless asked)
-$PY tests/test_share_big.py     # model files of 2 GiB+ go out whole and by Range even where sendfile can't (Windows: 2 GiB per call); a file that shrinks mid-send errors, never hangs
-$PY tests/test_dispatch_fit.py  # sharing the queue never keeps a job off a Vega for its size: every app x choice x toggle at the PC's real file sizes
-PH3_DIR=... $PY tests/test_ph3_live.py  # live: P-H3 (w4a8) files pushed to mac-vega-b by Studio, rendered with a fresh seed (s/step, peak memory)
-$PY tests/test_model_share.py # model sharing: every folder x file, Range, index, 403 for others, no escapes (no workers needed)
+$PY tests/live/test_prune.py       # every app x every choice: trimmed job == what ComfyUI runs
+$PY tests/live/test_remote.py      # check == each worker's own validation, real renders, cleanup
+$PY tests/live/test_run_route.py   # Studio's routes: Run on, Any free GPU, cancel, Finish/Music/Voice paths
+$PY tests/live/test_revise.py      # no overwrites, shared references, failed/lost/restarted jobs, resume after restart
+$PY tests/live/test_entrypoints.py # every render entry point reaches the GPU it was asked for (--mutants: each path's target is checked)
+FETCH=1 $PY tests/live/test_entrypoints.py   # a Mac missing the model: every entry point x {present, downloading, failed, unavailable}
+$PY tests/live/test_entrypoints.py --fetch-mutants   # drop the download on each call site: exactly its entry points fail
+$PY tests/live/test_fit_mac.py       # comfy-mac's real fetch code against Studio's real model-share server (needs ~/code/comfy-mac)
+$PY tests/live/test_push_live.py     # live: a model only this PC has is pushed to mac-vega-b (it can't pull), then the job renders
+$PY tests/live/test_fit_return.py   # a job moved to a Mac that fails there goes back to the front of this PC's queue; one push per file
+$PY tests/live/test_pair.py         # a Vega encoding the other card's prompt counts as busier for Any free GPU
+$PY tests/live/test_pair_live.py    # live: both Vegas report their memory and prompt lending; Settings and Any free GPU use exactly that
+$PY tests/live/test_mac_choices.py  # every model choice x toggle is accepted by a Mac card, or will be once its files arrive (HF or this PC); a gate check, not a render
+$PY tests/live/test_fit_pair.py     # no Studio code calls the Macs' /mac/te; a card's failure text reaches the job unchanged
+$PY tests/live/test_share_resolve.py # the PC allows its Mac by IPv4 and IPv6 (Windows answers .local with IPv6 unless asked)
+$PY tests/live/test_share_big.py     # model files of 2 GiB+ go out whole and by Range even where sendfile can't (Windows: 2 GiB per call); a file that shrinks mid-send errors, never hangs
+$PY tests/live/test_dispatch_fit.py  # sharing the queue never keeps a job off a Vega for its size: every app x choice x toggle at the PC's real file sizes
+PH3_DIR=... $PY tests/live/test_ph3_live.py  # live: P-H3 (w4a8) files pushed to mac-vega-b by Studio, rendered with a fresh seed (s/step, peak memory)
+$PY tests/live/test_model_share.py # model sharing: every folder x file, Range, index, 403 for others, no escapes (no workers needed)
 ```
 `RENDER_APPS` chooses which apps render to the end (default: Remove background and Smooth motion).
