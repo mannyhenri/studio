@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Sets up Studio's offline sandbox on Linux: a Python environment in .venv (aiohttp, numpy, pillow, av, pytest, ruff;
-# no torch, no GPU), ffmpeg, and the sample media. Safe to run again. npm run sandbox runs it by itself the first time.
+# no torch, no GPU), ffmpeg, and the sample media. Safe to run again. npm run sandbox runs it by itself the first time (and
+# again when sandbox/requirements.txt changes, or when a setup stopped half-way): there's no need to run it by hand.
 # Only pip (PyPI) is contacted, and only when something is missing.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,10 +36,12 @@ fi
 say "Sample media (sandbox/media)"
 PATH="$ROOT/.venv/bin:$PATH" .venv/bin/python sandbox/make_media.py
 
+# done: npm run sandbox checks this stamp (the requirements it was made for) before starting
+.venv/bin/python -c 'import hashlib; print(hashlib.sha256(open("sandbox/requirements.txt", "rb").read()).hexdigest()[:16])' > .venv/.sandbox-ready
+
 [ -n "${SANDBOX_FROM_CLI:-}" ] && exit 0
 cat <<'TXT'
 
-Ready. Start Studio with demo data and open it in the browser:
-  npm run sandbox                      (or: python3 scripts/sandbox.py demo --open)
-Other commands: python3 scripts/sandbox.py --help
+Ready. Start Studio (demo data) and open it in the browser with:
+  npm run sandbox
 TXT

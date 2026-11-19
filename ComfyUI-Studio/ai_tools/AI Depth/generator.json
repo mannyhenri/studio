@@ -1,0 +1,90 @@
+{
+  "id": "depth",
+  "name": "AI Depth",
+  "order": 1,
+  "icon": "◭",
+  "short": "Depth maps, depth of field and fog from any shot",
+  "description": "Finds how far away everything is in every frame (Depth Anything 3, on this PC's GPU through ComfyUI). Make a depth pass for compositing (white is near), a colour depth map, or use the depth at once: a depth-of-field blur focused where you say, or fog that thickens with distance. Takes a video or a picture; a depth of field or fog keeps the video's sound.",
+  "script": "engine.py",
+  "accepts": "video",
+  "image_ok": true,
+  "range": "whole",
+  "out": { "flag": "--out", "kind": "file", "ext": ".mp4", "ext_for": { "image": ".png" } },
+  "needs": {
+    "ffmpeg": true,
+    "comfy_nodes": [
+      "LoadVideo",
+      "GetVideoComponents",
+      "LoadImage",
+      "LoadDA3Model",
+      "DA3Inference",
+      "DA3Render",
+      "CreateVideo",
+      "SaveVideo",
+      "SaveImage"
+    ],
+    "model": {
+      "folder": "geometry_estimation",
+      "match": "da3|depth[_ -]?anything",
+      "prefer": "mono",
+      "default": "da3_mono_large.safetensors",
+      "label": "a Depth Anything 3 model (DA3 Mono Large is best for one camera)"
+    }
+  },
+  "options": [
+    {
+      "name": "output",
+      "flag": "--output",
+      "type": "select",
+      "label": "Make",
+      "default": "depth",
+      "choices": [
+        { "value": "depth", "label": "Depth map (white is near)" },
+        { "value": "color", "label": "Depth map in colour" },
+        { "value": "dof", "label": "Depth of field" },
+        { "value": "fog", "label": "Fog" }
+      ]
+    },
+    {
+      "name": "focus",
+      "flag": "--focus",
+      "type": "slider",
+      "label": "Focus (near → far)",
+      "default": 0.15,
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "when": { "output": [ "dof" ] }
+    },
+    {
+      "name": "blur",
+      "flag": "--blur",
+      "type": "slider",
+      "label": "Blur amount",
+      "default": 1,
+      "min": 0.2,
+      "max": 3,
+      "step": 0.1,
+      "when": { "output": [ "dof" ] }
+    },
+    {
+      "name": "density",
+      "flag": "--density",
+      "type": "slider",
+      "label": "Fog density",
+      "default": 0.6,
+      "min": 0.05,
+      "max": 1,
+      "step": 0.05,
+      "when": { "output": [ "fog" ] }
+    },
+    {
+      "name": "detail",
+      "flag": "--detail",
+      "type": "select",
+      "label": "Detail",
+      "default": 504,
+      "choices": [ { "value": 504, "label": "Standard (fast)" }, { "value": 756, "label": "High" }, { "value": 1008, "label": "Highest (slow)" } ]
+    }
+  ]
+}

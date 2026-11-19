@@ -1,0 +1,65 @@
+{
+  "id": "subtitles",
+  "name": "AI Subtitles",
+  "order": 4,
+  "icon": "☰",
+  "short": "Subtitles from what's said: SRT and WebVTT",
+  "description": "Listens to the dialogue with Whisper, on this PC, and writes subtitles timed to each word: an .srt (for Resolve, Premiere and the players), a .vtt (for the web) and a plain transcript. A subtitle is at most two lines of 42 characters (or 32, for phones) and ends with its sentence when it can. It can also translate the dialogue into English. Takes a video or a sound file. The first run downloads the Whisper model.",
+  "script": "engine.py",
+  "accepts": "video",
+  "audio_ok": true,
+  "needs_sound": true,
+  "range": "whole",
+  "out": { "flag": "--out", "kind": "dir" },
+  "needs": {
+    "ffmpeg": true,
+    "python_any": [ "faster_whisper", "whisper" ],
+    "install": "pip install faster-whisper into ComfyUI's Python (the portable build: python_embeded\\python.exe -m pip install faster-whisper)"
+  },
+  "options": [
+    {
+      "name": "language",
+      "flag": "--language",
+      "type": "select",
+      "label": "Language spoken",
+      "default": "auto",
+      "choices": [
+        { "value": "auto", "label": "Find it by listening" },
+        { "value": "en", "label": "English" },
+        { "value": "fr", "label": "French" },
+        { "value": "es", "label": "Spanish" },
+        { "value": "de", "label": "German" },
+        { "value": "it", "label": "Italian" },
+        { "value": "pt", "label": "Portuguese" },
+        { "value": "nl", "label": "Dutch" },
+        { "value": "ja", "label": "Japanese" },
+        { "value": "ko", "label": "Korean" },
+        { "value": "zh", "label": "Chinese" },
+        { "value": "ru", "label": "Russian" },
+        { "value": "ar", "label": "Arabic" },
+        { "value": "hi", "label": "Hindi" }
+      ]
+    },
+    { "name": "translate", "flag": "--translate", "type": "checkbox", "label": "Translate the dialogue into English", "default": false },
+    {
+      "name": "accuracy",
+      "flag": "--accuracy",
+      "type": "select",
+      "label": "Accuracy",
+      "default": "balanced",
+      "choices": [
+        { "value": "fast", "label": "Fast (Whisper small)" },
+        { "value": "balanced", "label": "Balanced (Whisper medium)" },
+        { "value": "best", "label": "Best (Whisper large-v3, slow)" }
+      ]
+    },
+    {
+      "name": "chars",
+      "flag": "--chars",
+      "type": "select",
+      "label": "Line length",
+      "default": 42,
+      "choices": [ { "value": 42, "label": "Standard (42 characters)" }, { "value": 32, "label": "Short (32, for phones)" } ]
+    }
+  ]
+}

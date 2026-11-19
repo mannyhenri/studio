@@ -1,0 +1,54 @@
+{
+  "id": "master",
+  "name": "One-Click Master",
+  "order": 6,
+  "icon": "◉",
+  "short": "Loudness-ready masters, in one click",
+  "description": "Masters a song or a film's mix in one click, on this PC: takes out the low rumble, shapes the tone if you ask, and sets the loudness to the target you pick (measured the EBU R128 / ITU-R BS.1770 way, in two passes) with the true peak held under the ceiling. The master is measured again and its loudness shown. A video keeps its picture untouched, with the mastered sound.",
+  "script": "engine.py",
+  "accepts": "audio",
+  "range": "whole",
+  "out": { "flag": "--out", "kind": "file", "ext": ".wav", "ext_for": { "video": ".mp4" } },
+  "needs": { "ffmpeg": true },
+  "options": [
+    {
+      "name": "target",
+      "flag": "--target",
+      "type": "select",
+      "label": "Master for",
+      "default": -14,
+      "choices": [
+        { "value": -14, "label": "Streaming: Spotify, YouTube, Tidal (−14 LUFS)" },
+        { "value": -16, "label": "Apple Music, podcasts (−16 LUFS)" },
+        { "value": -23, "label": "Broadcast, EBU R128 (−23 LUFS)" },
+        { "value": -24, "label": "US broadcast, ATSC A/85 (−24 LUFS)" },
+        { "value": -9, "label": "Loud: club, promos (−9 LUFS)" }
+      ]
+    },
+    {
+      "name": "ceiling",
+      "flag": "--ceiling",
+      "type": "select",
+      "label": "True-peak ceiling",
+      "default": -1,
+      "choices": [
+        { "value": -1, "label": "−1 dBTP (streaming)" },
+        { "value": -2, "label": "−2 dBTP (safest for MP3 and AAC)" },
+        { "value": -0.3, "label": "−0.3 dBTP (CD)" }
+      ]
+    },
+    {
+      "name": "character",
+      "flag": "--character",
+      "type": "select",
+      "label": "Tone",
+      "default": "transparent",
+      "choices": [
+        { "value": "transparent", "label": "Transparent (loudness only)" },
+        { "value": "warm", "label": "Warm" },
+        { "value": "bright", "label": "Bright" },
+        { "value": "punchy", "label": "Punchy (gentle compression)" }
+      ]
+    }
+  ]
+}

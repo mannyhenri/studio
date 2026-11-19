@@ -1,0 +1,50 @@
+{
+  "id": "stems",
+  "name": "AI Stems",
+  "order": 3,
+  "icon": "♬",
+  "short": "Split a song or a mix into vocals, drums, bass…",
+  "description": "Separates a song or a mix into stems with Demucs, on this PC: vocals and music, or vocals, drums, bass and the rest (or six, with guitar and piano). Each stem is its own file, the same length as the original, ready to remix or to take the voice out of a scene. Takes a sound file or a video's sound. The first run downloads the Demucs model (about 80 MB).",
+  "script": "engine.py",
+  "accepts": "video",
+  "audio_ok": true,
+  "needs_sound": true,
+  "range": "whole",
+  "out": { "flag": "--out", "kind": "dir" },
+  "needs": {
+    "ffmpeg": true,
+    "python_any": [ "demucs" ],
+    "install": "pip install demucs into ComfyUI's Python (the portable build: python_embeded\\python.exe -m pip install demucs)"
+  },
+  "options": [
+    {
+      "name": "stems",
+      "flag": "--stems",
+      "type": "select",
+      "label": "Stems",
+      "default": 4,
+      "choices": [
+        { "value": 2, "label": "Vocals + music" },
+        { "value": 4, "label": "Vocals, drums, bass, other" },
+        { "value": 6, "label": "Six: vocals, drums, bass, guitar, piano, other" }
+      ]
+    },
+    {
+      "name": "quality",
+      "flag": "--quality",
+      "type": "select",
+      "label": "Quality",
+      "default": "fast",
+      "when": { "stems": [ 2, 4 ] },
+      "choices": [ { "value": "fast", "label": "Standard" }, { "value": "best", "label": "Best (about 4× slower)" } ]
+    },
+    {
+      "name": "format",
+      "flag": "--format",
+      "type": "select",
+      "label": "Files",
+      "default": "wav",
+      "choices": [ { "value": "wav", "label": "WAV, 24-bit" }, { "value": "flac", "label": "FLAC" } ]
+    }
+  ]
+}

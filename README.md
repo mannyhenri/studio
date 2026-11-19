@@ -6,7 +6,7 @@ A studio app on top of a local ComfyUI: pictures, shots, storyboards and reels f
 
 | Folder | What it is |
 |---|---|
-| `ComfyUI-Studio/` | The Studio custom node pack: the web app (`web/`), its server routes (`__init__.py`), the Incognito lock (`auth.py`), a vendored UI→API workflow converter (`mconv/`, from comfy-cli, GPL-3.0) and three.js for Previz (`web/vendor/three/`, MIT, rebuilt by `scripts/vendor-three.sh`). |
+| `ComfyUI-Studio/` | The Studio custom node pack: the web app (`web/`), its server routes (`__init__.py`), the AI tools (`generators.py`, an engine per tool in `ai_tools/`), the MCP server for AI assistants (`studio_mcp.py`, also at `/studio/mcp`; a project's steps for it in `projectops.py`), the Incognito lock (`auth.py`), a vendored UI→API workflow converter (`mconv/`, from comfy-cli, GPL-3.0) and three.js for Previz (`web/vendor/three/`, MIT, rebuilt by `scripts/vendor-three.sh`). |
 | `workflows/` | The ComfyUI App-mode workflows Studio runs (`*.app.json`) plus the editable graph versions. |
 | `builders/` | Python scripts that generate those workflows (`wf.py` is the small builder library). |
 | `3D sets/` | Sets to try Previz with (Previz › Add a .glb): `Squared V2.glb` (with its cameras, lights and characters) and `Squared Sets.glb` (the same set exported without cameras, for the camera-rig fallback). |
@@ -16,26 +16,61 @@ A studio app on top of a local ComfyUI: pictures, shots, storyboards and reels f
 ## Try it in the offline sandbox (Linux, no GPU)
 
 ```sh
+cd studio          # this folder
 npm run sandbox
 ```
 
-That one command sets everything up the first time (a Python environment in `.venv`, ffmpeg, sample media), starts Studio
-inside a stand-in ComfyUI with demo data (the pictures and 3 short clips of a small piece of the film “The Glass Harbour”,
-nothing else: import its screenplay from `screenplays/` in Projects) and opens `http://localhost:8188/studio`. Every job is checked like ComfyUI checks it, saved to
+That one command is how the app is run: it sets everything up the first time (a Python environment in `.venv`, ffmpeg,
+sample media), starts Studio inside a stand-in ComfyUI with demo data (the pictures and 3 short clips of a small piece of
+the film “The Glass Harbour”, nothing else: import its screenplay from `screenplays/` in Projects) and opens
+`http://localhost:8188/studio` in your browser by itself. Every job is checked like ComfyUI checks it, saved to
 `sandbox/jobs/` and answered with a grey picture, clip or sound of the right size. Nothing renders, downloads or reaches the
-internet. See [docs/sandbox.md](docs/sandbox.md); tests: `python3 scripts/sandbox.py check`.
+internet. Its options (`npm run sandbox -- --keep` to keep last time's data, `--empty`, `--port`, `--no-open`) are in
+[docs/sandbox.md](docs/sandbox.md); tests: `npm run sandbox:check` (everything), `npm run test:mcp` and
+`npm run test:generators` (one suite each, by name; `-- --url http://<pc>:8188` checks a real Studio).
 
 ## Install on a PC
 
 1. Copy `ComfyUI-Studio` into `ComfyUI/custom_nodes/`.
 2. Copy `workflows/*.app.json` into `ComfyUI/user/default/workflows/`.
 3. Restart ComfyUI and open `/studio`.
+4. For the AI tools (Production › AI tools): AI Slow-Mo uses the FILM model Smooth motion already uses
+   (`models/frame_interpolation/film_net_fp16.safetensors`); AI Depth needs a Depth Anything 3 model in
+   `models/geometry_estimation/` (DA3 Mono Large is best for a single camera); AI Stems and AI Subtitles need Demucs and
+   faster-whisper in ComfyUI's Python (`python -m pip install demucs faster-whisper`, with the portable build's
+   `python_embeded\python.exe`). A tool that's missing something says what, on its page and in the menu.
 
 Private data (password hash, characters, storyboards, favorites, LoRA notes, Civitai key) stays in `ComfyUI/user/default/studio_data/` and is never part of this repo.
 
+## Use Studio from Claude and other AI assistants (MCP)
+
+Studio is an MCP server: an AI assistant can do through it what you do in the app. Tell it *"write a short film about a
+lighthouse keeper and her grandson, break it down, make the characters and locations and their pictures, then the
+storyboard"* and it writes the screenplay, Studio breaks it down into scenes and shots, casts the speaking parts (a
+character made from how the screenplay introduces them), makes a location for every place, and the assistant fills in
+the character sheets and the locations' looks, makes their reference pictures, the storyboard's frames, the takes, the
+music, the voices and the film, looking at the pictures as it goes. 61 tools: projects and their screenplays (write,
+import a PDF / Final Draft / Fountain file, export), the breakdown, cast, characters, locations, storyboard, takes,
+sound, the film; every Create app; the gallery; the AI tools; the local AI's writing, prompt and review help; music and
+voices; video fixes; Previz sets; the GPU machines. Everything it makes shows in the app as it goes: an open page takes an
+assistant's changes in by itself, and never saves over them.
+
+Connect an assistant to Studio (ComfyUI running):
+
+- **By URL** (Claude Code, and any assistant that speaks MCP over HTTP): `http://<this-pc>:8188/studio/mcp`, e.g.
+  `claude mcp add --transport http studio http://127.0.0.1:8188/studio/mcp`. Claude Code started in this folder finds it
+  in `.mcp.json` (the sandbox's address).
+- **Started by the assistant** (Claude Desktop, Cowork: MCP over stdio), in its `mcpServers`:
+  `"studio": {"command": "<ComfyUI>\\.venv\\Scripts\\python.exe", "args": ["<ComfyUI>\\custom_nodes\\ComfyUI-Studio\\studio_mcp.py"]}`
+  (`"env": {"STUDIO_URL": "http://<pc>:8188"}` when Studio runs elsewhere).
+
+Only regular items are visible to an assistant (never Incognito), and the files it names are files on the PC Studio runs
+on. `python3 scripts/studio-call.py --list` lists the tools; `python3 scripts/studio-call.py <tool> '<json>'` calls one.
+`npm run test:mcp -- --url http://<this-pc>:8188` checks that the MCP server of a running Studio works.
+
 ## Features
 
-Projects from a screenplay (import a PDF, Final Draft .fdx or Fountain file, or write it) · A screenwriting app on the Hollywood standard page: Enter and Tab pick the element the place calls for (the next speaker after a speech, a parenthetical at the end of a cue), SmartType (characters, INT./EXT., places, times, transitions, extensions), Alt+1…0 elements, dual dialogue, emphasis, notes, a scene navigator and index cards (drag to reorder), find and replace, rename a character, reports, locked scene numbers, drafts with compare, restore and revision marks, focus mode, the local AI's writing help; exported as PDF (with revision marks), Final Draft, Fountain or plain text · Broken down into scenes and numbered shots like a breakdown sheet, again at every save; a cast and locations that follow the screenplay as it's written (a new place or speaking part joins, each location with its form and reference picture); a storyboard organized as Film Engine's (a frame per shot with its card, filters, versions, print, lock); takes that follow the screenplay (what each change did to each shot, in words; frames and takes made from an earlier text; a cut shot keeps its takes), and the film inside the project · Create (Image, Video and tools: Edit, Inpaint, Upscale, Upscale video, Remove background, Smooth motion) · Gallery with fast cached previews · Compare models · Characters · Storyboard (in each project) with takes, pick, final-quality re-render, compare/wipe, continue from last frame, finish (1080p, 48/60 fps, sound) · Film editor (trims, crossfades, titles, captions, music bed) · Previz: add a 3D set (.glb), or start from a quick scene, and direct it in the browser: its cameras or your own, shot sizes, camera heights and angles, camera moves that play with the set's animation, lighting setups, stand-ins and props · Reel cut to the beat · AI review of a take and AI prompt help (local Qwen3-VL) · LoRA browser for Civitai (your own key) · Incognito private space · Mobile layout.
+Projects from a screenplay (import a PDF, Final Draft .fdx or Fountain file, or write it) · A screenwriting app on the Hollywood standard page: Enter and Tab pick the element the place calls for (the next speaker after a speech, a parenthetical at the end of a cue), SmartType (characters, INT./EXT., places, times, transitions, extensions), Alt+1…0 elements, dual dialogue, emphasis, notes, a scene navigator and index cards (drag to reorder), find and replace, rename a character, reports, locked scene numbers, drafts with compare, restore and revision marks, focus mode, the local AI's writing help; exported as PDF (with revision marks), Final Draft, Fountain or plain text · Broken down into scenes and numbered shots like a breakdown sheet, again at every save; a cast and locations that follow the screenplay as it's written (a new place or speaking part joins, each location with its form and reference picture); a storyboard organized as Film Engine's (a frame per shot with its card, filters, versions, print, lock); takes that follow the screenplay (what each change did to each shot, in words; frames and takes made from an earlier text; a cut shot keeps its takes), and the film inside the project · Create (Image, Video and tools: Edit, Inpaint, Upscale, Upscale video, Remove background, Smooth motion) · AI tools (Production, from Film Engine's Generators): AI Depth (depth maps, depth of field, fog; Depth Anything 3), AI Slow-Mo (FILM frame interpolation of a marked section, scene cuts kept sharp), AI Stems (Demucs), AI Subtitles (Whisper: SRT, WebVTT, transcript), AI Lossless Cut (keyframe or frame-exact smart cuts, nothing else re-encoded) and One-Click Master (loudness to a target, true peak under a ceiling, measured) · Gallery with fast cached previews · Compare models · Characters · Storyboard (in each project) with takes, pick, final-quality re-render, compare/wipe, continue from last frame, finish (1080p, 48/60 fps, sound) · Film editor (trims, crossfades, titles, captions, music bed) · Previz: add a 3D set (.glb), or start from a quick scene, and direct it in the browser: its cameras or your own, shot sizes, camera heights and angles, camera moves that play with the set's animation, lighting setups, stand-ins and props · Reel cut to the beat · AI review of a take and AI prompt help (local Qwen3-VL) · LoRA browser for Civitai (your own key) · Incognito private space · Mobile layout.
 
 ## Render on other GPUs (the Mac Pro)
 

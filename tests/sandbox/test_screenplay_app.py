@@ -11,8 +11,9 @@ import urllib.request
 import pytest
 
 from test_screenplay_import import FOUNTAIN, REPO, _port, _with_chrome, chrome, delete, upload
+from find_chrome import WHY_NOT  # noqa: E402
 
-pytestmark = pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+pytestmark = pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 
 CARET_END = """(sel => { const b = typeof sel === 'string' ? [...document.querySelectorAll('.sp-ed ' + sel)].pop() : sel; const r = document.createRange();
     r.selectNodeContents(b); r.collapse(false); const s = getSelection(); s.removeAllRanges(); s.addRange(r); b.closest('.sp-ed').focus(); return b.textContent; })"""

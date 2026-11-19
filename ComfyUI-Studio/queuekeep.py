@@ -22,7 +22,8 @@ _lock = threading.Lock()
 _unfinished = {False: [], True: []}
 _last = {"sig": None}
 SECRET_KEYS = ("api_key", "auth_token", "token", "password", "secret")
-MULTI_STEP = {"studio-videotools": "only the render step is redone: run the video tool again for the joined result"}
+MULTI_STEP = {"studio-videotools": "only the render step is redone: run the video tool again for the joined result",
+              "studio-generators": "only this render step is redone: run the AI tool again for its finished file"}
 
 
 def _files(private):

@@ -1,0 +1,33 @@
+{
+  "id": "cut",
+  "name": "AI Lossless Cut",
+  "order": 5,
+  "icon": "✂",
+  "short": "Cut pieces out of a file without re-encoding it",
+  "description": "Cuts the pieces you mark out of a video or sound file without re-encoding it: each piece keeps exactly the original's quality, and it takes seconds. A keyframe cut starts each piece on the keyframe at or just before your In (nothing is re-encoded); a smart cut starts exactly on your In by re-encoding only the few frames up to the next keyframe (H.264 and HEVC). Each piece is its own file; they can also be joined into one.",
+  "script": "engine.py",
+  "accepts": "video",
+  "audio_ok": true,
+  "range": "segments",
+  "segments": { "flag": "--segments", "max": 99 },
+  "out": { "flag": "--out", "kind": "dir" },
+  "needs": { "ffmpeg": true },
+  "options": [
+    {
+      "name": "mode",
+      "flag": "--mode",
+      "type": "select",
+      "label": "Cut",
+      "default": "keyframe",
+      "choices": [ { "value": "keyframe", "label": "Keyframe cut (nothing re-encoded)" }, { "value": "smart", "label": "Smart cut (frame-exact)" } ]
+    },
+    {
+      "name": "all_tracks",
+      "flag": "--all-tracks",
+      "type": "checkbox",
+      "label": "Keep every track (all the sound tracks, timecode)",
+      "default": true
+    },
+    { "name": "join", "flag": "--join", "type": "checkbox", "label": "Also join the pieces into one file", "default": false }
+  ]
+}

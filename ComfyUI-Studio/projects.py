@@ -211,6 +211,20 @@ def keep_newer_media(old, new):
     return new
 
 
+def by_ai(request):
+    """A request from an AI client (the MCP connector says so with X-Studio-Client: ai), not from the page."""
+    return request.headers.get("X-Studio-Client", "").lower() == "ai"
+
+
+def stale_over_ai(stored, incoming):
+    """A page's save that would undo an AI's change (Claude through MCP): the project was last saved by an AI, after the
+    version the page sends ("updated" as the page read it). The page gets the project as it is now, and takes it in."""
+    if not stored or stored.get("by") != "ai":
+        return False
+    seen = incoming.get("updated")
+    return isinstance(seen, (int, float)) and (stored.get("updated") or 0) > seen + 1e-6
+
+
 SHEET_KEYS = ("name", "age", "gender", "build", "skin", "features", "eyes", "hair", "facial_hair", "marks", "wardrobe", "accessories", "look", "trigger")
 
 
@@ -412,7 +426,11 @@ def setup(ns):
             if other:
                 _check(request, True)
                 _save_all(not private, [x for x in _load(not private) if x.get("id") != b["id"]])
-            keep_newer_media(_get(b["id"], private), b)
+            stored = _get(b["id"], private)
+            if not by_ai(request) and stale_over_ai(stored, b):
+                return web.json_response({"error": "changed", "project": stored}, status=409)
+            keep_newer_media(stored, b)
+        b["by"] = "ai" if by_ai(request) else "page"
         return web.json_response(_put(b))
 
     @routes.delete("/studio/api/projects/{pid}")
@@ -585,29 +603,22 @@ def setup(ns):
         base = dict(b.get("values") or {})
         jobs = b.get("shots") or []                 # [{id, prompt, ref}] prepared by the page
         pkey, rkey, tkey = b.get("prompt_key"), b.get("ref_key"), b.get("ref_toggle_key")
-        if not pkey:                                # called by Claude: work it out from the Image app and the project
-            ins = app["inputs"]
-            pkey = next((i["key"] for i in ins if i["kind"] == "text" and "negative" not in i["label"].lower()), None)
-            rkey = next((i["key"] for i in ins if i["kind"] == "image"), None)
-            tkey = next((i["key"] for i in ins if i["kind"] == "toggle" and "reference" in i["label"].lower()), None)
-            b.setdefault("seed_keys", [i["key"] for i in ins if i["kind"] == "seed"])
-            if b.get("model"):
-                mdl = next((i for i in ins if i["kind"] == "choice" and "model" in i["label"].lower()), None)
-                want = mdl and next((o for o in mdl["options"] if b["model"].lower() in o.lower()), None)
-                if want:
-                    base[mdl["key"]] = want
-            if not jobs:
-                chars = {c.get("id"): c for c in ns["_load_chars"]()}
-                for s in proj.get("shots", []):
-                    if s.get("keyframe") and not b.get("redo"):
-                        continue
-                    cast = [chars[c] for c in proj.get("cast", []) if c in chars]
-                    inshot = [c for c in cast if c.get("face") and re.search(r"\b" + re.escape(c["name"].split(" ")[0]) + r"\b", " ".join(s.get("characters") or []) + " " + (s.get("action") or ""), re.I)]
-                    mdl_key = next((i["key"] for i in ins if i["kind"] == "choice" and "model" in i["label"].lower()), None)
-                    in_shot = [c for c in cast if re.search(r"\b" + re.escape(c["name"].split(" ")[0]) + r"\b", " ".join(s.get("characters") or []) + " " + (s.get("action") or ""), re.I)]
-                    jobs.append({"id": s["id"], "prompt": shot_text(proj, s, False, chars) + (f" {proj['tone']} style, film still." if proj.get("tone") else ""),
-                                 "ref": inshot[0]["face"] if len(inshot) == 1 else "",
-                                 "loras": char_loras(in_shot, str(base.get(mdl_key) or next((i.get("value") for i in ins if i["key"] == mdl_key), "")))})
+        if not pkey:                                # called by an AI (MCP) or a script: the page's frames, worked out here
+            from . import projectops as _ops
+            if proj.get("boardLocked"):
+                raise web.HTTPConflict(text="The storyboard is locked in the page: unlock it to make frames")
+            try:
+                _img, base, L, req = _ops.image_request(b.get("model"), b.get("values"))   # values by the options' labels
+                pkey, rkey, tkey = req["prompt_key"], req["ref_key"], req["ref_toggle_key"]
+                b.setdefault("seed_keys", req["seed_keys"])
+                if not jobs:
+                    only = [str(x).upper() for x in b.get("only") or []]
+                    codes = _sp.shot_codes(proj.get("scenes") or [], proj.get("shots") or [])
+                    todo = [s for s in proj.get("shots", []) if (str(codes.get(s["id"], "")).upper() in only or s["id"].upper() in only) if only] if only \
+                        else [s for s in proj.get("shots", []) if b.get("redo") or not s.get("keyframe")]
+                    jobs = _ops.frame_items(proj, todo, str(base.get((L["model"] or {}).get("key")) or ""), bool(rkey and tkey))
+            except _ops.OpError as e:
+                raise web.HTTPBadRequest(text=str(e))
         job = _new_job(private, kind="project-keyframes")
 
         async def run():
@@ -662,6 +673,12 @@ def setup(ns):
         app = ns["_app_by_name"]("image")
         if not app:
             raise web.HTTPBadRequest(text="The Image app is missing")
+        if not b.get("prompt_key"):                 # an AI (MCP) or a script: the page's values and prompt, worked out here
+            from . import projectops as _ops
+            try:
+                b = _ops.location_body(loc, b)
+            except _ops.OpError as e:
+                raise web.HTTPBadRequest(text=str(e))
         vals = dict(b.get("values") or {})
         if b.get("prompt_key"):
             vals[b["prompt_key"]] = b.get("prompt") or f"{loc.get('full') or loc.get('name')}, {loc.get('look') or ''}, empty, no people, film still"
@@ -706,6 +723,12 @@ def setup(ns):
         app = ns["_app_by_name"]("image")
         if not app:
             raise web.HTTPBadRequest(text="The Image app is missing")
+        if not b.get("prompt_key"):                 # an AI (MCP) or a script: the page's values and prompt, worked out here
+            from . import projectops as _ops
+            try:
+                b = _ops.portrait_body(c, b)
+            except _ops.OpError as e:
+                raise web.HTTPBadRequest(text=str(e))
         vals = dict(b.get("values") or {})
         if b.get("prompt_key"):
             vals[b["prompt_key"]] = b.get("prompt") or f"{c['name']}, {char_desc(c)}"

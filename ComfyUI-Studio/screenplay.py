@@ -1837,6 +1837,13 @@ def _intro(name, actions):
             m = rx.search(para)
             if not m:
                 continue
+            after = para[m.end():].lstrip(" ")
+            if after.startswith("(") and ")" in after:
+                # 'MARA VOSS (60s, weathered, oilskin coat) climbs the stairs': the parenthetical is the description, and
+                # what follows it is action, unless it carries on after a comma ('(40s), a tired cop, …')
+                inner, tail = after[1:after.index(")")].strip(), after[after.index(")") + 1:].lstrip()
+                more = _sentences(tail[1:].strip())[0] if tail.startswith(",") and tail[1:].strip() else ""
+                return m.group(1), (inner + (", " + more.rstrip(".") if more else ""))[:260].strip()
             rest = para[m.end():].lstrip(" ,;:-—(")
             desc = ""
             for sent in _sentences(rest):

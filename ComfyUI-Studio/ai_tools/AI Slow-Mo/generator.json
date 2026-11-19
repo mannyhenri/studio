@@ -1,0 +1,46 @@
+{
+  "id": "slowmo",
+  "name": "AI Slow-Mo",
+  "order": 2,
+  "icon": "≋",
+  "short": "Slow motion from any clip, or smoother motion",
+  "description": "Makes new frames between the real ones (frame interpolation with FILM, on this PC's GPU through ComfyUI). The clip, or the section you mark with In and Out, plays 2, 4 or 8 times slower, or at the same speed with 2 to 8 times the frame rate. Scene cuts are found first, so no frame is ever blended across a cut. Slow motion is silent; smoother motion keeps the sound.",
+  "script": "engine.py",
+  "accepts": "video",
+  "range": "section",
+  "out": { "flag": "--out", "kind": "file", "ext": ".mp4" },
+  "needs": {
+    "ffmpeg": true,
+    "comfy_nodes": [ "LoadVideo", "GetVideoComponents", "FrameInterpolationModelLoader", "FrameInterpolate", "CreateVideo", "SaveVideo" ],
+    "model": {
+      "folder": "frame_interpolation",
+      "match": ".",
+      "prefer": "film",
+      "default": "film_net_fp16.safetensors",
+      "label": "a frame interpolation model (FILM or RIFE)"
+    }
+  },
+  "options": [
+    {
+      "name": "factor",
+      "flag": "--factor",
+      "type": "select",
+      "label": "Slow down",
+      "default": 4,
+      "choices": [ { "value": 2, "label": "2×" }, { "value": 4, "label": "4×" }, { "value": 8, "label": "8×" } ]
+    },
+    { "name": "hfr", "flag": "--hfr", "type": "checkbox", "label": "Smoother motion instead (the same speed, keeps the sound)", "default": false },
+    {
+      "name": "scene",
+      "flag": "--scene",
+      "type": "slider",
+      "label": "Scene cut threshold",
+      "default": 0.3,
+      "min": 0.1,
+      "max": 0.6,
+      "step": 0.05,
+      "hint": "Lower finds more cuts. No frame is ever blended across a cut."
+    },
+    { "name": "compare", "flag": "--compare", "type": "checkbox", "label": "Side by side with the original", "default": false }
+  ]
+}

@@ -1,0 +1,1 @@
+{ "id": "broken", "name": "Broken Tool", "script": "missing.py", "accepts": "video", "range": "whole", "out": { "flag": "--out", "kind": "file" } }

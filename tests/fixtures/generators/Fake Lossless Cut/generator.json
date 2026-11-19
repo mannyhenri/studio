@@ -1,0 +1,6 @@
+{ "id": "fake-cut", "name": "Fake Lossless Cut", "order": 4, "description": "Segments tool for tests: one file per piece.", "script": "../fake_cut.py",
+  "accepts": "video", "audio_ok": true, "range": "segments", "out": { "flag": "--out", "kind": "dir" },
+  "segments": { "flag": "--segments", "max": 5 },
+  "options": [ { "name": "mode", "flag": "--mode", "type": "select", "label": "Cut", "default": "keyframe",
+      "choices": [ { "value": "keyframe", "label": "Keyframe cut" }, { "value": "smart", "label": "Smart cut" } ] },
+    { "name": "all_tracks", "flag": "--all-tracks", "type": "checkbox", "label": "Keep every track", "default": true } ] }

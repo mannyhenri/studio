@@ -14,8 +14,9 @@ import pytest
 
 from test_screenplay_app import CARET_END, keys, open_screenplay, stored
 from test_screenplay_import import FOUNTAIN, _port, _with_chrome, chrome, delete, upload
+from find_chrome import WHY_NOT  # noqa: E402
 
-pytestmark = pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+pytestmark = pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 
 
 def chars(box):

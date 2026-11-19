@@ -1,0 +1,4 @@
+{ "id": "needs-model", "name": "Needs A Model", "order": 6, "script": "../fake_engine.py", "accepts": "video", "range": "whole",
+  "out": { "flag": "--out", "kind": "file", "ext": ".json" },
+  "needs": { "model": { "folder": "geometry_estimation", "match": "da3|depth", "prefer": "mono", "default": "da3_mono_large.safetensors",
+                        "label": "a test depth model" } } }

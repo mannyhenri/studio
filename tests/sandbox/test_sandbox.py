@@ -4,12 +4,12 @@ import asyncio
 import glob
 import json
 import os
-import shutil
 import subprocess
 import sys
 
 import aiohttp
 import pytest
+from find_chrome import WHY_NOT, find_chrome  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STUDIO_GETS = ["/studio/", "/studio/api/info", "/studio/api/apps", "/studio/api/gallery", "/studio/api/characters", "/studio/api/boards",
@@ -18,7 +18,7 @@ STUDIO_GETS = ["/studio/", "/studio/api/info", "/studio/api/apps", "/studio/api/
                "/studio/api/paths", "/studio/api/private/status",
                "/studio/api/remote_jobs", "/studio/api/queue/unfinished", "/studio/api/diag/power",
                "/studio/api/final_requests", "/studio/api/civitai/status", "/studio/api/models/removed", "/studio/api/topaz/jobs",
-               "/studio/api/glb"]
+               "/studio/api/glb", "/studio/api/generators/tools", "/studio/api/generators/jobs", "/studio/api/generators/files", "/studio/api/stamps"]
 
 
 def test_studio_loads_and_every_route_answers(demo):
@@ -219,11 +219,8 @@ def test_studios_own_prune_test_passes_on_the_stand_in(demo):
 
 # ------------------------------------------------------------------ the pages in a real browser
 def chrome():
-    for name in ("google-chrome", "chromium", "chromium-browser", "chrome"):
-        p = shutil.which(name)
-        if p:
-            return p
-    return None
+    """This computer's Chrome (or Chromium, Edge, Brave), wherever it's installed (sandbox/find_chrome.py), or None."""
+    return find_chrome()
 
 
 async def page_errors(chrome_path, url, routes, port, profile):
@@ -274,7 +271,7 @@ async def page_errors(chrome_path, url, routes, port, profile):
     return errors
 
 
-@pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 @pytest.mark.parametrize("which", ["demo", "empty"])
 def test_pages_open_without_console_errors(which, request, tmp_path):
     s = request.getfixturevalue(which)
@@ -282,6 +279,6 @@ def test_pages_open_without_console_errors(which, request, tmp_path):
     with socket.socket() as sk:
         sk.bind(("127.0.0.1", 0))
         port = sk.getsockname()[1]
-    errors = asyncio.run(page_errors(chrome(), s.url, ["home", "gallery", "create", "storyboard", "projects", "characters", "previz", "3d", "settings"],
+    errors = asyncio.run(page_errors(chrome(), s.url, ["home", "gallery", "create", "storyboard", "projects", "characters", "previz", "3d", "settings", "aitools"],
                                      port, str(tmp_path / "chrome")))
     assert all(not v for v in errors.values()), errors

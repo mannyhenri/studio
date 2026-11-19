@@ -302,8 +302,7 @@ def test_what_was_directed_is_saved_with_the_set(scratch):
 
 # ------------------------------------------------------------------ the viewer in a real browser (skipped without Chrome)
 def _chrome():
-    import shutil
-    return next((p for p in map(shutil.which, ("google-chrome", "chromium", "chromium-browser", "chrome")) if p), None)
+    return find_chrome()
 
 
 async def _in_viewer(chrome, url, port, profile, steps):
@@ -477,9 +476,10 @@ async def _directing(js, send, seen):
 
 
 import pytest  # noqa: E402
+from find_chrome import WHY_NOT, find_chrome  # noqa: E402
 
 
-@pytest.mark.skipif(_chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(_chrome() is None, reason=WHY_NOT)
 def test_the_viewer_shows_the_set_and_its_cameras(scratch, tmp_path):
     import asyncio
     import socket
@@ -571,7 +571,7 @@ async def _keyframes(js, send, seen):
     await asyncio.sleep(0.8)                     # saved
 
 
-@pytest.mark.skipif(_chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(_chrome() is None, reason=WHY_NOT)
 def test_keyframes_animate_what_changed(scratch, tmp_path):
     import asyncio
     import socket
@@ -663,7 +663,7 @@ async def _blocking(js, send, seen):
     await asyncio.sleep(0.8)                          # saved
 
 
-@pytest.mark.skipif(_chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(_chrome() is None, reason=WHY_NOT)
 def test_blocking_from_above_and_moves_in_time(scratch, tmp_path):
     import asyncio
     import socket

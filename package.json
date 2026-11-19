@@ -1,14 +1,13 @@
 {
   "name": "studio-sandbox",
   "private": true,
-  "description": "Studio's offline Linux sandbox (Python; npm is only the launcher).",
+  "description": "Studio's offline Linux sandbox (Python; npm is only the launcher). Run the app with: npm run sandbox",
   "scripts": {
-    "sandbox": "python3 scripts/sandbox.py demo --open",
-    "sandbox:empty": "python3 scripts/sandbox.py empty --open",
-    "sandbox:serve": "python3 scripts/sandbox.py serve --open",
-    "sandbox:setup": "bash scripts/setup-linux.sh",
+    "sandbox": "python3 scripts/sandbox.py start",
     "sandbox:check": "python3 scripts/sandbox.py check",
     "sandbox:jobs": "python3 scripts/sandbox.py jobs",
-    "sandbox:last-job": "python3 scripts/sandbox.py last-job"
+    "sandbox:last-job": "python3 scripts/sandbox.py last-job",
+    "test:mcp": "python3 scripts/sandbox.py test mcp",
+    "test:generators": "python3 scripts/sandbox.py test generators"
   }
 }

@@ -1,0 +1,3 @@
+{ "id": "needs-package", "name": "Needs A Package", "order": 5, "script": "../fake_engine.py", "accepts": "audio", "range": "whole",
+  "out": { "flag": "--out", "kind": "dir" },
+  "needs": { "python_any": ["no_such_package_here", "nor_this_one"], "install": "pip install no-such-package" } }

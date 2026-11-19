@@ -14,6 +14,7 @@ import aiohttp
 import pytest
 
 from test_sandbox import chrome
+from find_chrome import WHY_NOT  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FOUNTAIN = os.path.join(REPO, "screenplays", "the_glass_harbour.fountain")
@@ -335,7 +336,7 @@ def _port():
         return sk.getsockname()[1]
 
 
-@pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 def test_the_screenplay_is_one_page_you_type_on(scratch, tmp_path):
     pr = upload(scratch, PDF)[1]["project"]
 
@@ -400,7 +401,7 @@ def test_the_screenplay_is_one_page_you_type_on(scratch, tmp_path):
     delete(scratch, pr["id"])
 
 
-@pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 def test_every_project_step_opens_and_the_storyboard_route_leads_into_the_project(scratch, tmp_path):
     pr = upload(scratch, FOUNTAIN)[1]["project"]
     code, r = scratch.post(f"/studio/api/projects/{pr['id']}/to_board", {"private": False})
@@ -427,7 +428,7 @@ def test_every_project_step_opens_and_the_storyboard_route_leads_into_the_projec
     delete(scratch, pr["id"])
 
 
-@pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 def test_the_page_marks_fall_where_the_standard_page_breaks(scratch, tmp_path):
     """The editor's sheet has the standard page's measures: every element wraps to the same lines as the layout, so the
     page marks are where the pages of the PDF break."""
@@ -453,7 +454,7 @@ def test_the_page_marks_fall_where_the_standard_page_breaks(scratch, tmp_path):
     delete(scratch, pr["id"])
 
 
-@pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 def test_the_board_changes_the_breakdown(scratch, tmp_path):
     pr = upload(scratch, FOUNTAIN)[1]["project"]
     pr["step"] = "board"
@@ -613,7 +614,7 @@ def test_keyframes_and_first_frames_are_one_picture(scratch):
     delete(scratch, pr["id"])
 
 
-@pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 def test_the_character_sheet_keeps_the_face(scratch, tmp_path):
     """Saving the sheet keeps the face picture (the Face field is the face's features, not the picture)."""
     import shutil
@@ -688,14 +689,14 @@ def test_a_deleted_projects_storyboard_is_still_there(scratch, tmp_path):
         return listed, opened
 
     if chrome() is None:
-        pytest.skip("no Chrome or Chromium installed")
+        pytest.skip(WHY_NOT)
     (listed, opened), errors = asyncio.run(_with_chrome(chrome(), _port(), str(tmp_path / "chrome"), run))
     assert not errors, errors
     assert "The Glass Harbour" in listed and opened == "#/storyboard The Glass Harbour"
     urllib.request.urlopen(urllib.request.Request(scratch.url + f"/studio/api/boards/{r['board']}", method="DELETE"), timeout=30).read()
 
 
-@pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 def test_shots_from_before_a_screenplay_are_yours_to_change(scratch, tmp_path):
     """A project made from an idea (by Claude, say) has shots of no scene: their text shows and can be edited, and they can
     be moved and removed, here and on the storyboard. Setups only merge into an earlier setup of the screenplay."""
@@ -731,7 +732,7 @@ def test_shots_from_before_a_screenplay_are_yours_to_change(scratch, tmp_path):
         delete(scratch, x["id"])
 
 
-@pytest.mark.skipif(chrome() is None, reason="no Chrome or Chromium installed")
+@pytest.mark.skipif(chrome() is None, reason=WHY_NOT)
 def test_an_edit_is_saved_before_the_page_changes(scratch, tmp_path):
     pr = upload(scratch, FOUNTAIN)[1]["project"]
 

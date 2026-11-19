@@ -1,0 +1,4 @@
+{ "id": "fake-upscale", "name": "Fake Upscale", "order": 2, "description": "Whole-file tool for tests.", "script": "../fake_engine.py",
+  "accepts": "video", "range": "whole", "out": { "flag": "--out", "kind": "file", "ext": ".json" },
+  "options": [ { "name": "quality", "flag": "--quality", "type": "select", "label": "Quality", "default": "fast",
+      "choices": [ { "value": "fast", "label": "Fast" }, { "value": "best", "label": "Best" } ] } ] }

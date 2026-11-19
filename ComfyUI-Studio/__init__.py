@@ -426,7 +426,7 @@ async def studio_remote_jobs(request):
 
 
 # Studio tools that wait for their own render on this PC (they splice, join or post-process it): not movable
-_PC_ONLY_CLIENTS = ("studio-videotools", "studio-sound", "studio-ai")
+_PC_ONLY_CLIENTS = ("studio-videotools", "studio-sound", "studio-ai", "studio-generators")   # an AI tool reads its result here
 
 
 # Jobs moved to a worker keep their original here until they finish there; a job that fails or is refused on the
@@ -935,7 +935,10 @@ async def studio_boards_save(request):
     if not b.get("id"):
         b["id"] = uuid.uuid4().hex[:10]
         b["created"] = time.time()
+    elif not _projects.by_ai(request) and _projects.stale_over_ai(old, b):     # a page's save that would undo an AI's takes
+        return web.json_response({"error": "changed", "board": old}, status=409)
     b["updated"] = time.time()
+    b["by"] = "ai" if _projects.by_ai(request) else "page"
     boards = [x for x in boards if x.get("id") != b["id"]] + [b]
     _save_boards(boards)
     return web.json_response(b)
@@ -1860,9 +1863,17 @@ async def studio_edit(request):
     private = bool(b.get("private"))
     if private:
         _need_private(request)
-    shots = b.get("shots") or []
-    if not shots:
+    if not (b.get("shots") or []):
         raise web.HTTPBadRequest(text="no shots")
+    job = _edit_job(b, private)
+    return web.json_response({"id": job["id"]})
+
+
+def _edit_job(b, private, on_done=None):
+    """The film edit as a job (the page's Make the film, and a project's film made by an AI): the shots' clips trimmed,
+    with an opening title, an end card, captions, crossfades and a music bed. on_done(result) runs before the job is done
+    (a project's film is filed on its board then)."""
+    shots = b.get("shots") or []
     clips = [_out_path(s["filename"], s.get("subfolder", ""), private) for s in shots]
     if b.get("music"):
         _input_path(b["music"])
@@ -1918,11 +1929,14 @@ async def studio_edit(request):
                 _start_proxy(out, private)
             except Exception:
                 pass
-            return {"filename": os.path.basename(out), "subfolder": "Videos/Films", "private": private}
+            res = {"filename": os.path.basename(out), "subfolder": "Videos/Films", "private": private}
+            if on_done:
+                on_done(res)
+            return res
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     asyncio.ensure_future(_ai_job(job, run))
-    return web.json_response({"id": job["id"]})
+    return job
 
 
 # ---------------------------------------------------------------- reel: pictures and clips cut to the beat of a song
@@ -2959,6 +2973,18 @@ _poses.setup(globals())
 # ---------------------------------------------------------------- video tools: fix a part, fix a face, continue, keyframes
 from . import videotools as _videotools  # noqa: E402
 _videotools.setup(globals())
+
+# ---------------------------------------------------------------- a project's whole journey for AI clients (MCP) without the page
+from . import projectops as _projectops  # noqa: E402
+_projectops.setup(globals())
+
+# ---------------------------------------------------------------- Studio's MCP server over HTTP (/studio/mcp): AI assistants by URL
+from . import mcp_http as _mcp_http  # noqa: E402
+_mcp_http.setup(globals())
+
+# ---------------------------------------------------------------- AI tools (Production): Film Engine's Generators, run here
+from . import generators as _generators  # noqa: E402
+_generators.setup(globals())
 
 # ---------------------------------------------------------------- music video: a planned video as one storyboard, rendered in time with the song
 from . import musicvideo as _musicvideo  # noqa: E402

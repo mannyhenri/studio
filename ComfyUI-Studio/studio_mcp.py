@@ -1,12 +1,20 @@
-"""Studio connector for Claude (MCP over stdio, no extra packages).
+"""Studio's MCP server: Claude and other AI assistants use the whole app through it (no extra packages).
 
-Lets Claude generate with any Studio app, run projects and the storyboard, read characters and Previz sets, and bring
-final renders (e.g. Seedance through the Higgsfield Bridge) back into Studio.
+A film from a story: write or import the screenplay, its breakdown into scenes and shots, the cast and the locations (they
+follow the screenplay) with their reference pictures, the storyboard's frames, the takes, the music and the voices, the film.
+And everything else: any app (pictures, videos, edits, upscales), the gallery (look at any picture or clip), characters,
+storyboards, the AI tools, the local AI's help, music and voices, video fixes, Previz sets, the GPU machines. Call
+studio_overview first; `python3 scripts/studio-call.py --list` lists every tool.
 
-Claude Desktop / Cowork config ("mcpServers"):
-  "studio": {"command": "<ComfyUI>\\.venv\\Scripts\\python.exe",
-             "args": ["<ComfyUI>\\custom_nodes\\ComfyUI-Studio\\studio_mcp.py"]}
-Studio must be running (ComfyUI on this PC). Only regular (non-Incognito) items are visible here.
+Two ways to connect (the same tools):
+- Over stdio, started by the assistant (Claude Desktop, Claude Code, Cowork…); "mcpServers":
+    "studio": {"command": "<ComfyUI>\\.venv\\Scripts\\python.exe",
+               "args": ["<ComfyUI>\\custom_nodes\\ComfyUI-Studio\\studio_mcp.py"]}
+  (STUDIO_URL if Studio isn't at http://127.0.0.1:8188.)
+- Over HTTP, served by Studio itself: http://<this-pc>:8188/studio/mcp (MCP's Streamable HTTP transport), e.g.
+    claude mcp add --transport http studio http://127.0.0.1:8188/studio/mcp
+Studio must be running. Only regular (non-Incognito) items are visible here. Paths are files on the PC Studio runs on.
+What an AI saves is marked as its change (X-Studio-Client: ai): the page shows it rather than saving over it.
 """
 import base64
 import io
@@ -21,17 +29,35 @@ BASE = os.environ.get("STUDIO_URL", "http://127.0.0.1:8188").rstrip("/")
 PROTOCOL = "2025-06-18"
 
 
+AI_HEADERS = {"X-Studio-Client": "ai"}     # what an AI saves is marked so: the page takes it in instead of saving over it
+
+
 def http(method, path, body=None, timeout=60):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(BASE + path, data=data, method=method, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(BASE + path, data=data, method=method, headers={"Content-Type": "application/json", **AI_HEADERS})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Studio answered {e.code}: {e.read().decode('utf-8', 'ignore')[:300]}")
+        raise RuntimeError(f"Studio answered {e.code}: {_said(e.read())}")
     except urllib.error.URLError as e:
         raise RuntimeError(f"Studio isn't reachable at {BASE} ({e.reason}). Is ComfyUI running?")
+
+
+def _said(raw):
+    """What Studio said in an error: its "error" sentence when it answered JSON, else the text."""
+    text = raw.decode("utf-8", "ignore") if isinstance(raw, bytes) else str(raw)
+    try:
+        d = json.loads(text)
+        if isinstance(d, dict) and d.get("error"):
+            return str(d["error"])[:600]
+    except ValueError:
+        pass
+    return text[:600]
+
+
+POLL = float(os.environ.get("STUDIO_MCP_POLL") or 2)      # seconds between looks at a job (the tests look more often)
 
 
 def wait_job(jid, limit=1800):
@@ -42,7 +68,7 @@ def wait_job(jid, limit=1800):
             return j.get("result")
         if j.get("status") in ("failed", "lost"):
             raise RuntimeError(j.get("error") or j.get("stage"))
-        time.sleep(2)
+        time.sleep(POLL)
     raise RuntimeError("Timed out waiting for Studio")
 
 
@@ -434,7 +460,7 @@ TOOLS += [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "studio_projects", "description": "List projects, or one project with its script and shots.",
      "inputSchema": {"type": "object", "properties": {"id": S_}}},
-    {"name": "studio_project_create", "description": "Start a project from an idea, without a screenplay: the local AI writes a shot list (write_script=true, waits). cast = character names from studio_list_characters. A project from a screenplay is made by importing it on the Projects page (PDF or Fountain); its scenes and shots come from the screenplay.",
+    {"name": "studio_project_create", "description": "Start a project from an idea, without a screenplay: the local AI writes a shot list (write_script=true, waits). cast = character names from studio_list_characters. For a film from a screenplay (scenes, shots, cast, locations, storyboard), use studio_project_new instead.",
      "inputSchema": {"type": "object", "properties": {"idea": S_, "title": S_, "tone": S_, "shots": N_, "seconds": N_, "cast": {"type": "array", "items": S_}, "write_script": B_, "private": B_}, "required": ["idea"]}},
     {"name": "studio_project_update", "description": "Change a project: title, logline, music, cast (names) or shots [{id?, title, action, camera, seconds, characters, dialogue, keyframe}]. A project without a screenplay: the list replaces its shots. A project with a screenplay: its shots are the screenplay's camera setups, so a shot with an id changes that shot (camera, seconds, keyframe; kept through edits of the screenplay), a shot without one is added (scene: a scene id from studio_projects, else the last scene); shots aren't removed this way.",
      "inputSchema": {"type": "object", "properties": {"id": S_, "title": S_, "logline": S_, "music": S_, "cast": {"type": "array", "items": S_}, "shots": {"type": "array", "items": {"type": "object"}}}, "required": ["id"]}},
@@ -701,44 +727,785 @@ def call(name, a):
         return [{"type": "text", "text": json.dumps(http("POST", f"/studio/api/projects/{pr['id']}/to_board", {"private": pr.get("private")}), indent=1)}]
     return _call_v1(name, a)
 
+# ================================================================ v3: the whole app, a project from story to film
+# Every page of Studio, for an AI: a project's screenplay (write it, or import a file), its breakdown into scenes and shots,
+# its cast and locations (which follow the screenplay as it changes) with their reference pictures, the storyboard's frames,
+# the takes (drafted, picked), the music and the voices, the film; the AI tools; the gallery (look at any picture or clip);
+# the local AI's help; Previz sets; the status of the GPU machines. The server does each step as the page does it
+# (projectops.py), so what an AI makes here opens in the page as if it had been made there.
+import urllib.parse as _urlparse
+
+V3 = {}
+
+
+def tool(name, description, properties=None, required=()):
+    """Registers a tool: its schema for tools/list and its handler for tools/call."""
+    def reg(fn):
+        TOOLS.append({"name": name, "description": description,
+                      "inputSchema": {"type": "object", "properties": properties or {}, **({"required": list(required)} if required else {})}})
+        V3[name] = fn
+        return fn
+    return reg
+
+
+def text(x):
+    return [{"type": "text", "text": x if isinstance(x, str) else json.dumps(x, indent=1, ensure_ascii=False)}]
+
+
+P_PROJECT = {"type": "string", "description": "The project: its id or its title"}
+P_WAIT = {"type": "boolean", "description": "Wait for it to finish (default true)"}
+P_TIMEOUT = {"type": "number", "description": "Seconds to wait at most"}
+P_MODEL = {"type": "string", "description": "The Image app's model to use, part of its name (e.g. 'Z-Image', 'Qwen', 'FLUX 3', 'Krea'); default: the app's"}
+P_RUN_ON = {"type": "string", "description": "Which GPU: \"local\" (this PC, default), \"auto\" or a machine name from studio_status"}
+SHEET = ("age", "gender", "build", "skin", "features", "eyes", "hair", "facial_hair", "marks", "wardrobe", "accessories", "look", "trigger")
+
+
+def project_ref(ref):
+    """A regular project by id, or by title (exact, then partial)."""
+    items = http("GET", "/studio/api/projects")
+    r = str(ref or "").strip().lower()
+    pr = next((x for x in items if x.get("id") == ref), None) or next((x for x in items if (x.get("title") or x.get("name") or "").lower() == r), None) \
+        or next((x for x in items if r and r in (x.get("title") or x.get("name") or "").lower()), None)
+    if not pr:
+        raise RuntimeError("No such project. Projects: " + (", ".join(f"{x.get('title') or x.get('name')} ({x['id']})" for x in items) or "none yet"))
+    return pr
+
+
+def character_ref(ref):
+    cs = http("GET", "/studio/api/characters")
+    r = str(ref or "").strip().lower()
+    c = next((x for x in cs if x.get("id") == ref), None) or next((x for x in cs if x["name"].lower() == r), None) \
+        or next((x for x in cs if r and r in x["name"].lower()), None)
+    if not c:
+        raise RuntimeError("No such character. Characters: " + (", ".join(x["name"] for x in cs) or "none yet"))
+    return c
+
+
+def codes_of(pr):
+    """Shot codes as the breakdown numbers them (1A, 1B, 2A…), like the page's shotCodes."""
+    num = {sc["id"]: sc.get("number") or str(k + 1) for k, sc in enumerate(pr.get("scenes") or [])}
+    seen, out = {}, {}
+    letters = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+    def lt(n):
+        o, n = "", n + 1
+        while n:
+            r = (n - 1) % 24
+            n = (n - 1) // 24
+            o = letters[r] + o
+        return o
+    for k, s in enumerate(pr.get("shots") or []):
+        n = seen.get(s.get("scene"), 0)
+        seen[s.get("scene")] = n + 1
+        out[s["id"]] = (num[s["scene"]] + ("-" if re.search(r"[A-Za-z]$", num[s["scene"]]) else "") + lt(n)) if s.get("scene") in num else str(k + 1)
+    return out
+
+
+def input_path(v):
+    return abs_input(v) if v else None
+
+
+def image_content(path, size=768):
+    """A picture for the AI to look at: made smaller with Pillow when it's there, else sent as it is (up to 5 MB)."""
+    t = thumb(path, size)
+    if t:
+        return t
+    mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(os.path.splitext(path)[1].lower())
+    if mime and os.path.getsize(path) < 5e6:
+        with open(path, "rb") as f:
+            return {"type": "image", "data": base64.b64encode(f.read()).decode(), "mimeType": mime}
+    return None
+
+
+def picture_content(path, caption=None):
+    out = []
+    t = image_content(path) if path and os.path.isfile(path) else None
+    if caption:
+        out.append({"type": "text", "text": caption})
+    if t:
+        out.append(t)
+    return out
+
+
+def job_result(jid, wait, timeout, what):
+    if not wait:
+        return None, f"{what} in the background (job {jid}); studio_job tells how it's going."
+    return job_wait(jid, timeout), None
+
+
+def gallery_file(a, private=False):
+    """{filename, subfolder} of a file given as a gallery item, or a path on this PC (brought into the gallery first)."""
+    if a.get("filename"):
+        return {"filename": a["filename"], "subfolder": a.get("subfolder") or ""}
+    if a.get("path"):
+        info = http("POST", "/studio/api/import", {"path": a["path"], "private": private}, timeout=600)
+        return {"filename": info["filename"], "subfolder": info["subfolder"]}
+    raise RuntimeError("Give the file: path (on this PC), or filename + subfolder (from studio_recent)")
+
+
+# ---------------------------------------------------------------- status
+@tool("studio_status", "This PC and the GPU machines: what's rendering and waiting (ComfyUI's queue), the machines Studio can render on (for run_on), memory and load, and the AI tools' jobs.")
+def _status(a):
+    q = http("GET", "/queue")
+    out = {"rendering": [short((x[3] or {}).get("studio_label") or (x[3] or {}).get("studio_app") or "graph") for x in q.get("queue_running", [])],
+           "waiting": [short((x[3] or {}).get("studio_label") or (x[3] or {}).get("studio_app") or "graph") for x in q.get("queue_pending", [])]}
+    try:
+        ws = http("GET", "/studio/api/workers")                  # "local" is this PC; the others can be named in run_on
+        out["machines"] = [{"name": w.get("label"), "host": w.get("host"), "port": w.get("port"), "online": w.get("online")}
+                           for w in (ws if isinstance(ws, list) else ws.get("workers", []))]
+    except Exception:
+        out["machines"] = []
+    try:
+        out["this_pc"] = http("GET", "/studio/api/sysmon")
+    except Exception:
+        pass
+    try:
+        out["ai_tool_jobs"] = [{"tool": j["tool_name"], "file": j["input_name"], "status": j["status"], "stage": j["stage"]}
+                               for j in http("GET", "/studio/api/generators/jobs")["jobs"][:5] if j["status"] in ("running", "queued")]
+    except Exception:
+        pass
+    return text(out)
+
+
+@tool("studio_job", "How a background job is going (music, voices, pictures, frames, the film, video fixes…): its stage, and its result when it's done.",
+      {"id": {"type": "string"}, "wait": {"type": "boolean", "description": "Wait for it to finish"}, "timeout": P_TIMEOUT}, ["id"])
+def _job(a):
+    if a.get("wait"):
+        return text({"status": "done", "result": job_wait(a["id"], float(a.get("timeout") or 1800))})
+    return text(http("GET", f"/studio/api/job/{a['id']}"))
+
+
+# ---------------------------------------------------------------- projects and their screenplays
+@tool("studio_project_new",
+      "Start a film project. Give its screenplay as Fountain text (write it yourself: scene headings INT./EXT. PLACE - DAY, action, "
+      "CHARACTER cues in capitals with their dialogue), or screenplay_path: a PDF, Final Draft (.fdx) or Fountain file on this PC. "
+      "Studio breaks it down into scenes and shots, makes a location for every place in the scene headings and casts every speaking "
+      "part (with a character made from how the screenplay introduces them, or an existing character of the same name). "
+      "Without a screenplay the project starts empty: add one with studio_screenplay_set.",
+      {"title": {"type": "string"}, "screenplay": {"type": "string", "description": "The screenplay in Fountain"},
+       "screenplay_path": {"type": "string", "description": "A screenplay file on this PC (.pdf, .fdx, .fountain, .txt)"},
+       "tone": {"type": "string", "description": "The style for the pictures, e.g. 'Cinematic drama', 'Film noir', 'Anime'"},
+       "idea": {"type": "string", "description": "The story in a few sentences (kept with the project)"}})
+def _project_new(a):
+    if a.get("screenplay_path"):
+        path = a["screenplay_path"]
+        if not os.path.isfile(path):
+            raise RuntimeError("No such file: " + path)
+        with open(path, "rb") as f:
+            data = f.read()
+        r = multipart("/studio/api/projects/import_screenplay", {"private": "0"}, "file", os.path.basename(path), data)
+        pid = r["project"]["id"]
+        out = http("POST", f"/studio/api/projects/{pid}/follow", {})
+        pr = project_ref(pid)
+        if a.get("title") or a.get("tone") or a.get("idea"):
+            for k in ("title", "tone", "idea"):
+                if a.get(k):
+                    pr[k] = a[k]
+            if a.get("title"):
+                pr["name"] = a["title"]
+            http("POST", "/studio/api/projects", pr)
+        return text({"imported": r.get("summary"), "warnings": r.get("warnings"), **out})
+    return text(http("POST", "/studio/api/projects/new", {k: a.get(k) for k in ("title", "screenplay", "tone", "idea") if a.get(k)}))
+
+
+@tool("studio_project_delete", "Delete a project (its characters that were made for it and never touched go with it; pictures and videos stay in the gallery).",
+      {"project": P_PROJECT}, ["project"])
+def _project_delete(a):
+    pr = project_ref(a["project"])
+    return text(http("DELETE", f"/studio/api/projects/{pr['id']}"))
+
+
+@tool("studio_screenplay_get", "A project's screenplay, as Fountain text, with its title, length in pages and what's in it.",
+      {"project": P_PROJECT}, ["project"])
+def _screenplay_get(a):
+    pr = project_ref(a["project"])
+    sp = pr.get("screenplay") or {}
+    return text(f"Title: {pr.get('title') or '(none)'} · {pr.get('pages') or 0} pages · {len(pr.get('scenes') or [])} scenes · "
+                f"{len(pr.get('shots') or [])} shots · parts: {', '.join(r['name'] for r in pr.get('roles') or []) or 'none'}\n\n" + (sp.get("text") or "(no screenplay yet)"))
+
+
+@tool("studio_screenplay_set",
+      "Replace a project's screenplay (Fountain text: write the whole screenplay, e.g. after studio_screenplay_get and your changes). "
+      "The text it had is kept as a draft the user can compare or restore. The breakdown is made again, keeping what was decided on "
+      "shots that stay (their frames, cameras and lengths); new places become locations and new speaking parts are cast; a part or "
+      "place that's gone goes if nothing was done with it.",
+      {"project": P_PROJECT, "text": {"type": "string", "description": "The whole screenplay in Fountain"},
+       "draft_name": {"type": "string", "description": "A name for the draft keeping the previous text"}}, ["project", "text"])
+def _screenplay_set(a):
+    pr = project_ref(a["project"])
+    return text(http("POST", f"/studio/api/projects/{pr['id']}/screenplay", {"text": a["text"], "draft": a.get("draft_name")}, timeout=300))
+
+
+@tool("studio_screenplay_export", "Save a project's screenplay as a file on this PC: PDF on the Hollywood standard page, Final Draft (.fdx) or plain text.",
+      {"project": P_PROJECT, "format": {"type": "string", "enum": ["pdf", "fdx", "txt"]},
+       "path": {"type": "string", "description": "Where to save it (a file or a folder); default: the Downloads folder"}}, ["project"])
+def _screenplay_export(a):
+    pr = project_ref(a["project"])
+    fmt = a.get("format") or "pdf"
+    req = urllib.request.Request(f"{BASE}/studio/api/projects/{pr['id']}/screenplay.{fmt}", headers=AI_HEADERS)
+    with urllib.request.urlopen(req, timeout=300) as r:
+        data = r.read()
+    name = re.sub(r'[\\/:*?"<>|]+', " ", pr.get("title") or "Screenplay").strip() or "Screenplay"
+    dest = a.get("path") or os.path.join(os.path.expanduser("~"), "Downloads")
+    if os.path.isdir(dest) or not os.path.splitext(dest)[1]:
+        os.makedirs(dest, exist_ok=True)
+        dest = os.path.join(dest, f"{name}.{fmt}")
+    with open(dest, "wb") as f:
+        f.write(data)
+    return text(f"Saved {dest} ({len(data) // 1024} KB)")
+
+
+@tool("studio_breakdown",
+      "A project's breakdown, as a breakdown sheet: its scenes (number, heading, interior/exterior, place, time of day, length in "
+      "eighths of a page, who's in it) and each scene's shots (code like 1A, title, action, camera, length in seconds, who's in it, the "
+      "lines spoken, and its storyboard frame if it has one).",
+      {"project": P_PROJECT, "scene": {"type": "string", "description": "Only this scene (its number)"}}, ["project"])
+def _breakdown(a):
+    pr = project_ref(a["project"])
+    codes = codes_of(pr)
+    out = []
+    for sc in pr.get("scenes") or []:
+        if a.get("scene") and str(sc.get("number")) != str(a["scene"]):
+            continue
+        shots = [s for s in pr.get("shots") or [] if s.get("scene") == sc["id"]]
+        out.append({"scene": sc.get("number"), "heading": sc.get("heading"), "int_ext": sc.get("intext"), "place": sc.get("location"),
+                    "time": sc.get("time"), "eighths": sc.get("eighths"), "omitted": sc.get("omitted") or None, "summary": sc.get("summary"),
+                    "shots": [{"code": codes.get(s["id"]), "id": s["id"], "title": s.get("title"), "action": s.get("action"), "camera": s.get("camera"),
+                               "seconds": s.get("seconds"), "characters": s.get("characters"),
+                               "lines": [f"{ln.get('who')}: {ln.get('text')}" for ln in s.get("lines") or []],
+                               "frame": input_path(s.get("keyframe"))} for s in shots]})
+    return text(out or "No scenes yet: the breakdown comes from the screenplay's scene headings.")
+
+
+@tool("studio_shot_update", "Change a shot of a project's breakdown: its camera, its length, or its storyboard frame (a picture file on this PC, or '' for none).",
+      {"project": P_PROJECT, "shot": {"type": "string", "description": "The shot's code (1A) or id"},
+       "camera": {"type": "string", "enum": ["static", "push in", "pull back", "pan left", "pan right", "tracking", "orbit", "crane up", "crane down",
+                                             "handheld", "close-up", "low angle", "drone", "slow motion", "wide", "pov", "over the shoulder", "high angle"]},
+       "seconds": {"type": "number"}, "frame": {"type": "string", "description": "A picture file on this PC for its frame, or '' to clear it"}}, ["project", "shot"])
+def _shot_update(a):
+    pr = project_ref(a["project"])
+    body = {k: a[k] for k in ("camera", "seconds") if a.get(k)}
+    if a.get("frame") is not None:
+        body["frame"] = as_input(a["frame"]) if a["frame"] else ""
+    return text(http("POST", f"/studio/api/projects/{pr['id']}/shots/{_urlparse.quote(str(a['shot']))}", body))
+
+
+# ---------------------------------------------------------------- cast and characters
+def char_view(c):
+    return {"id": c["id"], "name": c["name"], "description": c.get("description"), "sheet": {k: c[k] for k in SHEET if c.get(k)},
+            "face": input_path(c.get("face")), "pictures": len(c.get("pictures") or []), "voice": bool(c.get("voice")),
+            "lora": (c.get("lora") or {}).get("name")}
+
+
+@tool("studio_cast", "A project's cast: every speaking part in its screenplay (how many lines, in which scenes, how the screenplay introduces them) and the Studio character playing it (their look as the generators get it, their face picture).",
+      {"project": P_PROJECT}, ["project"])
+def _cast(a):
+    pr = project_ref(a["project"])
+    chars = {c["id"]: c for c in http("GET", "/studio/api/characters")}
+    cm = pr.get("castMap") or {}
+    return text([{"part": r["name"], "full_name": r.get("full"), "lines": r.get("lines"), "scenes": len(r.get("scenes") or []), "introduced": r.get("intro"),
+                  "played_by": char_view(chars[cm[r["name"]]]) if cm.get(r["name"]) in chars else ("left uncast" if cm.get(r["name"]) == "" else None)}
+                 for r in pr.get("roles") or []])
+
+
+@tool("studio_cast_role", "Cast a part of a project's screenplay with a Studio character (by name or id), or '' to leave it uncast.",
+      {"project": P_PROJECT, "part": {"type": "string", "description": "The part, as the screenplay's character cue writes it (RAY)"},
+       "character": {"type": "string"}}, ["project", "part", "character"])
+def _cast_role(a):
+    pr = project_ref(a["project"])
+    return text(http("POST", f"/studio/api/projects/{pr['id']}/cast", {"role": a["part"], "character": a["character"]}))
+
+
+@tool("studio_character_save",
+      "Create a character, or change one (give character: its name or id). The character sheet is what every picture and shot of them "
+      "gets: age, gender, build, skin, features (face), eyes, hair, facial_hair, marks, wardrobe, accessories, look (anything else), and a "
+      "LoRA trigger word. face: a picture file on this PC to use as their face (a reference for their frames); voice: a 5-15 s recording "
+      "of their voice for the dialogue. Fields not given stay as they are.",
+      dict({"character": {"type": "string", "description": "An existing character to change (name or id); omit to create one"},
+            "name": {"type": "string"}, "face": {"type": "string", "description": "A picture file on this PC"},
+            "voice": {"type": "string", "description": "A sound file on this PC"}},
+           **{k: {"type": "string"} for k in SHEET}))
+def _character_save(a):
+    c = character_ref(a["character"]) if a.get("character") else {"name": "", "private": False}
+    c.pop("description", None)
+    if a.get("name"):
+        c["name"] = a["name"].strip()
+    if not c.get("name"):
+        raise RuntimeError("Give the character a name")
+    for k in SHEET:
+        if a.get(k) is not None:
+            c[k] = a[k]
+    if a.get("face"):
+        c["face"] = as_input(a["face"])
+        c["pictures"] = [c["face"]] + [p for p in c.get("pictures") or [] if p != c["face"]]
+    if a.get("voice"):
+        c["voice"] = as_input(a["voice"])
+    saved = http("POST", "/studio/api/characters", c)
+    return text(char_view(dict(saved, description=next((x.get("description") for x in http("GET", "/studio/api/characters") if x["id"] == saved["id"]), ""))))
+
+
+@tool("studio_character_delete", "Delete a character (their pictures stay in the gallery).", {"character": {"type": "string"}}, ["character"])
+def _character_delete(a):
+    c = character_ref(a["character"])
+    return text(http("DELETE", f"/studio/api/characters/{c['id']}"))
+
+
+@tool("studio_character_picture",
+      "A reference picture of a character, made with the Image app from their character sheet (head and shoulders, plain background); their "
+      "face, if they have one, keeps them the same. The first one becomes their face (a reference for every frame they're in); "
+      "make_face=true makes this one their face anyway. Returns the picture so you can look at it.",
+      {"character": {"type": "string"}, "model": P_MODEL, "make_face": {"type": "boolean"}, "prompt": {"type": "string", "description": "Instead of the sheet's"},
+       "run_on": P_RUN_ON, "wait": P_WAIT, "timeout": P_TIMEOUT}, ["character"])
+def _character_picture(a):
+    c = character_ref(a["character"])
+    body = {k: a[k] for k in ("model", "prompt") if a.get(k)}
+    body["target"] = a.get("run_on") or "local"
+    r = http("POST", f"/studio/api/characters/{c['id']}/portrait", body)
+    res, msg = job_result(r["id"], a.get("wait", True), float(a.get("timeout") or 900), f"Picturing {c['name']}")
+    if msg:
+        return text(msg)
+    if a.get("make_face"):
+        c2 = character_ref(c["id"])
+        c2.pop("description", None)
+        c2["face"] = res["picture"]
+        http("POST", "/studio/api/characters", c2)
+    return picture_content(input_path(res["picture"]), f"{c['name']}: {input_path(res['picture'])}")
+
+
+# ---------------------------------------------------------------- locations
+def loc_view(pr, x):
+    num = {s["id"]: s.get("number") for s in pr.get("scenes") or []}
+    return {"id": x["id"], "name": x.get("full") or x.get("name"), "heading_name": x.get("name"), "scenes": [num.get(i) for i in x.get("scenes") or []],
+            "int_ext": x.get("intext"), **{k: x.get(k) for k in ("description", "look", "lighting", "time", "atmosphere", "sound") if x.get(k)},
+            "picture": input_path(x.get("picture")), "pictures": len(x.get("pictures") or []), "gone_from_screenplay": bool(x.get("gone")) or None}
+
+
+@tool("studio_locations", "A project's locations: every place its scene headings name, with its scenes, and its form: description, look (what the generator gets: written into every shot set there), lighting, time of day, atmosphere, sound, and its reference picture.",
+      {"project": P_PROJECT}, ["project"])
+def _locations(a):
+    pr = project_ref(a["project"])
+    return text([loc_view(pr, x) for x in pr.get("locations") or []] or "No locations yet: the scene headings make them.")
+
+
+@tool("studio_location_update",
+      "Fill in or change a location's form: description, look (how it looks in a few words: written into the prompt of every shot set "
+      "there, like a character's look), lighting, time, atmosphere, sound, a picture file on this PC as its reference picture, or a new name "
+      "(renamed in the screenplay's scene headings too, unless rename_in_screenplay=false).",
+      {"project": P_PROJECT, "location": {"type": "string", "description": "Its name or id"}, "name": {"type": "string"},
+       **{k: {"type": "string"} for k in ("description", "look", "lighting", "time", "atmosphere", "sound")},
+       "picture": {"type": "string", "description": "A picture file on this PC"}, "rename_in_screenplay": {"type": "boolean"}}, ["project", "location"])
+def _location_update(a):
+    pr = project_ref(a["project"])
+    body = {k: a[k] for k in ("name", "description", "look", "lighting", "time", "atmosphere", "sound", "rename_in_screenplay") if a.get(k) is not None}
+    if a.get("picture"):
+        body["picture"] = as_input(a["picture"])
+    r = http("POST", f"/studio/api/projects/{pr['id']}/locations/{_urlparse.quote(a['location'])}", body)
+    return text({"location": loc_view(project_ref(pr["id"]), r["location"]), "renamed_in_headings": r.get("renamed_in_headings")})
+
+
+@tool("studio_location_picture",
+      "A reference picture of a location, made with the Image app from its form (the place, its look, light, time and atmosphere; an empty "
+      "set, no people). The first one becomes its picture: the reference for the frames of shots set there with nobody in them.",
+      {"project": P_PROJECT, "location": {"type": "string"}, "model": P_MODEL, "prompt": {"type": "string", "description": "Instead of the form's"},
+       "run_on": P_RUN_ON, "wait": P_WAIT, "timeout": P_TIMEOUT}, ["project", "location"])
+def _location_picture(a):
+    pr = project_ref(a["project"])
+    r = str(a["location"]).strip().upper()
+    loc = next((x for x in pr.get("locations") or [] if x["id"] == a["location"] or (x.get("name") or "").upper() == r or (x.get("full") or "").upper() == r), None) \
+        or next((x for x in pr.get("locations") or [] if r in (x.get("name") or "").upper()), None)
+    if not loc:
+        raise RuntimeError("No such location. Locations: " + ", ".join(x.get("full") or x.get("name") for x in pr.get("locations") or []))
+    body = {k: a[k] for k in ("model", "prompt") if a.get(k)}
+    body["target"] = a.get("run_on") or "local"
+    j = http("POST", f"/studio/api/projects/{pr['id']}/locations/{loc['id']}/picture", body)
+    res, msg = job_result(j["id"], a.get("wait", True), float(a.get("timeout") or 900), f"Picturing {loc.get('full')}")
+    if msg:
+        return text(msg)
+    return picture_content(input_path(res["picture"]), f"{loc.get('full')}: {input_path(res['picture'])}")
+
+
+# ---------------------------------------------------------------- the storyboard's frames
+@tool("studio_storyboard_frames",
+      "Make a project's storyboard frames with the Image app: one still per shot, from its action with its characters' looks and its "
+      "location's look written in, in the project's style. A shot with one cast character who has a face uses it as a reference; a shot "
+      "with nobody in it uses its location's picture. By default only the shots without a frame; shots: only these (codes like 1A); "
+      "redo: all again (the frames they had are kept as versions). The frames are the takes' first frames.",
+      {"project": P_PROJECT, "shots": {"type": "array", "items": {"type": "string"}}, "redo": {"type": "boolean"}, "model": P_MODEL,
+       "run_on": P_RUN_ON, "wait": P_WAIT, "timeout": P_TIMEOUT}, ["project"])
+def _storyboard_frames(a):
+    pr = project_ref(a["project"])
+    body = {"private": False, "model": a.get("model"), "redo": bool(a.get("redo")), "only": a.get("shots") or [], "target": a.get("run_on") or "local"}
+    j = http("POST", f"/studio/api/projects/{pr['id']}/keyframes", body)
+    res, msg = job_result(j["id"], a.get("wait", True), float(a.get("timeout") or 3600), "Making the frames")
+    if msg:
+        return text(msg)
+    pr = project_ref(pr["id"])
+    codes = codes_of(pr)
+    want = {str(x).upper() for x in a.get("shots") or []}
+    frames = [(codes.get(s["id"]), input_path(s.get("keyframe"))) for s in pr.get("shots") or [] if s.get("keyframe") and (not want or str(codes.get(s["id"])).upper() in want)]
+    out = text({"made": res.get("done"), "frames": [{"shot": c, "frame": p} for c, p in frames]})
+    for c, p in frames[:4]:
+        out += picture_content(p, f"Shot {c}")
+    return out
+
+
+# ---------------------------------------------------------------- takes
+def board_of(pr):
+    if not pr.get("board"):
+        raise RuntimeError("No takes yet: draft them with studio_takes_draft")
+    return pr["board"]
+
+
+def takes_view(board):
+    for s in board["shots"]:
+        for t in s["takes"]:
+            if t.get("file"):
+                t["path"] = abs_out(dict(t["file"], private=False))
+    return board
+
+
+@tool("studio_takes_draft",
+      "Draft a project's takes with the Video app (each shot's prompt, camera, length, and its storyboard frame as the first frame), as "
+      "the Takes page does: the storyboard follows the breakdown first. By default every shot without takes; shots: only these (codes); "
+      "count: takes per shot (default 2); quality: draft (fast) or final. The first finished take of a shot is its pick. Video takes "
+      "time: wait=false returns at once, then studio_takes shows how they're going.",
+      {"project": P_PROJECT, "shots": {"type": "array", "items": {"type": "string"}}, "count": {"type": "integer"},
+       "quality": {"type": "string", "enum": ["draft", "final"]}, "model": {"type": "string", "description": "The Video app's model (part of its name), e.g. 'LTX', 'MiniMax H3', 'Wan'"},
+       "values": {"type": "object", "description": "Other Video app options by label, e.g. {\"Aspect\": \"9:16\"}"}, "run_on": P_RUN_ON,
+       "wait": {"type": "boolean", "description": "Wait for the takes (default false)"}, "timeout": P_TIMEOUT}, ["project"])
+def _takes_draft(a):
+    pr = project_ref(a["project"])
+    body = {k: a[k] for k in ("shots", "count", "quality", "model", "values") if a.get(k)}
+    body["target"] = a.get("run_on") or "local"
+    r = http("POST", f"/studio/api/projects/{pr['id']}/takes", body, timeout=300)
+    if not a.get("wait"):
+        return text({"queued": r["queued"], "board": r["board"], "next": "studio_takes shows them as they finish"})
+    t0, limit = time.time(), float(a.get("timeout") or 3600)
+    while True:
+        b = http("POST", f"/studio/api/boards/{r['board']}/resolve", {})
+        state = {t.get("prompt_id"): t.get("status") for s in b["shots"] for t in s["takes"]}
+        if all(state.get(q["prompt_id"]) in ("done", "failed") for q in r["queued"]) or time.time() - t0 > limit:
+            break
+        time.sleep(POLL * 2.5)
+    return text(takes_view(b))
+
+
+@tool("studio_takes", "A project's takes, shot by shot: each take's state and file, which one is picked (the film uses it), and the finished version if there is one.",
+      {"project": P_PROJECT}, ["project"])
+def _takes(a):
+    pr = project_ref(a["project"])
+    return text(takes_view(http("POST", f"/studio/api/boards/{board_of(pr)}/resolve", {})))
+
+
+@tool("studio_take_pick", "Pick a shot's take (the film uses the pick). Takes are numbered from 0, as studio_takes lists them.",
+      {"project": P_PROJECT, "shot": {"type": "string", "description": "The shot's code (1A)"}, "take": {"type": "integer"}}, ["project", "shot", "take"])
+def _take_pick(a):
+    pr = project_ref(a["project"])
+    return text(takes_view(http("POST", f"/studio/api/boards/{board_of(pr)}/shots/{_urlparse.quote(str(a['shot']))}/pick", {"take": a["take"]})))
+
+
+# ---------------------------------------------------------------- sound and the film
+@tool("studio_project_music", "The film's score: an instrumental the film's length, in the style given (genre, mood, instruments, tempo), kept with the project (its music bed). engine 'ace' (fast) or 'music3' (best).",
+      {"project": P_PROJECT, "style": {"type": "string"}, "engine": {"type": "string", "enum": ["ace", "music3"]}, "seconds": {"type": "number"},
+       "run_on": P_RUN_ON, "wait": P_WAIT, "timeout": P_TIMEOUT}, ["project"])
+def _project_music(a):
+    pr = project_ref(a["project"])
+    j = http("POST", f"/studio/api/projects/{pr['id']}/music", {k: a[k] for k in ("style", "engine", "seconds") if a.get(k)} | {"target": a.get("run_on") or "local"})
+    res, msg = job_result(j["id"], a.get("wait", True), float(a.get("timeout") or 5400), "Composing")
+    return text(msg or dict(res, path=abs_out(res)))
+
+
+@tool("studio_project_voices", "Every line of the screenplay's dialogue spoken in its character's voice (their voice recording, when they have one), kept with its shot. Only the lines without a voice yet, unless redo.",
+      {"project": P_PROJECT, "redo": {"type": "boolean"}, "run_on": P_RUN_ON, "wait": P_WAIT, "timeout": P_TIMEOUT}, ["project"])
+def _project_voices(a):
+    pr = project_ref(a["project"])
+    j = http("POST", f"/studio/api/projects/{pr['id']}/voices", {"redo": bool(a.get("redo")), "target": a.get("run_on") or "local"})
+    res, msg = job_result(j["id"], a.get("wait", True), float(a.get("timeout") or 7200), f"Speaking {j.get('lines')} lines")
+    return text(msg or res)
+
+
+@tool("studio_project_film",
+      "Cut the film: the storyboard's shots in order, each one's finished version or picked take trimmed to the shot's length, with an "
+      "opening title, an end card, crossfades and a music bed ('project' = the project's score, a sound file on this PC, or 'none').",
+      {"project": P_PROJECT, "title": {"type": "string", "description": "The opening title ('' for none; default the film's title)"},
+       "subtitle": {"type": "string"}, "end": {"type": "string", "description": "The end card ('' for none)"},
+       "crossfade": {"type": "number", "description": "Seconds, 0 for hard cuts (default 0.5)"}, "music": {"type": "string"},
+       "music_volume": {"type": "number", "description": "0..1 (default 0.35)"}, "keep_audio": {"type": "boolean", "description": "Keep the takes' own sound"},
+       "wait": P_WAIT, "timeout": P_TIMEOUT}, ["project"])
+def _project_film(a):
+    pr = project_ref(a["project"])
+    body = {k: a[k] for k in ("title", "subtitle", "end", "crossfade", "keep_audio") if a.get(k) is not None}
+    if a.get("music_volume") is not None:
+        body["music_vol"] = a["music_volume"]
+    if a.get("music"):
+        body["music"] = "project" if a["music"] == "project" else "" if a["music"] == "none" else as_input(a["music"])
+    j = http("POST", f"/studio/api/projects/{pr['id']}/film", body)
+    res, msg = job_result(j["id"], a.get("wait", True), float(a.get("timeout") or 3600), f"Cutting {j.get('shots')} of {j.get('of')} shots")
+    return text(msg or dict(res, path=abs_out(res), shots=j.get("shots"), of=j.get("of")))
+
+
+# ---------------------------------------------------------------- the AI tools (Production › AI tools)
+@tool("studio_ai_tools", "The AI tools (AI Depth, AI Slow-Mo, AI Stems, AI Subtitles, AI Lossless Cut, One-Click Master): what each takes and its options, and whether it's ready on this PC.")
+def _ai_tools(a):
+    return text([{"id": t["id"], "name": t["name"], "what": t.get("short"), "takes": t.get("accepts") + (" or a sound" if t.get("audio_ok") else "") + (" or a picture" if t.get("image_ok") else ""),
+                  "range": {"section": "a section (start_frame, end_frame) or the whole clip", "segments": "pieces [[start_s, end_s], ...]", "whole": "the whole file"}[t["range"]],
+                  "options": [{"name": o["name"], "label": o.get("label"), "type": o.get("type"), "default": o.get("default"),
+                               **({"choices": [c["value"] for c in o["choices"]]} if o.get("choices") else {}),
+                               **({"min": o.get("min"), "max": o.get("max")} if o.get("type") == "slider" else {})} for o in t.get("options") or []],
+                  "not_ready": t.get("unavailable")} for t in http("GET", "/studio/api/generators/tools")["tools"]])
+
+
+@tool("studio_ai_tool_run",
+      "Run an AI tool on a file: a path on this PC, or a gallery file (filename + subfolder). Options by name (studio_ai_tools). AI Slow-Mo: "
+      "start_frame/end_frame for a section; AI Lossless Cut: pieces [[start, end], ...] in seconds. The results land in the gallery under "
+      "Generators/<tool>.",
+      {"tool": {"type": "string", "description": "Its id or name: depth, slowmo, stems, subtitles, cut, master"}, "path": {"type": "string"},
+       "filename": {"type": "string"}, "subfolder": {"type": "string"}, "options": {"type": "object"},
+       "start_frame": {"type": "integer"}, "end_frame": {"type": "integer", "description": "Exclusive"},
+       "pieces": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}}, "wait": P_WAIT, "timeout": P_TIMEOUT}, ["tool"])
+def _ai_tool_run(a):
+    tools = http("GET", "/studio/api/generators/tools")["tools"]
+    w = str(a["tool"]).lower()
+    t = next((x for x in tools if x["id"] == w or x["name"].lower() == w), None) or next((x for x in tools if w in x["name"].lower()), None)
+    if not t:
+        raise RuntimeError("No such AI tool: " + ", ".join(x["id"] for x in tools))
+    if a.get("path"):
+        path = a["path"]
+        if not os.path.isfile(path):
+            raise RuntimeError("No such file: " + path)
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            req = urllib.request.Request(BASE + "/studio/api/generators/inputs/import", data=f, method="POST",
+                                         headers={"X-File-Name": _urlparse.quote(os.path.basename(path)), "Content-Length": str(size),
+                                                  "Content-Type": "application/octet-stream", **AI_HEADERS})
+            try:
+                with urllib.request.urlopen(req, timeout=3600) as r:
+                    inp = json.loads(r.read())["input"]
+            except urllib.error.HTTPError as e:
+                raise RuntimeError(f"Studio answered {e.code}: {_said(e.read())}")
+    elif a.get("filename"):
+        inp = http("POST", "/studio/api/generators/inputs", {"filename": a["filename"], "subfolder": a.get("subfolder") or ""})["input"]
+    else:
+        raise RuntimeError("Give the file: path, or filename + subfolder")
+    body = {"tool": t["id"], "input_id": inp["id"], "options": a.get("options") or {}}
+    if a.get("start_frame") is not None and a.get("end_frame") is not None:
+        body.update(start=int(a["start_frame"]), end=int(a["end_frame"]))
+    if a.get("pieces"):
+        body["segments"] = a["pieces"]
+    j = http("POST", "/studio/api/generators/jobs", body)["job"]
+    if not a.get("wait", True):
+        return text({"job": j["id"], "status": j["status"], "next": "studio_ai_tool_jobs shows how it's going"})
+    t0, limit = time.time(), float(a.get("timeout") or 3600)
+    while j["status"] in ("running", "queued") and time.time() - t0 < limit:
+        time.sleep(POLL)
+        j = http("GET", f"/studio/api/generators/jobs/{j['id']}")["job"]
+    return text(ai_job_view(j))
+
+
+def ai_job_view(j):
+    out = {k: j.get(k) for k in ("id", "tool_name", "input_name", "status", "stage", "error", "note", "stats", "pieces") if j.get(k) not in (None, [], {})}
+    out["files"] = [abs_out({"filename": o["name"], "subfolder": o["subfolder"], "private": False}) for o in j.get("outputs") or []]
+    return out
+
+
+@tool("studio_ai_tool_jobs", "The AI tools' jobs, newest first (or one, by id): state, what each measured, its files.",
+      {"id": {"type": "string"}, "cancel": {"type": "boolean", "description": "Stop that job"}})
+def _ai_tool_jobs(a):
+    if a.get("id") and a.get("cancel"):
+        return text(ai_job_view(http("POST", f"/studio/api/generators/jobs/{a['id']}/cancel", {})["job"]))
+    if a.get("id"):
+        return text(ai_job_view(http("GET", f"/studio/api/generators/jobs/{a['id']}")["job"]))
+    return text([ai_job_view(j) for j in http("GET", "/studio/api/generators/jobs")["jobs"][:20]])
+
+
+# ---------------------------------------------------------------- the gallery: look at things
+@tool("studio_view",
+      "Look at a picture or a video (a frame of it): a path on this PC, a gallery file (filename + subfolder), or an input value (as "
+      "frames and faces are kept, e.g. 'studio/frame_00001_.png'). Returns the picture, so you can judge a frame, a portrait or a take.",
+      {"path": {"type": "string"}, "filename": {"type": "string"}, "subfolder": {"type": "string"}, "input": {"type": "string"},
+       "size": {"type": "integer", "description": "Longest side in pixels (default 1024)"}})
+def _view(a):
+    size = int(a.get("size") or 1024)
+    if a.get("filename"):
+        q = _urlparse.urlencode({"filename": a["filename"], "subfolder": a.get("subfolder") or "", "w": 1600 if size > 640 else 640})
+        req = urllib.request.Request(f"{BASE}/studio/api/thumb?{q}", headers=AI_HEADERS)
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = r.read()
+        return [{"type": "text", "text": f"{a.get('subfolder') or ''}/{a['filename']}"},
+                {"type": "image", "data": base64.b64encode(data).decode(), "mimeType": "image/webp"}]
+    path = a.get("path") or (input_path(a["input"]) if a.get("input") else None)
+    if not path or not os.path.isfile(path):
+        raise RuntimeError("Give a picture: path, filename + subfolder, or input")
+    if path.lower().endswith((".mp4", ".mov", ".webm", ".mkv", ".m4v")):
+        import subprocess
+        import tempfile
+        ff = os.environ.get("STUDIO_FFMPEG") or "ffmpeg"
+        with tempfile.TemporaryDirectory() as d:
+            png = os.path.join(d, "frame.png")
+            subprocess.run([ff, "-v", "error", "-y", "-ss", "0.5", "-i", path, "-frames:v", "1", png], capture_output=True)
+            out = picture_content(png, path)
+        return out or text("Couldn't read a frame of " + path)
+    t = image_content(path, size)
+    if not t:
+        raise RuntimeError("Not a picture this can show: " + path)
+    return [{"type": "text", "text": path}, t]
+
+
+@tool("studio_file_info", "What's known about a gallery file: the prompt and settings it was made with, its size in pixels, when it was made.",
+      {"filename": {"type": "string"}, "subfolder": {"type": "string"}}, ["filename"])
+def _file_info(a):
+    q = _urlparse.urlencode({"filename": a["filename"], "subfolder": a.get("subfolder") or ""})
+    return text(http("GET", f"/studio/api/meta?{q}"))
+
+
+@tool("studio_gallery_action", "Star a gallery file as a favorite (or not), or move it to the trash (a _trash folder: nothing is lost).",
+      {"filename": {"type": "string"}, "subfolder": {"type": "string"}, "action": {"type": "string", "enum": ["favorite", "unfavorite", "trash"]}}, ["filename", "action"])
+def _gallery_action(a):
+    f = {"filename": a["filename"], "subfolder": a.get("subfolder") or "", "private": False}
+    if a["action"] == "trash":
+        return text(http("POST", "/studio/api/trash", f))
+    return text(http("POST", "/studio/api/favorite", dict(f, on=a["action"] == "favorite")))
+
+
+# ---------------------------------------------------------------- the local AI (Qwen3-VL on this PC)
+@tool("studio_ai_review", "The local AI watches a take (a video in the gallery, or a path) and reviews it: scores for prompt match, motion, anatomy and artifacts, a verdict, and a better prompt.",
+      {"filename": {"type": "string"}, "subfolder": {"type": "string"}, "path": {"type": "string"}, "prompt": {"type": "string", "description": "What the take was meant to show"}})
+def _ai_review(a):
+    f = gallery_file(a)
+    j = http("POST", "/studio/api/ai/review", dict(f, prompt=a.get("prompt") or ""))
+    return text(job_wait(j["id"], 900))
+
+
+@tool("studio_ai_prompt", "The local AI turns an idea into a strong prompt for a picture or a video (optionally from a starting picture: an input value).",
+      {"idea": {"type": "string"}, "kind": {"type": "string", "enum": ["image", "video"]}, "image": {"type": "string"}}, ["idea"])
+def _ai_prompt(a):
+    j = http("POST", "/studio/api/ai/prompt", {"idea": a["idea"], "kind": a.get("kind") or "image", "image": a.get("image") or ""})
+    return text(job_wait(j["id"], 600))
+
+
+@tool("studio_ai_write", "The screenplay editor's writing help, with the local AI: rewrite a passage (with an instruction), continue a scene, polish dialogue, turn prose into screenplay, or a one-line synopsis. Answers in Fountain.",
+      {"mode": {"type": "string", "enum": ["rewrite", "continue", "dialogue", "prose", "synopsis"]}, "text": {"type": "string"},
+       "context": {"type": "string", "description": "The scene around it"}, "instruction": {"type": "string"}}, ["mode", "text"])
+def _ai_write(a):
+    j = http("POST", "/studio/api/ai/write", {k: a.get(k) or "" for k in ("mode", "text", "context", "instruction")})
+    return text(job_wait(j["id"], 900))
+
+
+# ---------------------------------------------------------------- reel, Previz
+@tool("studio_reel", "A reel cut to a song's beat: gallery pictures and clips, in order, each cut on the beat (aspect 9:16, 1:1 or 16:9; length in seconds; cut: about how long each holds).",
+      {"song": {"type": "string", "description": "A sound file on this PC, or an input value"}, "items": {"type": "array", "items": {"type": "object"}, "description": "[{filename, subfolder}] from the gallery"},
+       "aspect": {"type": "string", "enum": ["9:16", "1:1", "16:9"]}, "length": {"type": "number"}, "cut": {"type": "number"}, "wait": P_WAIT}, ["song", "items"])
+def _reel(a):
+    j = http("POST", "/studio/api/reel", {"song": as_input(a["song"]), "items": a["items"], "aspect": a.get("aspect") or "9:16",
+                                          "length": a.get("length") or 30, "cut": a.get("cut") or 1.2})
+    res, msg = job_result(j["id"], a.get("wait", True), 1800, "Cutting the reel")
+    return text(msg or dict(res, path=abs_out(res)))
+
+
+@tool("studio_previz_add", "Add a 3D set (.glb on this PC) to Previz, used where it is. Directing it (cameras, moves, light) and its snapshots and movies happen in the page's 3D viewer.",
+      {"path": {"type": "string"}, "name": {"type": "string"}, "kind": {"type": "string", "enum": ["set", "prop"]}}, ["path"])
+def _previz_add(a):
+    g = http("POST", "/studio/api/glb/add", {"path": a["path"], "name": a.get("name"), "kind": a.get("kind") or "set"}, timeout=600)
+    i = g.get("info") or {}
+    return text({"id": g.get("id"), "name": g.get("name"), "cameras": [c["name"] for c in i.get("cameras") or []], "seconds": i.get("duration")})
+
+
+def multipart(path, fields, file_field, filename, data):
+    boundary = _uuid.uuid4().hex
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode() for k, v in fields.items()]
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'
+                 f'Content-Type: application/octet-stream\r\n\r\n'.encode() + data + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    req = urllib.request.Request(BASE + path, data=b"".join(parts), method="POST",
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}", **AI_HEADERS})
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Studio answered {e.code}: {_said(e.read())}")
+
+
+GUIDE += """
+
+Making a film (each step is a page of the project in the app, and shows there as you go)
+1. studio_project_new with the screenplay (write it in Fountain, or give a PDF/FDX/Fountain file). It's broken down into scenes and
+   shots; every place in the scene headings becomes a location, every speaking part is cast (a character made from how the
+   screenplay introduces them). Change the screenplay any time with studio_screenplay_get / studio_screenplay_set: all of it follows.
+2. studio_breakdown to read the scenes and shots; studio_shot_update for a shot's camera or length.
+3. studio_cast, then fill in each character's sheet (studio_character_save: age, build, hair, wardrobe…) and make their reference
+   picture (studio_character_picture): it becomes their face, which keeps them the same in every frame. studio_view to look at it.
+4. studio_locations, then each location's look (studio_location_update) and its picture (studio_location_picture).
+5. studio_storyboard_frames: a frame per shot (the first frames of the takes).
+6. studio_takes_draft, studio_takes, studio_take_pick: the shots' videos.
+7. studio_project_music and studio_project_voices, then studio_project_film: the film.
+Long steps run in the background with wait=false; studio_job / studio_takes / studio_status tell how they're going.
+Pictures and videos are files on this PC: studio_view shows you any of them."""
+
+
+_call_v2 = call
+
+
+def call(name, a):
+    if name in V3:
+        return V3[name](a or {})
+    return _call_v2(name, a)
+
+
+# ================================================================ the protocol (stdio here; HTTP in mcp_http.py)
+INSTRUCTIONS = ("Studio is the user's film studio app (on ComfyUI, on their PC): screenplays, projects broken down into scenes and shots, "
+                "characters and locations with reference pictures, storyboards, takes, music, voices, the film edit, pictures and videos with "
+                "any app, and AI tools (depth, slow motion, stems, subtitles, lossless cut, mastering). Everything made here shows in the app. "
+                "Call studio_overview first: it explains the steps from a story to a film.")
+
+
+def handle(m):
+    """One JSON-RPC message -> its answer (None for a notification)."""
+    if not isinstance(m, dict):
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request"}}
+    mid, method = m.get("id"), m.get("method")
+    if mid is None:
+        return None            # notifications (initialized, cancelled…)
+    try:
+        if method == "initialize":
+            res = {"protocolVersion": (m.get("params") or {}).get("protocolVersion") or PROTOCOL,
+                   "capabilities": {"tools": {}}, "serverInfo": {"name": "studio", "version": "3.0"}, "instructions": INSTRUCTIONS}
+        elif method == "tools/list":
+            res = {"tools": TOOLS}
+        elif method == "tools/call":
+            p = m.get("params") or {}
+            try:
+                res = {"content": call(p.get("name"), p.get("arguments") or {})}
+            except Exception as e:
+                res = {"content": [{"type": "text", "text": str(e)}], "isError": True}
+        elif method == "ping":
+            res = {}
+        else:
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "Method not found"}}
+        return {"jsonrpc": "2.0", "id": mid, "result": res}
+    except Exception as e:
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": str(e)}}
+
+
+
 def send(msg):
     sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
 
 def main():
+    """MCP over stdio: a JSON-RPC message a line, each answered on stdout."""
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
             m = json.loads(line)
-        except Exception:
+        except ValueError:
+            send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
             continue
-        mid, method = m.get("id"), m.get("method")
-        if mid is None:
-            continue   # notifications
-        try:
-            if method == "initialize":
-                res = {"protocolVersion": (m.get("params") or {}).get("protocolVersion") or PROTOCOL,
-                       "capabilities": {"tools": {}}, "serverInfo": {"name": "studio", "version": "2.0"},
-                       "instructions": "Studio is the user's ComfyUI studio app on this PC. Use these tools to generate pictures, videos, music and voices with any Studio app, run projects and the storyboard, read Previz sets, and bring final renders (e.g. Seedance via Higgsfield) back into Studio. Call studio_overview first."}
-            elif method == "tools/list":
-                res = {"tools": TOOLS}
-            elif method == "tools/call":
-                p = m.get("params") or {}
-                try:
-                    res = {"content": call(p.get("name"), p.get("arguments") or {})}
-                except Exception as e:
-                    res = {"content": [{"type": "text", "text": str(e)}], "isError": True}
-            elif method == "ping":
-                res = {}
-            else:
-                send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "Method not found"}})
-                continue
-            send({"jsonrpc": "2.0", "id": mid, "result": res})
-        except Exception as e:
-            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": str(e)}})
+        res = handle(m)
+        if res is not None:
+            send(res)
 
 
 if __name__ == "__main__":

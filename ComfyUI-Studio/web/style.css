@@ -1,4 +1,4 @@
-/* Film Engine's look (film-engine-v2/src/styles/redesign.css): floating rounded panels on near-black, neutral greys,
+/* Film Engine's look (its redesign.css): floating rounded panels on near-black, neutral greys,
    one blue accent, the system font in sentence case, small mono kickers. */
 :root{
   --bg:#0b0b0c; --surface:#151517; --bg2:#131315; --panel:#1d1d20; --panel2:#232327; --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.14);
@@ -137,6 +137,7 @@ h3{font-size:15px;font-weight:600;line-height:1.3}
 .qcard h3{font-size:15px}.qcard p{margin:4px 0 0;color:var(--muted);font-size:12.5px}
 .qcard::after{content:"→";position:absolute;right:16px;top:16px;color:var(--dim);transition:.18s}
 .qcard:hover::after{color:var(--accent);right:12px}
+.qcard.ai{display:block}.qcard.ai .ic{background:var(--accent-soft);color:var(--accent2)}.qcard.ai.off{opacity:.55}
 
 /* media grid: media wells stay the darkest thing on screen */
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
@@ -1073,3 +1074,62 @@ body.sp-focus .sp-focusbar{display:flex;position:fixed;left:50%;bottom:14px;tran
 .sbf-ver img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}.sbf-ver span{display:block;padding:4px 8px;font-size:12px;color:var(--muted)}
 .chlist{margin:0;padding-left:18px;line-height:1.6;font-size:13px}.chlist del{color:#f2a3a3}.chlist ins{color:#9fe3c4;text-decoration:none}
 .chnote a{color:var(--accent2);margin-left:6px}
+
+/* ---------- AI tools (Production): Film Engine's Generators. The file and its player on the left, the tool on the right,
+   the history below */
+.ait-main{display:grid;grid-template-columns:minmax(0,1fr) minmax(330px,420px);gap:20px;align-items:start}
+.ait-left{display:flex;flex-direction:column;gap:12px;min-width:0}
+.ait-drop{border:1px dashed var(--line2);border-radius:18px;background:var(--bg2);min-height:380px;display:flex;flex-direction:column;gap:10px;padding:14px;transition:border-color .15s,background .15s}
+.ait-drop.over{border-color:var(--accent-line);background:var(--accent-soft)}
+.ait-drop.has{border-style:solid;border-color:var(--line)}
+.ait-empty{margin:auto;text-align:center;display:flex;flex-direction:column;align-items:center;gap:10px;padding:30px;max-width:520px}
+.ait-empty .row{justify-content:center;flex-wrap:wrap}
+.ait-ic{font-size:30px;color:var(--dim)}
+.ait-up{font:13px var(--mono);color:var(--text2)}
+.ait-player{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:240px;border-radius:12px;background:#000;overflow:hidden}
+.ait-player video,.ait-player img{display:block;max-width:100%;max-height:62vh}
+.ait-player audio{width:calc(100% - 40px);margin:0 20px 20px}
+.ait-sound{font-size:64px;color:var(--dim);padding:30px 0 14px}
+.ait-loading{position:absolute;inset:0;display:grid;place-items:center;padding:20px;text-align:center;background:rgba(0,0,0,.72);color:var(--text2);font-size:13px}
+.ait-bar{height:14px}
+.ait-sels .vsel{border-radius:7px}
+.ait-info{flex-wrap:wrap;font-size:13px}.ait-info b{max-width:36ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp{flex:1}
+kbd{font:10.5px var(--mono);padding:1px 5px;border:1px solid var(--line2);border-bottom-width:2px;border-radius:4px;color:var(--text2);margin-left:4px}
+.mono{font-family:var(--mono);font-size:12px}
+.ait-panel{display:flex;flex-direction:column;gap:14px;position:sticky;top:0}
+.ait-desc{margin:0;color:var(--text2);font-size:13px;line-height:1.5}
+.ait-warn{background:rgba(224,163,62,.1);border:1px solid rgba(224,163,62,.35);color:#f1cf93;border-radius:10px;padding:10px 12px;font-size:13px}
+.ait-warn a{color:var(--accent2);text-decoration:underline}
+.ait-marks:empty{display:none}
+.ait-marks p{margin:8px 0 0}
+.ait-pieces{margin:8px 0 0;padding-left:22px;display:flex;flex-direction:column;gap:4px;max-height:220px;overflow:auto}
+.ait-pieces li{display:flex;align-items:center;gap:10px}.ait-pieces li .ghost{margin-left:auto}
+.ait-opts .lbl b{font-weight:500;color:var(--text2);margin-left:6px}
+.ait-opts input[type=range]{width:100%}
+.ait-ohint{margin:4px 0 0}
+.ait-now{background:var(--panel);border:1px solid var(--accent-line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.ait-prog{height:6px;border-radius:6px;background:rgba(255,255,255,.08);overflow:hidden;margin:6px 0}
+.ait-prog.big{height:9px}
+.ait-prog i{display:block;height:100%;border-radius:6px;background:linear-gradient(90deg,var(--accent-strong),var(--accent));transition:width .4s}
+.ait-jobs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.ait-job{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+.ait-job .row{flex-wrap:wrap}
+.ait-job p{margin:6px 0 0}
+.ait-status{font:11px var(--mono);color:var(--muted)}
+.ait-status.done{color:var(--good)}.ait-status.failed,.ait-status.interrupted{color:var(--bad)}.ait-status.running{color:var(--accent2)}
+.ait-err{color:var(--bad);font-size:13px;white-space:pre-wrap}
+.ait-stats{color:var(--text2)}
+.ait-outs{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.ait-outs li{padding:8px 10px;border-radius:10px;background:var(--bg2);border:1px solid var(--line)}
+.ait-outs .mono{overflow-wrap:anywhere}
+.ait-outplayer{display:block;max-width:100%;max-height:420px;margin-top:8px;border-radius:8px}
+.ait-outs audio{width:100%;margin-top:8px}
+.apptab.off{opacity:.55}
+.ait-pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;max-height:60vh;overflow:auto}
+.ait-pfile{display:flex;flex-direction:column;gap:4px;text-align:left;padding:6px;border-radius:10px;background:var(--bg2);border:1px solid var(--line)}
+.ait-pfile:hover{border-color:var(--accent-line)}
+.ait-pfile img,.ait-pic{width:100%;aspect-ratio:16/10;object-fit:cover;border-radius:6px;background:#000;display:grid;place-items:center;font-size:28px;color:var(--dim)}
+.ait-pfile span{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ait-pfile small{font-size:10.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:1100px){.ait-main{grid-template-columns:1fr}.ait-panel{position:static}}
+@media (max-width:760px){.ait-drop{min-height:240px;padding:10px}.ait-player video,.ait-player img{max-height:46vh}}

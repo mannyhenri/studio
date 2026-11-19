@@ -141,7 +141,7 @@ function layout(app) {
 }
 
 /* ------------------------------------------------------------ router */
-const pages = { home: pageHome, create: pageCreate, gallery: pageGallery, characters: pageCharacters, storyboard: pageStoryboard, loras: pageLoras, reel: pageReel, sound: pageSound, projects: pageProjects, previz: pagePreviz, "3d": (m, a) => location.replace("#/previz" + (a && a.startsWith("glb:") ? "/" + a : "")), settings: pageSettings };
+const pages = { home: pageHome, create: pageCreate, gallery: pageGallery, characters: pageCharacters, storyboard: pageStoryboard, loras: pageLoras, reel: pageReel, sound: pageSound, projects: pageProjects, previz: pagePreviz, "3d": (m, a) => location.replace("#/previz" + (a && a.startsWith("glb:") ? "/" + a : "")), settings: pageSettings, aitools: pageAiTools };
 async function route() {
   // a screenplay being typed is saved before its page goes (it reads the page itself): the next page sees the breakdown it makes
   if (S.spFlush) { const f = S.spFlush; S.spFlush = null; try { await f(); } catch { } }
@@ -183,11 +183,12 @@ const hashParts = () => { const [, page = "home", arg, sub] = location.hash.spli
 function phaseOf(r = hashParts()) {
   if (r.page === "projects") return (P_STEP[P_ALIAS[r.sub] || r.sub] || [])[0] || "";
   if (r.page === "create") { const a = S.apps[r.arg != null && S.apps[+r.arg] ? +r.arg : S.appIdx]; return a && isFixer(a) ? "post" : "prod"; }
-  return { characters: "pre", previz: "pre", storyboard: "prod", reel: "post", sound: "post" }[r.page] || "";
+  return { characters: "pre", previz: "pre", storyboard: "prod", aitools: "prod", reel: "post", sound: "post" }[r.page] || "";
 }
 function curKey(r = hashParts()) {
   if (r.page === "projects") return r.arg ? `projects/${r.arg}${r.sub ? "/" + r.sub : ""}` : "projects";
   if (r.page === "create") return "create/" + (r.arg != null && S.apps[+r.arg] ? +r.arg : S.appIdx);
+  if (r.page === "aitools") return "aitools/" + (r.arg || store.get("aiTool", ""));
   return r.page;
 }
 // how far a project is, per page and per phase (the phase buttons' bars, the menus, the project's overview)
@@ -226,7 +227,9 @@ function phaseGroups(ph) {
   const link = (label, icon, desc, page) => ({ label, icon, desc, href: "#/" + page, key: page });
   const proj = keys => ({ head: "Project", proj: pr, items: keys.map(step) });
   if (ph === "pre") return [proj(["screenplay", "scenes", "cast", "locations", "storyboard"]), { head: "Design", items: [link("Characters", "☺", "Faces, looks and voices you reuse", "characters"), link("Previz", "◰", "3D sets: cameras, lenses, light, blocking", "previz")] }];
-  if (ph === "prod") return [proj(["takes"]), { head: "Generate", items: S.apps.filter(a => !isFixer(a)).map(app) }];
+  // Film Engine's Generators (AI Depth, Slow-Mo, Stems, Subtitles, Lossless Cut, One-Click Master): one that can't run here says so
+  const ai = t => ({ label: t.name, icon: t.icon || "✦", desc: t.unavailable ? "Not ready on this PC: " + t.unavailable : t.short || "", href: "#/aitools/" + t.id, key: "aitools/" + t.id, stat: t.unavailable ? "Not ready" : "" });
+  if (ph === "prod") return [proj(["takes"]), { head: "Generate", items: S.apps.filter(a => !isFixer(a)).map(app) }, { head: "AI tools", col: 2, items: S.aiTools.map(ai) }];
   return [proj(["sound", "film"]), { head: "Sound & cut", items: [link("Reel", "♫", "Pictures and clips cut to a song's beat", "reel"), link("Music & voices", "♪", "Songs, scores and voices", "sound")] },
     { head: "Fix & enhance", col: 2, items: S.apps.filter(isFixer).map(app) }];
 }
@@ -341,6 +344,9 @@ async function pageHome(main) {
     const t = h(`<div class="qcard"><div class="ic">${a.kind === "video" ? "▶" : "▣"}</div><h3>${esc(appShort(a))}</h3><p>${a.inputs.length} options · ${a.kind}</p></div>`);
     t.onclick = () => openApp(k); ag.append(t);
   });
+  // the AI tools (Production): a shortcut to each one's page
+  S.aiTools.forEach(t => ag.append(h(`<a class="qcard ai ${t.unavailable ? "off" : ""}" href="#/aitools/${t.id}" title="${esc(t.unavailable ? "Not ready on this PC: " + t.unavailable : t.description || "")}">
+    <div class="ic">${t.icon || "✦"}</div><h3>${esc(t.name)}</h3><p>${esc(t.unavailable ? "Not ready on this PC" : t.short || "AI tool")}</p></a>`)));
   const items = await loadGallery();
   const recent = $("#recent", p);
   if (!items.length) recent.append(h(`<div class="empty">Nothing yet. Your first render will show up here.</div>`));
@@ -1017,6 +1023,7 @@ function lightbox(it, list) {
        <button class="btn hidden" data-tz>✦ Topaz Video</button>
        <button class="btn" data-vfix>🩹 Fix a part / a face</button>
        <button class="btn" data-vext>⏭ Continue this shot</button>`}
+       ${cur.private ? "" : `<button class="btn" data-ait title="AI Depth, AI Slow-Mo, AI Stems, AI Subtitles, AI Lossless Cut, One-Click Master">✦ AI tools${cur.kind === "image" ? " (depth)" : ": slow-mo, depth, stems…"}</button>`}
      </div>
      <button class="ghost" data-board>＋ Add to storyboard${cur.kind === "image" ? " (as first frame)" : ""}</button>
      ${cur.kind === "image" && S.chars.length ? `<select class="ghost" data-face title="Make this picture a character's face (and keep it with their pictures)"><option value="">☺ Use as a character's face…</option>${S.chars.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>` : ""}
@@ -1063,6 +1070,12 @@ function lightbox(it, list) {
       close(); openApp(k); toast("Added to " + appShort(S.apps[k]));
     });
     $("[data-x]", side).onclick = close;
+    const aib = $("[data-ait]", side);
+    if (aib) aib.onclick = () => {
+      S.aiPick = { filename: cur.filename, subfolder: cur.subfolder || "" }; close();
+      const to = "#/aitools/" + (cur.kind === "image" ? "depth" : store.get("aiTool", "slowmo"));
+      if (location.hash === to) route(); else location.hash = to;      // from the AI tools' own page: the same address
+    };
     const vfb = $("[data-vfix]", side), veb = $("[data-vext]", side);
     if (vfb) vfb.onclick = () => { const v = $("video", box); videoFixDialog(cur, meta && meta.prompt, v ? v.currentTime : 0); };
     if (veb) veb.onclick = () => videoExtendDialog(cur, meta && meta.prompt);
@@ -1098,6 +1111,342 @@ function lightbox(it, list) {
   box.addEventListener("touchstart", e => { sx = e.touches[0].clientX; }, { passive: true });
   box.addEventListener("touchend", e => { if (sx == null) return; const dx = e.changedTouches[0].clientX - sx; if (Math.abs(dx) > 50) go(dx > 0 ? -1 : 1); sx = null; });
   show();
+}
+
+/* ------------------------------------------------------------ AI TOOLS (Production): Film Engine's Generators, on this PC
+   AI Depth, AI Slow-Mo, AI Stems, AI Subtitles, AI Lossless Cut and One-Click Master: each an engine in
+   ComfyUI-Studio/ai_tools/ with its generator.json, run by generators.py. Give a tool a file (an upload of any size, or
+   one from the Gallery), set it, Generate. A section tool (Slow-Mo) does only what's marked between In and Out, a pieces
+   tool (Lossless Cut) cuts each piece marked: I and O mark, ← → step a frame, as in Resolve. One job runs at a time, the
+   others wait their turn; the History keeps every result, and the pictures and videos are in the Gallery (Generators). */
+const GEN = "/studio/api/generators";
+S.aiTools = []; S.ai = { input: null, inF: null, outF: null, pieces: [], pIn: null, pOut: null };
+async function loadAiTools() { try { S.aiTools = (await api(GEN + "/tools")).tools || []; } catch { S.aiTools = []; } navRefresh(); return S.aiTools; }
+const aiActive = j => j.status === "running" || j.status === "queued";
+const aiErr = e => (e && e.data && e.data.error) || (e && e.message) || String(e);
+/* 0:12.500, or 1:02:03.000 past an hour */
+function aiClock(t) {
+  if (t == null || !isFinite(t)) return "–";
+  const ms = Math.round(t * 1000), hh = Math.floor(ms / 3600000), mm = Math.floor(ms / 60000) % 60, ss = (ms % 60000) / 1000;
+  return `${hh ? `${hh}:${String(mm).padStart(2, "0")}` : mm}:${ss.toFixed(3).padStart(6, "0")}`;
+}
+function aiTimecode(frame, fps) {
+  if (frame == null || !fps) return "–";
+  const f = Math.round(fps), s = Math.floor(frame / f), pad = n => String(n).padStart(2, "0");
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}:${pad(frame % f)}`;
+}
+/* what a cut piece really is, when it differs from what was asked (a keyframe cut starts earlier) or was re-encoded */
+function aiPieceInfo(pc) {
+  const parts = [`${aiClock(pc.start)} → ${aiClock(pc.end)}`];
+  if (pc.asked_start != null && Math.abs(pc.start - pc.asked_start) > 0.0015) parts.push(`starts on the keyframe at ${aiClock(pc.start)} (asked ${aiClock(pc.asked_start)})`);
+  if (pc.reencoded && pc.reencoded.length) parts.push(`re-encoded ${pc.reencoded.map(([a, b]) => `${aiClock(a)}–${aiClock(b)}`).join(", ")}, the rest copied`);
+  else if (pc.mode) parts.push("nothing re-encoded");
+  return parts.join(" · ");
+}
+/* whether a tool takes this file, in words (the server checks the same) */
+function aiFits(t, inp) {
+  if (!t || !inp) return "";
+  const acc = t.accepts || "video", k = inp.kind;
+  if (acc === "audio") return k === "image" ? `${t.name} needs a sound file or a video with sound` : k === "video" && !inp.has_audio ? `${inp.name} has no sound` : "";
+  if (acc === "video") {
+    if (k === "audio" && !t.audio_ok) return `${t.name} needs a video`;
+    if (k === "image" && !t.image_ok) return `${t.name} needs a video, not a picture`;
+    return t.needs_sound && k === "video" && !inp.has_audio ? `${inp.name} has no sound` : "";
+  }
+  return k === "image" ? "" : `${t.name} needs a picture`;
+}
+const AI_STATS = { integrated_lufs: ["Loudness", " LUFS"], true_peak_dbtp: ["true peak", " dBTP"], loudness_range_lu: ["range", " LU"], input_lufs: ["the mix was", " LUFS"],
+  input_true_peak_dbtp: ["its peak", " dBTP"], gain_db: ["gain", " dB"], limiter: ["limiter", ""], language: ["Language", ""], subtitles: ["subtitles", ""], stems: ["Stems", ""], model: ["model", ""] };
+const aiStats = st => Object.entries(st || {}).map(([k, v]) => { const [l, u] = AI_STATS[k] || [k.replace(/_/g, " "), ""]; return `${l} ${typeof v === "number" ? +v.toFixed(2) : v}${u}`; }).join(" · ");
+const AI_STATUS = { queued: "Waiting its turn", done: "Done", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted" };
+
+async function pageAiTools(main, arg) {
+  const pg = h(`<div class="page ait"><div class="eyebrow">Production · AI tools</div></div>`);
+  main.append(pg);
+  await loadAiTools();                                  // fresh: whether each tool can run here
+  if (!document.body.contains(pg)) return;              // another page opened meanwhile
+  const tools = S.aiTools;
+  const t = tools.find(x => x.id === arg) || tools.find(x => x.id === store.get("aiTool")) || tools[0];
+  if (!t) { pg.append(h(`<h1>AI tools</h1>`), h(`<div class="empty">No AI tools found in ComfyUI-Studio/generators.</div>`)); return; }
+  if (arg !== t.id) history.replaceState(null, "", "#/aitools/" + t.id);
+  store.set("aiTool", t.id); navRefresh();
+  pg.append(h(`<h1>${esc(t.name)}</h1>`));
+  const tabs = h(`<div class="apptabs ait-tabs" role="tablist" aria-label="AI tools"></div>`);
+  tools.forEach(x => tabs.append(h(`<a class="apptab small ${x.id === t.id ? "active" : ""} ${x.unavailable ? "off" : ""}" role="tab" aria-selected="${x.id === t.id}" href="#/aitools/${x.id}" title="${esc(x.unavailable ? "Not ready on this PC: " + x.unavailable : x.short || "")}"><span>${x.icon || "✦"}</span>${esc(x.name)}</a>`)));
+  pg.append(tabs);
+  if (S.incog) { pg.append(h(`<div class="empty">The AI tools work on your regular files, not on Incognito ones yet: leave Incognito (the mask, top right) to use them.</div>`)); return; }
+  const body = h(`<div class="ait-main"><div class="ait-left"><section class="ait-drop" aria-label="The file"></section><div class="ait-now hidden" role="status" aria-live="polite"></div></div>
+      <section class="panel ait-panel" aria-label="${esc(t.name)}"></section></div>`);
+  pg.append(body, h(`<div class="section-head"><h2>History</h2><span class="hint">One job runs at a time; the others wait their turn. Pictures and videos also land in the Gallery, in Generators › the tool's name.</span></div>`),
+    h(`<ul class="ait-jobs"></ul>`), h(`<input type="file" hidden accept="video/*,audio/*,image/*,.mov,.mkv,.mxf,.mts,.m2ts,.wav,.aif,.aiff,.flac,.tif,.tiff,.heic">`));
+  const A = S.ai, drop = $(".ait-drop", pg), panel = $(".ait-panel", pg), now = $(".ait-now", pg), jobsEl = $(".ait-jobs", pg), picker = $("input[type=file]", pg);
+  const vals = store.get("aiv", {}), v = vals[t.id] || (vals[t.id] = {});
+  (t.options || []).forEach(o => { if (!(o.name in v) && o.type !== "points") v[o.name] = o.default; });
+  const saveVals = () => store.set("aiv", vals);
+  let jobs = [], playing = null, busy = false, frame = 0, player = null;
+  const alive = () => document.body.contains(pg);
+
+  /* ---- the file */
+  const setInput = inp => { A.input = inp; store.set("aiInput", inp ? inp.id : null); A.inF = A.outF = A.pIn = A.pOut = null; A.pieces = []; frame = 0; drawDrop(); drawPanel(); };
+  const register = async body => {
+    busy = true; drawPanel();
+    try { setInput((await post(GEN + "/inputs", body)).input); } catch (e) { toast(aiErr(e), true); } finally { busy = false; drawPanel(); }
+  };
+  const uploadFile = file => new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", GEN + "/inputs/import");
+    x.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
+    x.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    x.upload.onprogress = e => { if (e.lengthComputable) { const el = $(".ait-up", drop); if (el) el.textContent = `Uploading ${file.name}: ${Math.round(e.loaded / e.total * 100)}%`; } };
+    x.onload = () => { let d = {}; try { d = JSON.parse(x.responseText); } catch { } x.status < 300 ? resolve(d.input) : reject(new Error(d.error || `HTTP ${x.status}`)); };
+    x.onerror = () => reject(new Error("The upload didn't go through"));
+    x.send(file);
+  });
+  const upload = async file => {
+    if (!file) return;
+    busy = true; drop.innerHTML = `<div class="ait-empty"><div class="ait-up">Uploading ${esc(file.name)}…</div></div>`; drawPanel();
+    try { setInput(await uploadFile(file)); } catch (e) { toast(e.message, true); drawDrop(); } finally { busy = false; drawPanel(); }
+  };
+  picker.onchange = () => { upload(picker.files[0]); picker.value = ""; };
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); const f = e.dataTransfer && e.dataTransfer.files[0]; if (f) upload(f); };
+
+  const fps = () => A.input && A.input.kind === "video" && A.input.fps ? A.input.fps : null;
+  const lastFrame = () => A.input && A.input.frames ? A.input.frames - 1 : Infinity;
+  // the frame on screen, never past the clip's real last frame (at the very end the player's time rounds one beyond it)
+  const curFrame = () => Math.max(0, Math.min(lastFrame(), player && fps() ? Math.round(player.currentTime * fps()) : frame));
+  const nowAt = () => fps() ? curFrame() / fps() : Math.max(0, player ? player.currentTime : 0);
+  const nowOut = () => fps() ? (curFrame() + 1) / fps() : Math.max(0, player ? player.currentTime : 0);
+  const duration = () => (A.input && A.input.duration) || (player && player.duration) || 0;
+
+  function drawDrop() {
+    const inp = A.input;
+    drop.classList.toggle("has", !!inp);
+    if (!inp) {
+      drop.innerHTML = `<div class="ait-empty"><div class="ait-ic">⇪</div><h3>Drop a video, a sound or a picture here</h3>
+        <p class="hint">Or choose one: it's sent to this PC (any size, ProRes too). ${esc(t.name)} takes ${t.accepts === "audio" ? "a sound file or a video's sound" : t.image_ok ? "a video or a picture" : t.audio_ok ? "a video or a sound file" : "a video"}.</p>
+        <div class="row"><button class="btn" data-file>Choose a file…</button><button class="ghost" data-gal>From the Gallery…</button></div></div>`;
+      $("[data-file]", drop).onclick = () => picker.click();
+      $("[data-gal]", drop).onclick = () => aiPickDialog(it => register({ filename: it.filename, subfolder: it.subfolder }));
+      player = null; return;
+    }
+    const src = `${GEN}/inputs/${inp.id}${inp.preview ? "/preview" : ""}`;
+    drop.innerHTML = `<div class="ait-player">${inp.kind === "image" ? `<img src="${src}" alt="${esc(inp.name)}">` : inp.kind === "video"
+        ? `<video src="${src}" controls playsinline preload="metadata"></video>` : `<div class="ait-sound">♪</div><audio src="${src}" controls preload="metadata"></audio>`}
+        <div class="ait-loading">${inp.preview ? `Preparing a ${inp.kind === "image" ? "viewable" : "playable"} copy of this ${esc((inp.codec || "").toUpperCase())} file…` : "Loading…"}</div></div>
+      ${inp.kind === "image" ? "" : `<div class="vbar ait-bar" title="Click to go there"><div class="ait-sels"></div><div class="vhead"></div></div>`}
+      <div class="row ait-info"><b title="${esc(inp.name)}">${esc(inp.name)}</b><span class="mono hint">${[inp.width ? `${inp.width}×${inp.height}` : "", inp.fps ? `${+inp.fps.toFixed(3)} fps` : "", inp.frames ? `${inp.frames} frames` : "", inp.duration ? `${inp.duration.toFixed(2)} s` : "", inp.kind === "audio" || inp.has_audio ? "sound" : inp.kind === "video" ? "no sound" : ""].filter(Boolean).join(" · ")}</span>
+        ${inp.kind === "video" ? `<span class="mono ait-frame"></span>` : ""}<span class="sp"></span><button class="ghost sm" data-gal>From the Gallery…</button><button class="ghost sm" data-file>Another file…</button></div>`;
+    $("[data-file]", drop).onclick = () => picker.click();
+    $("[data-gal]", drop).onclick = () => aiPickDialog(it => register({ filename: it.filename, subfolder: it.subfolder }));
+    const media = $("img,video,audio", drop), loading = $(".ait-loading", drop);
+    player = inp.kind === "image" ? null : media;
+    const ready = () => loading.classList.add("hidden");
+    const failed = () => { loading.classList.remove("hidden"); loading.textContent = "This file can't be shown here, but the tools can still read it."; };
+    if (inp.kind === "image") { media.onload = ready; media.onerror = failed; return; }
+    media.onloadedmetadata = () => { ready(); drawMarks(); };
+    media.onerror = failed;
+    const tick = () => { frame = fps() ? Math.round(media.currentTime * fps()) : 0; drawMarks(); };
+    media.ontimeupdate = tick; media.onseeked = tick;
+    if (media.requestVideoFrameCallback) { const cb = () => { if (!alive() || player !== media) return; tick(); media.requestVideoFrameCallback(cb); }; media.requestVideoFrameCallback(cb); }
+    $(".ait-bar", drop).onclick = e => { const r = e.currentTarget.getBoundingClientRect(), d = duration(); if (d) media.currentTime = Math.max(0, Math.min(d, (e.clientX - r.left) / r.width * d)); };
+    drawMarks();
+  }
+  /* the bar under the player: the section or the pieces, and the playhead */
+  function drawMarks() {
+    const bar = $(".ait-bar", drop); if (!bar || !A.input) return;
+    const d = duration() || 1, pct = x => `${Math.max(0, Math.min(100, x / d * 100))}%`, f = fps();
+    const spans = t.range === "section" ? (A.inF != null && A.outF != null ? [[A.inF / f, A.outF / f]] : A.inF != null ? [[A.inF / f, A.inF / f + 0.04]] : [])
+      : t.range === "segments" ? A.pieces.map(p => [p.start, p.end]).concat(A.pIn != null ? [[A.pIn, A.pOut != null ? A.pOut : A.pIn + 0.04]] : []) : [];
+    $(".ait-sels", bar).innerHTML = spans.map(([a, b]) => `<div class="vsel" style="left:${pct(a)};width:calc(${pct(b)} - ${pct(a)})"></div>`).join("");
+    $(".vhead", bar).style.left = pct(player ? player.currentTime : 0);
+    const fr = $(".ait-frame", drop); if (fr) fr.textContent = `frame ${curFrame()} · ${aiTimecode(curFrame(), f)}`;
+  }
+
+  /* ---- marks: a section (frames, Out exclusive) or pieces (seconds) */
+  const markIn = () => { const f = curFrame(); A.inF = f; if (A.outF != null && A.outF <= f) A.outF = null; drawPanel(); drawMarks(); };
+  const markOut = () => { const f = curFrame() + 1; A.outF = f; if (A.inF != null && A.inF >= f) A.inF = null; drawPanel(); drawMarks(); };   // the frame on screen is included
+  const sortPieces = ps => ps.sort((a, b) => a.start - b.start || a.end - b.end);
+  const pieceIn = () => { const x = nowAt(); A.pIn = x; if (A.pOut != null && A.pOut <= x) A.pOut = null; drawPanel(); drawMarks(); };
+  const pieceOut = () => { const x = nowOut(); A.pOut = x; if (A.pIn != null && A.pIn >= x) A.pIn = null; drawPanel(); drawMarks(); };
+  const addPiece = () => { if (A.pIn == null || A.pOut == null || A.pOut <= A.pIn) return; A.pieces = sortPieces([...A.pieces, { start: A.pIn, end: A.pOut }]); A.pIn = A.pOut = null; drawPanel(); drawMarks(); };
+  // split at the playhead: the first split cuts the whole file in two, later ones cut whichever piece holds it
+  const splitHere = () => {
+    const x = nowAt(), d = duration();
+    if (!(x > 0 && x < d)) return toast("Move the playhead inside the file to split there", true);
+    if (!A.pieces.length) A.pieces = [{ start: 0, end: x }, { start: x, end: d }];
+    else {
+      const k = A.pieces.findIndex(p => p.start < x && x < p.end);
+      if (k < 0) return toast("The playhead isn't inside a piece", true);
+      A.pieces = sortPieces([...A.pieces.slice(0, k), { start: A.pieces[k].start, end: x }, { start: x, end: A.pieces[k].end }, ...A.pieces.slice(k + 1)]);
+    }
+    drawPanel(); drawMarks();
+  };
+  const onKey = e => {
+    if (!alive()) return document.removeEventListener("keydown", onKey);
+    if (!A.input || !player || e.ctrlKey || e.metaKey || e.altKey || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || !$("#modal").classList.contains("hidden")) return;
+    const seg = t.range === "segments", k = e.key.toLowerCase();
+    if (k === "i" && t.range !== "whole") { e.preventDefault(); (seg ? pieceIn : markIn)(); }
+    else if (k === "o" && t.range !== "whole") { e.preventDefault(); (seg ? pieceOut : markOut)(); }
+    else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && fps() && player.paused) {
+      e.preventDefault(); player.currentTime = (Math.max(0, Math.min(lastFrame(), curFrame() + (e.key === "ArrowLeft" ? -1 : 1))) + 0.1) / fps();   // just inside the frame: it reads back as itself
+    }
+  };
+  document.addEventListener("keydown", onKey);
+
+  /* ---- the tool: what it does, its marks, its settings, Generate */
+  const applies = o => !o.when || Object.entries(o.when).every(([k, vs]) => (vs || []).map(String).includes(String(v[k])));
+  function option(o) {
+    const el = optionEl(o);
+    if (o.hint) el.append(h(`<p class="hint ait-ohint">${esc(o.hint)}</p>`));
+    return el;
+  }
+  function optionEl(o) {
+    const id = `ait-${o.name}`;
+    if (o.type === "checkbox") {
+      const el = h(`<div class="toggle ${v[o.name] ? "on" : ""}" role="switch" tabindex="0" aria-checked="${!!v[o.name]}"><span>${esc(o.label)}</span><div class="sw"></div></div>`);
+      el.onclick = el.onkeydown = e => { if (e.type === "keydown" && e.key !== " " && e.key !== "Enter") return; e.preventDefault(); v[o.name] = !v[o.name]; saveVals(); drawPanel(); };
+      return el;
+    }
+    if (o.type === "select") {
+      const ch = o.choices || [], short = ch.length <= 4 && ch.every(c => String(c.label).length <= 30);
+      const el = h(`<div><label class="lbl" for="${id}">${esc(o.label)}</label>${short ? `<div class="chips" id="${id}" role="radiogroup">${ch.map(c => `<div class="chip ${String(c.value) === String(v[o.name]) ? "on" : ""}" role="radio" tabindex="0" aria-checked="${String(c.value) === String(v[o.name])}" data-v="${esc(c.value)}">${esc(c.label)}</div>`).join("")}</div>`
+        : `<select id="${id}">${ch.map(c => `<option value="${esc(c.value)}" ${String(c.value) === String(v[o.name]) ? "selected" : ""}>${esc(c.label)}</option>`).join("")}</select>`}</div>`);
+      const pick = raw => { const hit = ch.find(c => String(c.value) === raw); v[o.name] = hit ? hit.value : raw; saveVals(); drawPanel(); };
+      $$(".chip", el).forEach(c => { c.onclick = () => pick(c.dataset.v); c.onkeydown = e => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); pick(c.dataset.v); } }; });
+      const sel = $("select", el); if (sel) sel.onchange = () => pick(sel.value);
+      return el;
+    }
+    if (o.type === "slider") {
+      const show = x => o.max <= 1 && o.min >= 0 ? `${Math.round(+x * 100)}%` : String(+(+x).toFixed(2));
+      const el = h(`<div><label class="lbl" for="${id}">${esc(o.label)} <b class="mono">${show(v[o.name] ?? o.default)}</b></label><input id="${id}" type="range" min="${o.min}" max="${o.max}" step="${o.step || "any"}" value="${v[o.name] ?? o.default}"></div>`);
+      const r = $("input", el); r.oninput = () => { v[o.name] = +r.value; saveVals(); $("b", el).textContent = show(r.value); };
+      return el;
+    }
+    if (o.type === "points") return h(`<p class="hint">${esc(o.label || o.name)}: picking points on the picture isn't in Studio yet.</p>`);
+    const el = h(`<div><label class="lbl" for="${id}">${esc(o.label)}</label><input id="${id}" type="${o.type === "number" ? "number" : "text"}" value="${esc(v[o.name] ?? "")}"></div>`);
+    const inp = $("input", el); inp.onchange = () => { v[o.name] = o.type === "number" ? +inp.value : inp.value; saveVals(); };
+    return el;
+  }
+  function drawPanel() {
+    const inp = A.input, f = fps(), misfit = aiFits(t, inp), fitting = inp && misfit ? tools.filter(x => !x.unavailable && !aiFits(x, inp)) : [];
+    const section = t.range === "section" && A.inF != null && A.outF != null && A.outF > A.inF, segs = t.range === "segments";
+    panel.innerHTML = `<p class="ait-desc">${esc(t.description || "")}</p>
+      ${t.unavailable ? `<div class="ait-warn"><b>Not ready on this PC.</b> ${esc(t.unavailable)}</div>` : ""}
+      ${misfit ? `<div class="ait-warn">${esc(misfit)}.${fitting.length ? ` This file works with ${fitting.map(x => `<a href="#/aitools/${x.id}">${esc(x.name)}</a>`).join(", ")}.` : ""}</div>` : ""}
+      <div class="ait-marks"></div><div class="fsec ait-opts"></div>
+      <p class="hint">Saved in the output folder, in Generators › ${esc(t.name)}${t.out && t.out.kind === "dir" ? " (a folder for each run)" : ""}.</p>
+      <div class="row"><button class="btn primary" data-go></button></div>`;
+    const marks = $(".ait-marks", panel);
+    if (t.range === "section" && inp && inp.kind === "video") {
+      marks.innerHTML = `<label class="lbl">Section</label><div class="row wrap"><button class="ghost sm" data-in title="Mark In (I)">Mark In <kbd>I</kbd></button><button class="ghost sm" data-out title="Mark Out (O)">Mark Out <kbd>O</kbd></button><button class="ghost sm" data-clear ${A.inF == null && A.outF == null ? "disabled" : ""}>Clear</button></div>
+        <p class="mono hint" data-testid="ait-section">${section ? `Section ${aiTimecode(A.inF, f)} → ${aiTimecode(A.outF, f)} · ${A.outF - A.inF} frames` : A.inF != null ? `In ${aiTimecode(A.inF, f)}, now mark Out` : "The whole clip (mark In and Out to do only a section)"}</p>`;
+      $("[data-in]", marks).onclick = markIn; $("[data-out]", marks).onclick = markOut;
+      $("[data-clear]", marks).onclick = () => { A.inF = A.outF = null; drawPanel(); drawMarks(); };
+    } else if (segs && inp && inp.kind !== "image") {
+      marks.innerHTML = `<label class="lbl">Pieces</label><div class="row wrap"><button class="ghost sm" data-in title="Mark In (I)">Mark In <kbd>I</kbd></button><button class="ghost sm" data-out title="Mark Out (O)">Mark Out <kbd>O</kbd></button>
+          <button class="ghost sm" data-add ${A.pIn == null || A.pOut == null ? "disabled" : ""}>Add piece</button><button class="ghost sm" data-split title="Cut the file (or the piece under the playhead) in two here">Split at playhead</button>
+          <button class="ghost sm" data-clear ${!A.pieces.length && A.pIn == null && A.pOut == null ? "disabled" : ""}>Clear</button></div>
+        <p class="mono hint" data-testid="ait-marks">${A.pIn != null && A.pOut != null ? `In ${aiClock(A.pIn)} → Out ${aiClock(A.pOut)} · Add piece to keep it` : A.pIn != null ? `In ${aiClock(A.pIn)}, now mark Out`
+          : A.pOut != null ? `Out ${aiClock(A.pOut)}, now mark In` : A.pieces.length ? `${plural(A.pieces.length, "piece")}: each becomes its own file` : "Mark In and Out and Add piece, or Split at playhead to cut the whole file in two"}</p>
+        ${A.pieces.length ? `<ol class="ait-pieces">${A.pieces.map((p, i) => `<li><span class="mono">${aiClock(p.start)} → ${aiClock(p.end)}</span><span class="hint">${(p.end - p.start).toFixed(2)} s</span><button class="ghost sm" data-rm="${i}" aria-label="Remove piece ${i + 1}">Remove</button></li>`).join("")}</ol>` : ""}`;
+      $("[data-in]", marks).onclick = pieceIn; $("[data-out]", marks).onclick = pieceOut; $("[data-add]", marks).onclick = addPiece; $("[data-split]", marks).onclick = splitHere;
+      $("[data-clear]", marks).onclick = () => { A.pieces = []; A.pIn = A.pOut = null; drawPanel(); drawMarks(); };
+      $$("[data-rm]", marks).forEach(b => b.onclick = () => { A.pieces.splice(+b.dataset.rm, 1); drawPanel(); drawMarks(); });
+    }
+    const opts = $(".ait-opts", panel);
+    (t.options || []).filter(applies).forEach(o => opts.append(option(o)));
+    if (!opts.children.length) opts.remove();
+    const go = $("[data-go]", panel), running = jobs.some(j => j.status === "running");
+    go.textContent = busy ? "Working…" : segs ? (A.pieces.length ? `Cut ${plural(A.pieces.length, "piece")}` : "Cut") : section ? "Generate the section" : "Generate";
+    if (running && !busy) go.textContent += " (after the one running)";
+    go.disabled = busy || !inp || !!t.unavailable || !!misfit || (segs && !A.pieces.length);
+    go.title = !inp ? "Give it a file first" : t.unavailable ? "Not ready on this PC" : misfit || (segs && !A.pieces.length ? "Add at least one piece" : "");
+    go.onclick = generate;
+  }
+  async function generate() {
+    const inp = A.input; if (!inp) return;
+    const options = {}; (t.options || []).filter(o => applies(o) && o.type !== "points" && v[o.name] !== undefined).forEach(o => options[o.name] = v[o.name]);
+    const b = { tool: t.id, input_id: inp.id, options };
+    if (t.range === "section" && A.inF != null && A.outF != null && A.outF > A.inF) Object.assign(b, { start: A.inF, end: A.outF });
+    if (t.range === "segments") b.segments = A.pieces.map(p => [+p.start.toFixed(6), +p.end.toFixed(6)]);
+    busy = true; drawPanel();
+    try { const r = await post(GEN + "/jobs", b); toast(`${t.name}: ${r.job.status === "queued" ? "waiting its turn" : "started"}`); await loadJobs(); }
+    catch (e) { toast(aiErr(e), true); }
+    finally { busy = false; drawPanel(); }
+  }
+
+  /* ---- jobs: the one running, and the history */
+  const pctOf = j => j.total ? Math.min(100, Math.round(100 * j.done / j.total)) : j.status === "done" ? 100 : 0;
+  const outUrl = (j, n, preview) => `${GEN}/jobs/${j.id}/output/${n}${preview ? "/preview" : ""}`;
+  const where = j => [j.input_name, j.start != null ? `frames ${j.start}–${j.end - 1}` : "", j.segments ? plural(j.segments.length, "piece") : ""].filter(Boolean).join(" · ");
+  async function loadJobs() {
+    try { jobs = (await api(GEN + "/jobs")).jobs || []; } catch { return; }
+    if (!alive()) return;
+    drawNow(); drawJobs(); drawPanel();
+    clearTimeout(S.aiPoll);
+    if (jobs.some(aiActive)) S.aiPoll = setTimeout(loadJobs, 1500);
+  }
+  const cancel = async id => { try { await post(`${GEN}/jobs/${id}/cancel`, {}); } catch (e) { toast(aiErr(e), true); } loadJobs(); };
+  function drawNow() {
+    const cur = jobs.find(j => j.status === "running") || jobs.find(j => j.status === "queued");
+    now.classList.toggle("hidden", !cur); if (!cur) return;
+    now.innerHTML = `<div class="row"><b>${esc(cur.tool_name)}</b><span class="hint">${esc(where(cur))}</span><span class="sp"></span><button class="ghost sm" data-x>Cancel</button></div>
+      <div class="ait-prog big" role="progressbar" aria-label="The job running" aria-valuenow="${pctOf(cur)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pctOf(cur)}%"></i></div>
+      <span class="mono hint">${esc(cur.status === "queued" ? "Waiting to start" : cur.stage)}${cur.total ? ` · ${cur.done} / ${cur.total}` : ""} · ${pctOf(cur)}%</span>`;
+    $("[data-x]", now).onclick = () => cancel(cur.id);
+  }
+  function drawJobs() {
+    jobsEl.innerHTML = jobs.length ? "" : `<li class="empty">Nothing made yet.</li>`;
+    jobs.forEach(j => {
+      const li = h(`<li class="ait-job ${j.status}"><div class="row"><b>${esc(j.tool_name)}</b><span class="hint">${esc(where(j))}</span><span class="sp"></span>
+          <span class="ait-status ${j.status}">${esc(j.status === "running" ? j.stage : AI_STATUS[j.status] || j.status)}</span>${aiActive(j) ? `<button class="ghost sm" data-x>Cancel</button>` : ""}</div>
+        ${aiActive(j) ? `<div class="ait-prog" role="progressbar" aria-valuenow="${pctOf(j)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pctOf(j)}%"></i></div>` : ""}
+        ${j.error ? `<p class="ait-err">${esc(j.error)}</p>` : ""}${j.note ? `<p class="hint">${esc(j.note)}</p>` : ""}
+        ${j.stats && Object.keys(j.stats).length ? `<p class="mono ait-stats">${esc(aiStats(j.stats))}</p>` : ""}
+        ${(j.outputs || []).length ? `<ul class="ait-outs">${j.outputs.map((o, n) => { const pc = (j.pieces || []).find(x => x.file === o.name); const key = `${j.id}:${n}`;
+          return `<li><div class="row wrap"><span class="mono" title="${esc(o.subfolder + "/" + o.name)}">${esc(o.name)}</span>${pc ? `<span class="hint" data-testid="ait-piece-info" title="${esc(pc.note || "")}">${esc(aiPieceInfo(pc))}${pc.note ? " · " + esc(pc.note) : ""}</span>` : ""}<span class="sp"></span>
+            ${["video", "audio", "image"].includes(o.kind) ? `<button class="ghost sm" data-play="${n}">${playing === key ? "Hide" : o.kind === "image" ? "View" : "Play"}</button>` : o.kind === "text" ? `<a class="ghost sm" href="${outUrl(j, n)}" target="_blank" rel="noreferrer">Open</a>` : ""}
+            ${["video", "image"].includes(o.kind) ? `<button class="ghost sm" data-gallery="${n}" title="Open it in the Gallery's viewer">Gallery</button>` : ""}
+            <a class="ghost sm" href="${outUrl(j, n)}" download="${esc(o.name)}">Download</a></div>
+            ${playing === key ? (o.kind === "audio" ? `<audio src="${outUrl(j, n, true)}" controls autoplay></audio>` : o.kind === "image" ? `<a href="${outUrl(j, n)}" target="_blank" rel="noreferrer"><img class="ait-outplayer" src="${outUrl(j, n, true)}" alt="${esc(o.name)}"></a>` : `<video class="ait-outplayer" src="${outUrl(j, n, true)}" controls autoplay playsinline></video>`) : ""}</li>`; }).join("")}</ul>` : ""}</li>`);
+      const x = $("[data-x]", li); if (x) x.onclick = () => cancel(j.id);
+      $$("[data-play]", li).forEach(b => b.onclick = () => { const key = `${j.id}:${b.dataset.play}`; playing = playing === key ? null : key; drawJobs(); });
+      $$("[data-gallery]", li).forEach(b => b.onclick = () => { const o = j.outputs[+b.dataset.gallery]; const it = { filename: o.name, subfolder: o.subfolder, kind: o.kind, size: o.size || 0, mtime: Date.now() / 1000 }; lightbox(it, [it]); });
+      jobsEl.append(li);
+    });
+  }
+
+  drawDrop(); drawPanel();
+  if (S.aiPick) { const it = S.aiPick; S.aiPick = null; register(it); }
+  else if (A.input) api(`${GEN}/inputs/${A.input.id}/info`).catch(() => setInput(null));   // still there (a restart, a file moved)?
+  else if (store.get("aiInput")) api(`${GEN}/inputs/${store.get("aiInput")}/info`).then(r => { if (alive() && !A.input) setInput(r.input); }).catch(() => store.set("aiInput", null));
+  loadJobs();
+}
+/* a file from the output folder: the Gallery's videos and pictures, and sounds (Music & voices' songs) */
+async function aiPickDialog(done) {
+  const m = $("#modal"); m.innerHTML = ""; m.classList.remove("hidden");
+  const d = h(`<div class="dialog wide ait-pick"><div class="row" style="justify-content:space-between"><h2>Choose a file</h2><button class="icon" data-x>✕</button></div>
+    <div class="chips" role="tablist"><div class="chip on" data-k="video">Videos</div><div class="chip" data-k="image">Pictures</div><div class="chip" data-k="audio">Sounds</div></div>
+    <div class="ait-pgrid"><div class="hint">Reading the Gallery…</div></div></div>`);
+  m.append(d);
+  const close = () => { m.classList.add("hidden"); m.innerHTML = ""; m.onclick = null; };
+  $("[data-x]", d).onclick = close; m.onclick = e => { if (e.target === m) close(); };
+  let files = [];
+  try { files = (await api(GEN + "/files")).files || []; } catch (e) { $(".ait-pgrid", d).innerHTML = `<div class="hint">${esc(aiErr(e))}</div>`; return; }
+  const draw = kind => {
+    $$(".chip", d).forEach(c => c.classList.toggle("on", c.dataset.k === kind));
+    const list = files.filter(f => f.kind === kind), g = $(".ait-pgrid", d);
+    g.innerHTML = list.length ? "" : `<div class="hint">No ${kind === "audio" ? "sounds" : kind === "image" ? "pictures" : "videos"} in the output folder yet.</div>`;
+    list.slice(0, 300).forEach(f => {
+      const el = h(`<button class="ait-pfile" title="${esc((f.subfolder ? f.subfolder + "/" : "") + f.filename)}">${kind === "audio" ? `<span class="ait-pic">♪</span>` : `<img src="${thumbUrl(f, 640)}" loading="lazy" alt="">`}<span>${esc(f.filename)}</span><small>${esc(f.subfolder || "")}</small></button>`);
+      el.onclick = () => { close(); done(f); };
+      g.append(el);
+    });
+  };
+  $$(".chip", d).forEach(c => c.onclick = () => draw(c.dataset.k));
+  draw("video");
 }
 
 /* ------------------------------------------------------------ CHARACTERS */
@@ -1239,7 +1588,10 @@ const boardSaves = {};
 function saveBoard(b, now) {
   clearTimeout(boardSaves[b.id || "new"]);
   if (b.private == null) b.private = S.incog;
-  const go = async () => { const r = await post("/studio/api/boards", b); if (!b.id) b.id = r.id; };
+  const go = async () => {
+    try { const r = await post("/studio/api/boards", b); if (!b.id) b.id = r.id; b.updated = r.updated; b.by = r.by; }
+    catch (e) { if (e.data && e.data.error === "changed") return takeAiChange("board", e.data.board); throw e; }
+  };
   if (now || !b.id) return go();
   boardSaves[b.id] = setTimeout(go, 600);
 }
@@ -2339,7 +2691,41 @@ S.reel = { picks: [], song: "", aspect: "9:16", length: 30, cut: 1.2 };
 const P_CAMS = { wide: "wide establishing shot", pov: "point-of-view shot", "over the shoulder": "over-the-shoulder shot", "high angle": "high-angle shot looking down", static: "static locked-off camera", "push in": "slow dolly push-in toward the subject", "pull back": "slow dolly pull-back revealing the scene", "pan left": "smooth pan left", "pan right": "smooth pan right", tracking: "tracking shot following the subject", orbit: "camera orbits around the subject", "crane up": "crane shot rising up", "crane down": "crane shot descending", handheld: "handheld camera with natural shake", "close-up": "tight close-up", "low angle": "low-angle hero shot", drone: "aerial drone flyover", "slow motion": "slow motion" };
 const P_TONES = ["Cinematic drama", "Dark thriller", "Epic fantasy", "Sci-fi", "Anime", "Music video", "Comedy", "Horror", "Documentary", "Commercial"];
 let projSave = null;
-const saveProject = (pr, now) => { clearTimeout(projSave); const go = () => post("/studio/api/projects", pr).then(r => { if (!pr.id) pr.id = r.id; const k = S.projects.findIndex(x => x.id === pr.id); if (k >= 0) S.projects[k] = pr; navRefresh(); }); if (now || !pr.id) return go(); projSave = setTimeout(go, 700); };
+const saveProject = (pr, now) => { clearTimeout(projSave); const go = () => post("/studio/api/projects", pr).then(r => { if (!pr.id) pr.id = r.id; pr.updated = r.updated; pr.by = r.by; const k = S.projects.findIndex(x => x.id === pr.id); if (k >= 0) S.projects[k] = pr; navRefresh(); })
+  .catch(e => { if (e.data && e.data.error === "changed") return takeAiChange("project", e.data.project); throw e; }); if (now || !pr.id) return go(); projSave = setTimeout(go, 700); };
+/* An AI assistant (Claude and others, through Studio's MCP server) works on the same projects and boards. Its changes are
+   saved with by: "ai"; the page takes them in: when it notices them (/studio/api/stamps, every few seconds), and when a save
+   of its own is refused for being older than one of them (409 with the version as it is now). Nothing the AI did is undone. */
+function takeAiChange(kind, fresh, quiet) {
+  if (!fresh) return;
+  const list = kind === "project" ? S.projects : (S.boards = S.boards || []), mine = list.find(x => x.id === fresh.id);
+  if (mine) { Object.keys(mine).forEach(k => delete mine[k]); Object.assign(mine, fresh); } else list.push(fresh);
+  S.spFlush = null; spDirty = false;                  // the editor's pending save would put the old text back
+  // the refused save was yours if you'd just typed or picked something; else it was the page keeping itself in step
+  const yours = Date.now() - (S.lastEdit || 0) < 15000, what = kind === "project" ? "project" : "storyboard";
+  if (!quiet) toast(yours ? `An AI assistant changed this ${what} while you were editing it: here it is as it is now. Your last change wasn't saved: make it again.`
+    : `An AI assistant updated this ${what}`, yours);
+  route();
+}
+["input", "change"].forEach(ev => document.addEventListener(ev, () => { S.lastEdit = Date.now(); }, true));   // your own edits
+let aiWatchAt = 0;
+async function watchAiChanges() {
+  if (document.hidden || Date.now() - aiWatchAt < 3500) return;
+  aiWatchAt = Date.now();
+  let st; try { st = await api("/studio/api/stamps"); } catch { return; }
+  const newer = (list, stamps) => list.filter(x => { const t = stamps[x.id]; return t && t[1] === "ai" && t[0] > (x.updated || 0) + 1e-6; });
+  const newIds = Object.entries(st.projects || {}).filter(([id, t]) => t[1] === "ai" && !S.projects.some(x => x.id === id)).map(([id]) => id);
+  const prs = newer(S.projects, st.projects || {}), bds = newer(S.boards || [], st.boards || {});
+  if (!prs.length && !bds.length && !newIds.length) return;
+  const r = hashParts(), open = r.page === "projects" && r.arg && prs.some(x => x.id === r.arg);
+  if (open && spDirty) return;                         // typing in the screenplay: its save will meet the AI's version (409)
+  await Promise.all([loadProjects(), loadBoards(), loadChars()]);
+  if (open || (r.page === "projects" && !r.arg) || (r.page === "storyboard" && bds.length)) {
+    if (open) toast("An AI assistant updated this project", false);
+    route();
+  }
+}
+setInterval(watchAiChanges, 4000);
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 // 'RAY MERCER' -> 'Ray Mercer' (like screenplay.nice_name)
 const niceName = s => s && s === s.toUpperCase() ? s.toLowerCase().replace(/(^|[\s'’-])(\p{L})/gu, (m, a, c) => a + c.toUpperCase()) : (s || "");
@@ -2828,7 +3214,7 @@ async function locationPicture(pr, l, after) {
   if (!app) return toast("The Image app is missing", true);
   await saveProject(pr, true);
   const L = layout(app), v = buildValues(app), ref = L.refs.find(r => r.media.kind === "image");
-  const prompt = [`${l.full || niceName(l.name)}${l.look ? ": " + l.look : ""}`, l.lighting && `${l.lighting} light`, l.time, l.atmosphere, "an empty set, no people, film still"].filter(Boolean).join(". ");
+  const prompt = [`${l.full || niceName(l.name)}${l.look ? ": " + l.look : ""}`, l.lighting && (/\blight/i.test(l.lighting) ? l.lighting : `${l.lighting} light`), l.time, l.atmosphere, "an empty set, no people, film still"].filter(Boolean).join(". ");
   try {
     const j = await post(`/studio/api/projects/${pr.id}/locations/${l.id}/picture`, { private: !!pr.private, values: v, prompt, prompt_key: L.prompt?.key, ref_key: ref?.media.key, ref_toggle_key: ref?.toggle?.key, seed_keys: app.inputs.filter(i => i.kind === "seed").map(i => i.key), target: runTarget() });
     toast(`Picturing ${l.full}…`);
@@ -4404,7 +4790,7 @@ async function checkUnfinished() {
   if (S.appIdx >= S.apps.length) S.appIdx = 0;
   try { const a = await api("/studio/api/private/status"); S.pw = a; setIncog(a.unlocked && store.get("incog", true), true); } catch { }
   migrateLocalValues();
-  await Promise.all([loadChars(), loadProjects(), loadBoards()]);
+  await Promise.all([loadChars(), loadProjects(), loadBoards(), loadAiTools()]);
   buildNav();
   connect(); pollQueue(); sysStats(); setInterval(sysStats, 15000); setInterval(pollQueue, 5000); sysMon(); setInterval(sysMon, 3000); machinesMon(); setInterval(machinesMon, 8000);
   loadWorkers().then(pollRemote); setInterval(pollRemote, 3000); setInterval(loadWorkers, 60000);

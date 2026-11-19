@@ -1,6 +1,7 @@
 """Writes sandbox/models.json and sandbox/inputs.json.
 
-models.json: every model file the workflows and Studio's code name, by ComfyUI folder. The sandbox
+models.json: every model file the workflows and Studio's code name, by ComfyUI folder (and the default model each AI
+tool's generator.json asks for). The sandbox
 creates each one as an empty placeholder, so the model pickers and the job checks list the same files as the PC.
 inputs.json: the example pictures, videos and sounds the apps open with (their default input files); the sandbox makes
 each from its sample media, so every app can be queued with its default values.
@@ -40,6 +41,12 @@ def main():
                 add(list(spec.values())[0][0], vals[0])
             if n.get("type") in loaders and isinstance(vals, list) and vals and isinstance(vals[0], str) and vals[0]:
                 inputs[vals[0].replace(" [input]", "")] = loaders[n["type"]]
+    # the AI tools (Production › AI tools): the model a tool's manifest asks for by default
+    for man in glob.glob(os.path.join(REPO, "ComfyUI-Studio", "ai_tools", "*", "generator.json")):
+        with open(man, encoding="utf-8") as f:
+            spec = ((json.load(f).get("needs") or {}).get("model")) or {}
+        if spec.get("folder") and spec.get("default"):
+            add(spec["folder"], spec["default"])
     for py in glob.glob(os.path.join(REPO, "ComfyUI-Studio", "**", "*.py"), recursive=True) + \
             glob.glob(os.path.join(REPO, "builders", "*.py")):
         with open(py, encoding="utf-8") as f:
@@ -52,7 +59,7 @@ def main():
         for name in re.findall(r'"([\w./ -]+\.(?:safetensors|gguf))"', src):
             low = name.lower()
             folder = ("loras" if "lora" in low else "vae" if "vae" in low else
-                      "text_encoders" if re.search(r"qwen3vl|qwen_3|umt5|t5xxl|gemma|clip_|llava|mistral|text_enc", low) else
+                      "text_encoders" if re.search(r"qwen3vl|qwen_3|umt5|t5xxl|gemma|clip_|llava|mistral|text_enc|_ace15\b", low) else
                       "diffusion_models")
             if not any(name in v for v in found.values()):
                 add(folder, name)

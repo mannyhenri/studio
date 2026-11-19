@@ -31,6 +31,55 @@ Directing never changes the file: directing a set camera makes a Studio camera f
 
 Studio doesn't run Blender: a set made in Blender (or any 3D app) comes into Previz as a .glb.
 
+## MCP: Studio for AI assistants
+
+`studio_mcp.py` is Studio's MCP server, with no packages beyond Python's own: started by an assistant over stdio, or served
+by Studio at `/studio/mcp` (`mcp_http.py`: MCP's Streamable HTTP transport, JSON answers, no sessions; a request with a
+foreign `Origin` is refused). Each tool calls Studio's HTTP API (`http()` sends `X-Studio-Client: ai`); `handle()` answers
+one JSON-RPC message for both transports. The tools from `# v3` on are registered with `@tool(name, description,
+properties, required)`; the earlier ones (generate, boards, Seedance finals…) are unchanged.
+
+A project's steps that the page does in the browser are done on the server for an assistant, the same way
+(`projectops.py`): the screenplay replaced (the old text kept as a draft) and broken down again keeping the shots' choices,
+its places becoming locations and its parts cast (`sync_locations`, `sync_cast`: the page's `syncLocations`, `syncCast`),
+a part cast, a location's form (a rename goes into the scene headings), a shot's camera, length or frame, the takes drafted
+with the Video app (`take_values`: the page's `renderShot`) and resolved from ComfyUI's history, a pick, the score, the
+voice lines, the film (`_edit_job`). The picture routes (`characters/{id}/portrait`, `locations/{id}/picture`,
+`projects/{id}/keyframes`) work out the Image app's values, the prompt and the references themselves when the page doesn't
+send them. What an assistant saves is marked `by: "ai"`; the page watches `/studio/api/stamps` and takes it in, and a page's
+save made before it is refused with 409 and the project as it is now (`projects.stale_over_ai`), so nothing is undone.
+
+## AI tools (Production › AI tools)
+
+Film Engine's Generators, moved into Studio: **AI Depth**, **AI Slow-Mo**, **AI Stems**, **AI Subtitles**, **AI Lossless
+Cut** and **One-Click Master**, each a page of its own (`#/aitools/<id>`, listed in the Production menu and, as shortcuts, in Home's
+Your apps; the Gallery's viewer sends a file there with ✦ AI tools). `generators.py` is the host (a port of Film Engine's
+`backend/lib/generators.js` and its routes, under `/studio/api/generators/`); each tool is an engine in `ai_tools/<name>/`
+with Film Engine's `generator.json` manifest, so a Film Engine engine runs here as it is (more folders of them:
+`STUDIO_GENERATORS_DIR`).
+
+- **An engine** is a command-line program run with ComfyUI's Python, in its own process, one job at a time:
+  `engine.py <file> [--start F --end F | --segments S-E,...] [its options] --out <file or folder> --progress <json>`. It
+  reports by rewriting the progress file: `{stage, done, total, out | outs, note, stats, pieces, prompt_id, error}`
+  (`done` and `error` end it). `ai_tools/studio_engine.py` has what Studio's engines share: that contract, ffmpeg, PyAV,
+  subtitles, and ComfyUI (`Comfy.run`: a graph queued on this ComfyUI like any render, named after the tool in the queue,
+  its file read from the output folder; Cancel takes it off the queue or stops it).
+- **A manifest** says what the page shows and what the engine may be given: `id`, `name`, `order`, `icon`, `short` (the
+  menu's line), `description`, `accepts` (`video`, `audio`, `image`; `audio_ok`, `image_ok`, `needs_sound`), `range`
+  (`section` in frames, `whole`, or `segments` in seconds), `out` (`kind` file or dir, `ext`, `ext_for` a kind), `options`
+  (`select`, `slider`, `number`, `checkbox`, `text`; `when` shows one only for some choices; `hint`). Studio adds `needs`:
+  `ffmpeg`, `comfy_nodes`, a `model` (a ComfyUI models folder and a name pattern: the file found is passed as
+  `STUDIO_MODEL`) and `python_any` packages with how to `install` them. A tool missing any of it is listed as not ready,
+  with the reason.
+- **Files**: a Gallery file, a sound from the output folder, or an upload (streamed to `input/studio/ai-tools/`, any
+  size). ProRes and the like play from an H.264 copy made for the page only. Incognito files aren't taken yet.
+- **Results** land in the output folder under `Generators/<tool>/` (a folder per run for Stems, Subtitles and Lossless
+  Cut), so the pictures and videos are in the Gallery too. The jobs are kept in `studio_data/generators/state.json`; a
+  job still running when ComfyUI stops is marked interrupted.
+- **On this PC**: AI Slow-Mo uses FILM (`frame_interpolation/film_net_fp16.safetensors`, as Smooth motion does), AI Depth a
+  Depth Anything 3 model in `models/geometry_estimation/`, AI Stems and AI Subtitles need `demucs` and `faster-whisper`
+  in ComfyUI's Python. AI Lossless Cut and One-Click Master need only ffmpeg.
+
 ## Models
 
 Models (LoRAs, other downloads) and Settings › Models on this PC list only model files that are really there: an empty file (a placeholder, or a download that never started) or a download still in progress (`.part`, `.tmp`…) isn't listed.

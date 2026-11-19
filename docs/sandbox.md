@@ -10,22 +10,32 @@ anywhere.
 npm run sandbox
 ```
 
-The first time, this runs `scripts/setup-linux.sh`: a Python environment in `.venv` (aiohttp, numpy, pillow, av, pytest,
-ruff; no torch), ffmpeg (the system's, or the imageio-ffmpeg build if there is none) and the sample media. Then it lays out
-a fresh ComfyUI folder tree in `sandbox/run/`, starts Studio inside the stand-in ComfyUI, seeds the demo data and opens
-**http://localhost:8188/studio**. Ctrl+C stops it. Only `pip` (PyPI) is contacted, and only during setup.
+That is the one way to run the app. The first time (and again whenever `sandbox/requirements.txt` changes, or when a
+setup stopped half-way), it runs `scripts/setup-linux.sh`: a Python environment in `.venv` (aiohttp, numpy, pillow, av,
+pytest, ruff; no torch), ffmpeg (the system's, or the imageio-ffmpeg build if there is none) and the sample media. Then it
+lays out a fresh ComfyUI folder tree in `sandbox/run/`, starts Studio inside the stand-in ComfyUI, seeds the demo data and
+opens **http://localhost:8188/studio** in your browser by itself. Ctrl+C stops it. Only `pip` (PyPI) is contacted, and
+only during setup.
+
+The browser opens on a desktop (Linux with a display, macOS, Windows, WSL: the Windows browser). Where there's no desktop
+to open it in (ssh, a container), it says so and prints the address. If a sandbox is already running on the port,
+`npm run sandbox` opens that one in the browser instead of starting another; if something else holds the port, it uses the
+next free one and says which.
 
 | Command | What it does |
 |---|---|
-| `npm run sandbox` | Setup if needed, fresh demo data, start, open the browser (`python3 scripts/sandbox.py demo --open`) |
-| `python3 scripts/sandbox.py demo` | Fresh demo data and start (add `--open` to open the browser, `--port` for another port) |
-| `python3 scripts/sandbox.py empty` | Start with no data at all: the Gallery empty too |
-| `python3 scripts/sandbox.py serve` | Start on the data already in `sandbox/run/` |
-| `python3 scripts/sandbox.py jobs` | The jobs Studio sent, newest first: app, status, result files and sizes |
-| `python3 scripts/sandbox.py last-job` | The last job: app, models, result size, prompt, node types |
+| `npm run sandbox` | Setup if needed, fresh demo data, start, open Studio in the browser |
+| `npm run sandbox -- --keep` | The same, on the data left from last time (nothing is reset) |
+| `npm run sandbox -- --empty` | The same, with no data at all: the Gallery empty too |
+| `npm run sandbox -- --port 8190` | On another port |
+| `npm run sandbox -- --no-open` | Without opening the browser (or set `SANDBOX_NO_BROWSER=1`) |
+| `npm run sandbox:jobs` | The jobs Studio sent, newest first: app, status, result files and sizes |
+| `npm run sandbox:last-job` | The last job: app, models, result size, prompt, node types |
+| `npm run sandbox:check` | `pytest tests/unit tests/sandbox` and `ruff check .` |
+| `npm run test:mcp` | The MCP server's checks, each by name (protocol, every tool called, a story to a film, HTTP, the page): about 4 min |
+| `npm run test:generators` | The AI tools' checks, each by name (every tool with every setting, outputs checked): about 4 min |
 | `python3 scripts/sandbox.py queue-bad` | Queues a job that needs a model the sandbox doesn't have: refused with ComfyUI's “Value not in list” |
 | `python3 scripts/sandbox.py reset` | Deletes `sandbox/run/` and `sandbox/jobs/` |
-| `python3 scripts/sandbox.py check` | `pytest tests/unit tests/sandbox` and `ruff check .` |
 | `python3 scripts/studio-call.py <tool> '<json>'` | Calls one of Studio's MCP tools through the real connector (`--list` lists them) |
 
 ## The demo data
@@ -101,6 +111,43 @@ storyboard shot's first frame or a location shot; 🎬 Movie renders the camera'
 the same set exported without cameras (24 camera rigs, 23 cameras listed as missing). The viewer needs WebGL: in a browser
 without a GPU it runs on the software renderer, slowly.
 
+## Trying the AI tools
+
+**Production › AI tools** has Film Engine's six Generators (each one a page, also one click away from Home's **Your
+apps**; the Gallery's viewer sends a video or a picture there with **✦ AI tools**): **AI Depth**, **AI Slow-Mo**, **AI Stems**, **AI Subtitles**, **AI Lossless Cut** and
+**One-Click Master**. Give a tool a file (**From the Gallery…**, which lists the output folder's sounds too, or drop or
+choose one: it's uploaded, any size), set it and **Generate**. For example: AI Slow-Mo on `diner-wide.mp4`, I at 0:00.5 and
+O at 0:01.5, 4×; AI Lossless Cut on `diner-ray.mp4`, **Split at playhead** twice, Smart cut; One-Click Master on `song.wav`
+(Sounds), Apple Music. The History keeps every run, with what it measured (a master's loudness and true peak, a cut
+piece's real start) and its files to play, open in the Gallery or download. Here:
+
+- **AI Slow-Mo** and **AI Depth** queue their GPU work on the stand-in ComfyUI like any render (labelled "AI Slow-Mo ·
+  diner-wide.mp4" in the queue and in `npm run sandbox:jobs`), so their graphs are checked against ComfyUI 0.45's FILM and
+  Depth Anything 3 nodes; the stand-in answers with grey clips, so the results are placeholders (a depth of field of a grey
+  depth map blurs evenly).
+- **AI Lossless Cut** and **One-Click Master** are ffmpeg only: their results are real.
+- **AI Stems** and **AI Subtitles** run local models (Demucs, Whisper) that the sandbox stands in for
+  (`sandbox/engine_stubs/`): a tone for each stem, a placeholder transcript, with the real engines' command line.
+
+## Trying the MCP server (Claude and other assistants)
+
+The sandbox prints its MCP address when it starts: **http://localhost:8188/studio/mcp**. Claude Code started in this
+folder picks it up from `.mcp.json`; any other assistant that speaks MCP over HTTP takes the URL; Claude Desktop starts
+`ComfyUI-Studio/studio_mcp.py` with `STUDIO_URL=http://localhost:8188`. Then ask for a film, e.g. *"Write a three-scene
+screenplay about a lighthouse keeper and her grandson on a stormy night, then make the characters and the locations, with
+their pictures, and the storyboard"*, with the app open on Projects: the project appears, and each page shows what the
+assistant does as it does it. Without an assistant, `python3 scripts/studio-call.py <tool> '<json>'` calls the same tools
+through the real connector (`--list` lists the 61 of them), for example:
+
+```sh
+python3 scripts/studio-call.py studio_project_new '{"screenplay_path": "screenplays/The Glass Harbour.pdf"}'
+python3 scripts/studio-call.py studio_cast '{"project": "The Glass Harbour"}'
+python3 scripts/studio-call.py studio_character_picture '{"character": "Ray Mercer"}'
+python3 scripts/studio-call.py studio_storyboard_frames '{"project": "The Glass Harbour"}'
+```
+
+Here the pictures and clips are the stand-in's grey placeholders (`studio_view` shows them to the assistant all the same).
+
 ## How it works
 
 `sandbox/fake_comfy.py` is the stand-in ComfyUI. It is not a mock inside Studio: Studio's node pack loads into it unchanged
@@ -129,16 +176,51 @@ and talks to it over HTTP on port 8188, like inside ComfyUI.
   math nodes, LTX's latent upsampler). A job takes about a second (`SANDBOX_RENDER_SECONDS`).
 - **Every job** is saved to `sandbox/jobs/` as JSON: its graph, app, label, outputs and status (refused jobs as
   `refused-*.json` with ComfyUI's error).
+- **MCP** (`ComfyUI-Studio/studio_mcp.py` over stdio, `mcp_http.py` at `/studio/mcp`): the tools call Studio's HTTP API, and
+  a project's steps the page does in the browser (the screenplay broken down again, the cast and the locations following it,
+  the pictures' prompts and references, the takes, the sound, the film) are done on the server for them (`projectops.py`).
+  What an assistant saves is marked `by: "ai"`: the page takes it in (`/studio/api/stamps`) and a page's older save is refused (409).
+- **AI tools** (`ComfyUI-Studio/generators.py` and an engine per tool in `ComfyUI-Studio/ai_tools/`): each engine runs
+  in its own process with the server's Python, one job at a time. `sandbox/engine_stubs/` stands in for Demucs and
+  faster-whisper on the engines' path only (`STUDIO_GENERATORS_PYTHONPATH`); `sandbox/models.json` has AI Depth's Depth
+  Anything 3 model (`da3_mono_large.safetensors`, from its `generator.json`) and Slow-Mo's FILM model.
 - **Isolation**: the server runs with `HOME=sandbox/run/home`, so nothing Studio writes (Studio Sets, git settings,
   backups) lands outside the sandbox. Windows-only parts (keep awake, the Windows event log, GPU counters) already skip
   themselves on Linux; Topaz shows “Not installed on this computer”.
 
 ## Tests
 
+Two suites can be run on their own, each check listed by name with PASSED or FAILED, and a last line that says whether all
+of them passed:
+
+```sh
+npm run test:mcp              # Studio's MCP server (AI assistants)
+npm run test:generators       # the AI tools (Film Engine's Generators)
+```
+
+They run in sandboxes of their own (nothing to set up). The checks that open Studio in a headless browser use this
+computer's Chrome, Chromium, Edge or Brave, found wherever it's installed (the PATH, /Applications on a Mac, Program Files
+on Windows, a Playwright download: `sandbox/find_chrome.py`); the suite says which one at the start. Without one they're
+listed as skipped, and the last line says so; `STUDIO_TEST_CHROME=/path/to/chrome` picks a browser.
+
+To check **a real Studio** (ComfyUI running on the PC, any computer on the network), give its address:
+
+```sh
+npm run test:mcp -- --url http://192.168.1.20:8188
+npm run test:generators -- --url http://192.168.1.20:8188            # readiness of each tool, Lossless Cut and Master for real
+npm run test:generators -- --url http://192.168.1.20:8188 --render   # and the four that use its GPU or a local model
+```
+
+Against a real Studio nothing renders unless `--render`; the MCP checks make a project "MCP check …" and delete it (with the
+character made for it), the generator checks upload three small files named `studio-test-…` and leave their results in the
+Gallery under Generators/. A tool that isn't ready there fails its readiness check with the reason and what to install.
+
+
 | Suite | What it checks |
 |---|---|
-| `python -m pytest tests/unit` | The stand-in's validation against the real node definitions, result sizes from graphs, the sample media, Studio's own logic scripts that need no GPU machine, and reading screenplays (Fountain, and PDFs: the real one in `screenplays/` plus layouts written by the test), finding the cameras in a .glb (`tests/glbfile.py` writes small ones; the two sets in `3D sets/` too), and Previz's framing, moves and lighting maths (`tests/unit/previz/*.test.mjs`, run with node; skipped without it) |
-| `python -m pytest tests/sandbox` | The sandbox end to end: the pack loads and every route answers, no Windows-only program starts, ComfyUI's API, uploads, refusals, websocket messages and history, every app with its default values, demo and empty data, the MCP call tool, Studio's `test_prune.py` against the stand-in, Previz sets and props (.glb upload, add by path, what was directed, Incognito, the vendored three.js), and the pages and directing a shot in Previz in headless Chrome with no console errors (skipped without Chrome) |
+| `python -m pytest tests/unit` | The stand-in's validation against the real node definitions, result sizes from graphs, the sample media, Studio's own logic scripts that need no GPU machine, and reading screenplays (Fountain, and PDFs: the real one in `screenplays/` plus layouts written by the test), finding the cameras in a .glb (`tests/glbfile.py` writes small ones; the two sets in `3D sets/` too), Previz's framing, moves and lighting maths (`tests/unit/previz/*.test.mjs`, run with node; skipped without it), the MCP protocol (`test_mcp_protocol.py`: initialize, tools' schemas, errors, stdio with Studio down), and the AI tools: their host (manifests, readiness, the command line, jobs, Cancel: `test_generators.py`, with the fake engines in `tests/fixtures/generators/`) and their engines (Lossless Cut's keyframe and frame-exact smart cuts, One-Click Master's loudness and true peak, Depth's effects, Stems and Subtitles with the stand-ins: `test_ai_tool_engines.py`), and a project's steps for MCP (`test_projectops.py`: locations and cast following the screenplay, references, takes' values) |
+| `python -m pytest tests/sandbox` | The sandbox end to end: the pack loads and every route answers, no Windows-only program starts, ComfyUI's API, uploads, refusals, websocket messages and history, every app with its default values, demo and empty data, the MCP call tool, Studio's `test_prune.py` against the stand-in, Previz sets and props (.glb upload, add by path, what was directed, Incognito, the vendored three.js), the pages and directing a shot in Previz in headless Chrome with no console errors (skipped without Chrome), the MCP server end to end (`test_mcp.py`: every tool's schema, a story to a film with nothing but MCP calls and the jobs it sends, the screenplay changed and everything following, a file imported, the AI tools and the gallery, the same tools over HTTP, a page never saving over an assistant's change and showing it by itself; `test_mcp_tools.py`: every tool the server lists, called and checked), the AI tools with every setting (`test_generators_matrix.py`: each tool's defaults on each kind of file and each choice of each option, from their generator.json, outputs fetched and checked), and the AI tools end to end on a sandbox of their own (`test_ai_tools.py`: every tool through the API and the stand-in ComfyUI, their results in the Gallery, no work file left, Cancel, the Production menu and a clip slowed from the page in Chrome) |
+| `tests/sandbox/test_mcp_live.py`, `test_generators_live.py` | A real Studio, with `--url` (above); skipped otherwise |
 | `python -m ruff check .` | Syntax errors, undefined names and unused imports |
 | `STUDIO_LIVE=1 python -m pytest tests/live` | The live tests against the real GPU machines; skipped in the sandbox |
 
@@ -147,4 +229,4 @@ and talks to it over HTTP on port 8188, like inside ComfyUI.
 Nothing renders: the results are placeholders, so judge the graphs Studio builds, the files it writes and the app, not the
 pictures. The node definitions are ComfyUI 0.45.0's; the PC may have a newer ComfyUI or other packs (capture the PC's own
 with `curl http://<pc>:8188/object_info > sandbox/object_info.json` to match it exactly). Topaz, Civitai, Hugging
-Face and the Mac workers are not there.
+Face and the Mac workers are not there. The AI tools' local models (Demucs, Whisper) are stand-ins.
